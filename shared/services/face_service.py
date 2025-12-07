@@ -42,6 +42,7 @@ def build_face_callbacks(
     preset_manager: PresetManager,
     global_settings: Dict[str, Any],
     models: List[str],
+    shared_state: gr.State = None,
 ):
     defaults = face_defaults(models)
 
@@ -82,12 +83,14 @@ def build_face_callbacks(
     def safe_defaults():
         return [defaults[k] for k in FACE_ORDER]
 
-    def set_face_global(val):
+    def set_face_global(val, state=None):
         global_settings["face_global"] = bool(val)
         preset_manager.save_global_settings(global_settings)
-        return gr.Markdown.update(value="✅ Global face restoration updated")
+        if state:
+            state["seed_controls"]["face_strength_val"] = global_settings.get("face_strength", 0.5)
+        return gr.Markdown.update(value="✅ Global face restoration updated"), state or {}
 
-    def cache_strength(strength_val: float):
+    def cache_strength(strength_val: float, state=None):
         try:
             strength_num = float(strength_val)
         except Exception:
@@ -95,7 +98,9 @@ def build_face_callbacks(
         strength_num = max(0.0, min(1.0, strength_num))
         global_settings["face_strength"] = strength_num
         preset_manager.save_global_settings(global_settings)
-        return gr.Markdown.update(value=f"✅ Face strength set to {strength_num}")
+        if state:
+            state["seed_controls"]["face_strength_val"] = strength_num
+        return gr.Markdown.update(value=f"✅ Face strength set to {strength_num}"), state or {}
 
     return {
         "defaults": defaults,
@@ -104,8 +109,8 @@ def build_face_callbacks(
         "save_preset": save_preset,
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
-        "set_face_global": set_face_global,
-        "cache_strength": cache_strength,
+        "set_face_global": lambda *args: set_face_global(*args[:-1], args[-1]) if len(args) > 1 else set_face_global(args[0]),
+        "cache_strength": lambda *args: cache_strength(*args[:-1], args[-1]) if len(args) > 1 else cache_strength(args[0]),
     }
 
 

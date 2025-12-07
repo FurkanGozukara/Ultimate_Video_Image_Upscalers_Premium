@@ -245,10 +245,9 @@ def build_seedvr2_callbacks(
     runner: Runner,
     run_logger: RunLogger,
     global_settings: Dict[str, Any],
-    seed_controls_cache: Dict[str, Any],
+    shared_state: gr.State,
     output_dir: Path,
     temp_dir: Path,
-    mode_state: Dict[str, bool],
 ):
     defaults = seedvr2_defaults()
 
@@ -286,17 +285,19 @@ def build_seedvr2_callbacks(
             return gr.Markdown.update(value="⏹️ Cancel requested"), ""
         return gr.Markdown.update(value="No active process"), ""
 
-    def _auto_res_from_input(input_path: str):
+    def _auto_res_from_input(input_path: str, state: Dict[str, Any]):
         """
         Recalculate target/max resolution and chunk estimate when input changes.
         """
-        model_name = seed_controls_cache.get("current_model") or defaults.get("dit_model")
-        model_cache = seed_controls_cache.get("resolution_cache", {}).get(model_name, {})
+        seed_controls = state.get("seed_controls", {})
+        model_name = seed_controls.get("current_model") or defaults.get("dit_model")
+        model_cache = seed_controls.get("resolution_cache", {}).get(model_name, {})
         if not input_path:
             return (
                 gr.Slider.update(),
                 gr.Slider.update(),
                 gr.Markdown.update(value="Provide an input to auto-calc resolution/chunks."),
+                state
             )
         p = Path(normalize_path(input_path))
         if not p.exists():
@@ -304,14 +305,15 @@ def build_seedvr2_callbacks(
                 gr.Slider.update(),
                 gr.Slider.update(),
                 gr.Markdown.update(value="Input path not found; keeping current resolution."),
+                state
             )
-        auto_res = model_cache.get("auto_resolution", seed_controls_cache.get("auto_resolution", True))
-        enable_max = model_cache.get("enable_max_target", seed_controls_cache.get("enable_max_target", True))
-        ratio_down = model_cache.get("ratio_downscale", seed_controls_cache.get("ratio_downscale", False))
-        chunk_size = float(model_cache.get("chunk_size_sec", seed_controls_cache.get("chunk_size_sec", 0) or 0))
-        chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls_cache.get("chunk_overlap_sec", 0) or 0))
-        target_res = int(model_cache.get("resolution_val") or seed_controls_cache.get("resolution_val") or defaults["resolution"])
-        max_target_res = int(model_cache.get("max_resolution_val") or seed_controls_cache.get("max_resolution_val") or defaults["max_resolution"])
+        auto_res = model_cache.get("auto_resolution", seed_controls.get("auto_resolution", True))
+        enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
+        ratio_down = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
+        chunk_size = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
+        chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
+        target_res = int(model_cache.get("resolution_val") or seed_controls.get("resolution_val") or defaults["resolution"])
+        max_target_res = int(model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val") or defaults["max_resolution"])
 
         dims = get_media_dimensions(str(p))
         msg_lines = []
@@ -325,7 +327,7 @@ def build_seedvr2_callbacks(
             if enable_max and max_target_res and max_target_res > 0:
                 computed = min(computed, max_target_res)
             new_res = int((computed // 16) * 16 or computed)
-            seed_controls_cache["resolution_val"] = new_res
+            state["seed_controls"]["resolution_val"] = new_res
             msg_lines.append(f"Auto-resolution: input {w}x{h} → target {new_res} (max {max_target_res})")
         else:
             msg_lines.append("Auto-resolution disabled; no change.")
@@ -348,6 +350,7 @@ def build_seedvr2_callbacks(
             gr.Slider.update(value=new_res),
             gr.Slider.update(value=max_target_res),
             gr.Markdown.update(value="\n".join(msg_lines)),
+            state
         )
 
     def _resolve_input_path(file_upload: Optional[str], manual_path: str, batch_enable: bool, batch_input: str) -> str:
@@ -357,13 +360,16 @@ def build_seedvr2_callbacks(
             return str(file_upload)
         return manual_path
 
-    def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False):
+    def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False, state: Dict[str, Any] = None):
+        state = state or {"seed_controls": {}, "operation_status": "ready"}
+        state["operation_status"] = "running"
+        seed_controls = state.get("seed_controls", {})
         settings_dict = _seedvr2_dict_from_args(list(args))
         settings = {**defaults, **settings_dict}
         guardrail_msgs: List[str] = []
         settings["cuda_device"] = _expand_cuda_spec(settings.get("cuda_device", ""))
-        seed_controls_cache["current_model"] = settings.get("dit_model", defaults.get("dit_model"))
-        model_cache = seed_controls_cache.get("resolution_cache", {}).get(settings["dit_model"], {})
+        state["seed_controls"]["current_model"] = settings.get("dit_model", defaults.get("dit_model"))
+        model_cache = seed_controls.get("resolution_cache", {}).get(settings["dit_model"], {})
         meta = model_meta_map().get(settings.get("dit_model"))
         if meta:
             if settings.get("batch_size") == defaults["batch_size"]:
@@ -416,10 +422,10 @@ def build_seedvr2_callbacks(
 
         input_path = _resolve_input_path(uploaded_file, settings["input_path"], settings["batch_enable"], settings["batch_input_path"])
         settings["input_path"] = normalize_path(input_path)
-        seed_controls_cache["last_input_path"] = settings["input_path"]
+        state["seed_controls"]["last_input_path"] = settings["input_path"]
 
         if not settings["input_path"] or not Path(settings["input_path"]).exists():
-            return ("❌ Input path missing or not found", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None))
+            return ("❌ Input path missing or not found", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
 
         if settings.get("batch_enable") and settings.get("batch_output_path"):
             settings["output_override"] = settings["batch_output_path"]
@@ -427,40 +433,40 @@ def build_seedvr2_callbacks(
         settings["batch_mode"] = bool(settings.get("batch_enable"))
 
         # Apply global output hints for PNG padding / skip-cap if user set them in Output tab
-        settings["png_padding"] = seed_controls_cache.get("png_padding_val", 5)
-        settings["png_keep_basename"] = seed_controls_cache.get("png_keep_basename_val", True)
+        settings["png_padding"] = seed_controls.get("png_padding_val", 5)
+        settings["png_keep_basename"] = seed_controls.get("png_keep_basename_val", True)
         if settings.get("skip_first_frames", defaults["skip_first_frames"]) == defaults["skip_first_frames"]:
-            if seed_controls_cache.get("skip_first_frames_val") is not None:
-                settings["skip_first_frames"] = seed_controls_cache.get("skip_first_frames_val")
+            if seed_controls.get("skip_first_frames_val") is not None:
+                settings["skip_first_frames"] = seed_controls.get("skip_first_frames_val")
         if settings.get("load_cap", defaults["load_cap"]) == defaults["load_cap"]:
-            if seed_controls_cache.get("load_cap_val") is not None:
-                settings["load_cap"] = seed_controls_cache.get("load_cap_val")
+            if seed_controls.get("load_cap_val") is not None:
+                settings["load_cap"] = seed_controls.get("load_cap_val")
 
         if settings["output_format"] == "auto":
             settings["output_format"] = None
 
         if not _ffmpeg_available():
-            return ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None))
+            return ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
 
         face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))
         face_strength = float(global_settings.get("face_strength", 0.5))
         settings["face_restore_global"] = face_apply
 
         # Apply Resolution tab cached values when available
-        if seed_controls_cache.get("resolution_val") is not None:
-            settings["resolution"] = seed_controls_cache["resolution_val"]
-        if seed_controls_cache.get("max_resolution_val") is not None:
-            settings["max_resolution"] = seed_controls_cache["max_resolution_val"]
-        auto_res = model_cache.get("auto_resolution", seed_controls_cache.get("auto_resolution", True))
-        enable_max_target = model_cache.get("enable_max_target", seed_controls_cache.get("enable_max_target", True))
-        chunk_size_sec = float(model_cache.get("chunk_size_sec", seed_controls_cache.get("chunk_size_sec", 0) or 0))
-        chunk_overlap_sec = float(model_cache.get("chunk_overlap_sec", seed_controls_cache.get("chunk_overlap_sec", 0) or 0))
+        if seed_controls.get("resolution_val") is not None:
+            settings["resolution"] = seed_controls["resolution_val"]
+        if seed_controls.get("max_resolution_val") is not None:
+            settings["max_resolution"] = seed_controls["max_resolution_val"]
+        auto_res = model_cache.get("auto_resolution", seed_controls.get("auto_resolution", True))
+        enable_max_target = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
+        chunk_size_sec = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
+        chunk_overlap_sec = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
         if chunk_size_sec > 0 and chunk_overlap_sec >= chunk_size_sec:
             chunk_overlap_sec = max(0.0, chunk_size_sec - 1.0)
-        ratio_downscale = model_cache.get("ratio_downscale", seed_controls_cache.get("ratio_downscale", False))
-        per_chunk_cleanup = model_cache.get("per_chunk_cleanup", seed_controls_cache.get("per_chunk_cleanup", False))
-        target_res = model_cache.get("resolution_val", seed_controls_cache.get("resolution_val", settings["resolution"]))
-        max_target_res = model_cache.get("max_resolution_val", seed_controls_cache.get("max_resolution_val", settings["max_resolution"]))
+        ratio_downscale = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
+        per_chunk_cleanup = model_cache.get("per_chunk_cleanup", seed_controls.get("per_chunk_cleanup", False))
+        target_res = model_cache.get("resolution_val", seed_controls.get("resolution_val", settings["resolution"]))
+        max_target_res = model_cache.get("max_resolution_val", seed_controls.get("max_resolution_val", settings["max_resolution"]))
 
         media_dims = get_media_dimensions(settings["input_path"])
         if media_dims and auto_res:
@@ -473,9 +479,9 @@ def build_seedvr2_callbacks(
                 computed_res = min(computed_res, max_target_res)
             settings["resolution"] = int(computed_res // 16 * 16 or computed_res)
             settings["max_resolution"] = max_target_res or settings["max_resolution"]
-        if seed_controls_cache.get("output_format_val"):
+        if seed_controls.get("output_format_val"):
             if settings.get("output_format") in (None, "auto"):
-                settings["output_format"] = seed_controls_cache["output_format_val"]
+                settings["output_format"] = seed_controls["output_format_val"]
 
         settings["chunk_size_sec"] = chunk_size_sec
         settings["chunk_overlap_sec"] = chunk_overlap_sec
@@ -495,7 +501,7 @@ def build_seedvr2_callbacks(
 
         cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
         if cuda_warning:
-            return (f"⚠️ {cuda_warning}", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None))
+            return (f"⚠️ {cuda_warning}", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
         devices_list = [d.strip() for d in str(settings.get("cuda_device", "")).split(",") if d.strip()]
         if meta and not meta.supports_multi_gpu and len(devices_list) > 1:
             return (
@@ -506,9 +512,10 @@ def build_seedvr2_callbacks(
                 "No chunks",
                 gr.HTML.update(value="No comparison"),
                 gr.ImageSlider.update(value=None),
+                state
             )
         if len(devices_list) > 1 and (settings.get("cache_dit") or settings.get("cache_vae")):
-            return ("⚠️ Model caching requires a single GPU selection. Disable caching or choose one GPU.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None))
+            return ("⚠️ Model caching requires a single GPU selection. Disable caching or choose one GPU.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
 
         def _process_single(single_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
             local_logs: List[str] = []
@@ -578,7 +585,7 @@ def build_seedvr2_callbacks(
         if result.output_path:
             try:
                 outp = Path(result.output_path)
-                seed_controls_cache["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                state["seed_controls"]["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
             except Exception:
                 pass
             run_logger.write_summary(
@@ -604,7 +611,7 @@ def build_seedvr2_callbacks(
                     local_logs.append(f"Face-restored image saved to {restored_img} (strength {face_strength})")
                     output_image = restored_img
 
-            fps_val = seed_controls_cache.get("fps_override_val")
+            fps_val = seed_controls.get("fps_override_val")
             if fps_val and output_video and Path(output_video).exists():
                 adjusted = ffmpeg_set_fps(Path(output_video), float(fps_val))
                 output_video = str(adjusted)
@@ -612,9 +619,9 @@ def build_seedvr2_callbacks(
 
             comparison_html = ""
             image_slider_update = gr.ImageSlider.update(value=None)
-            comparison_mode = seed_controls_cache.get("comparison_mode_val", "native")
-            pin_pref = bool(seed_controls_cache.get("pin_reference_val", False))
-            fs_pref = bool(seed_controls_cache.get("fullscreen_val", False))
+            comparison_mode = seed_controls.get("comparison_mode_val", "native")
+            pin_pref = bool(seed_controls.get("pin_reference_val", False))
+            fs_pref = bool(seed_controls.get("fullscreen_val", False))
             if output_video:
                 use_fallback = comparison_mode in ("html_slider", "fallback")
                 # Native video comparison via ImageSlider not supported; choose HTML slider vs fallback assets
@@ -645,6 +652,7 @@ def build_seedvr2_callbacks(
                 chunk_info_msg,
                 comparison_html,
                 image_slider_update,
+                state
             )
 
         if settings.get("batch_enable") and Path(settings["input_path"]).is_dir() and not preview_only:
@@ -658,6 +666,7 @@ def build_seedvr2_callbacks(
                     "No chunks",
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
+                    state
                 )
             batch_logs = []
             batch_outputs: List[str] = []
@@ -709,6 +718,7 @@ def build_seedvr2_callbacks(
                 last_chunk_info,
                 gr.HTML.update(value=last_cmp),
                 last_slider,
+                state
             )
 
         # Streaming: queue progress lines while a worker thread runs the job
@@ -756,15 +766,17 @@ def build_seedvr2_callbacks(
                     last_chunk_line,
                     gr.HTML.update(value=""),
                     gr.ImageSlider.update(value=None),
+                    state
                 )
         t.join()
 
         status, log_text, output_video, output_image, chunk_info_msg, comparison_html, image_slider_update = result_holder.get(
             "payload",
-            ("❌ Failed", "\n".join(log_acc), None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None)),
+            ("❌ Failed", "\n".join(log_acc), None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state),
         )
         # Final yield with results and accumulated logs
         final_log = log_text if log_text else "\n".join(log_acc)
+        state["operation_status"] = "completed" if "✅" in status else "ready"
         yield (
             status,
             final_log,
@@ -773,6 +785,7 @@ def build_seedvr2_callbacks(
             chunk_info_msg if chunk_info_msg else last_chunk_line,
             gr.HTML.update(value=comparison_html),
             image_slider_update,
+            state
         )
 
     return {
@@ -782,10 +795,10 @@ def build_seedvr2_callbacks(
         "save_preset": save_preset,
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
-        "run_action": run_action,
-        "cancel_action": cancel,
+        "run_action": lambda *args: run_action(*args[:-1], state=args[-1]) if len(args) > 1 else run_action(*args),
+        "cancel_action": lambda state=None: cancel(),
         "comparison_html_slider": comparison_html_slider,
-        "auto_res_on_input": _auto_res_from_input,
+        "auto_res_on_input": lambda path, state=None: _auto_res_from_input(path, state or {"seed_controls": {}}),
     }
 
 

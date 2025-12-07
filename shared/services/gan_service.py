@@ -32,6 +32,7 @@ def _normalize_key(name: str) -> str:
 
 
 def _parse_scale_from_name(name: str) -> int:
+    """Legacy fallback scale detection - now superseded by metadata system"""
     import re
     lowered = name.lower()
     m = re.search(r"(\d+)x", lowered)
@@ -63,13 +64,18 @@ def _load_gan_catalog(base_dir: Path):
 
 
 def _get_gan_meta(filename: str, base_dir: Path) -> Dict[str, Any]:
-    _load_gan_catalog(base_dir)
-    stem = Path(filename).stem
-    norm = _normalize_key(stem)
-    meta = GAN_META_CACHE.get(norm, {})
-    scale = meta.get("scale") or _parse_scale_from_name(stem)
-    canonical = meta.get("name", stem)
-    return {"scale": scale, "canonical": canonical, "supports_multi_gpu": False}
+    """Legacy metadata function - now uses comprehensive registry"""
+    from shared.gan_runner import get_gan_model_metadata
+    metadata = get_gan_model_metadata(filename, base_dir)
+    return {
+        "scale": metadata.scale,
+        "canonical": metadata.name,
+        "supports_multi_gpu": False,
+        "architecture": metadata.architecture,
+        "description": metadata.description,
+        "author": metadata.author,
+        "tags": metadata.tags
+    }
 
 
 def _is_realesrgan_builtin(name: str) -> bool:
@@ -99,10 +105,10 @@ def _scan_gan_models(base_dir: Path) -> List[str]:
 def gan_defaults(base_dir: Path) -> Dict[str, Any]:
     models = _scan_gan_models(base_dir)
     default_model = models[0] if models else ""
-    meta = _get_gan_meta(default_model, base_dir) if default_model else {"scale": 2}
+    meta = _get_gan_meta(default_model, base_dir) if default_model else {"scale": 4}  # Default to 4x for unknown models
     return {
         "model": default_model,
-        "scale": meta.get("scale", 2),
+        "scale": meta.get("scale", 4),  # Use metadata scale, default to 4x
         "backend": "realesrgan",
         "input_path": "",
         "cuda_device": "0",
@@ -113,7 +119,8 @@ def gan_defaults(base_dir: Path) -> Dict[str, Any]:
         "output_override": "",
         "use_resolution_tab": True,
         "fps_override": 0,
-        "frames_per_batch": 0,
+        "frames_per_batch": 1,  # Default to 1 frame per batch for safety
+        "base_dir": str(base_dir),  # Pass base directory for metadata lookup
     }
 
 
@@ -131,6 +138,7 @@ GAN_ORDER: List[str] = [
     "use_resolution_tab",
     "fps_override",
     "frames_per_batch",
+    "base_dir",
 ]
 
 
@@ -173,7 +181,7 @@ def build_gan_callbacks(
     preset_manager: PresetManager,
     run_logger: RunLogger,
     global_settings: Dict[str, Any],
-    seed_controls_cache: Dict[str, Any],
+    shared_state: gr.State,
     base_dir: Path,
     temp_dir: Path,
     output_dir: Path,
@@ -213,7 +221,9 @@ def build_gan_callbacks(
     def safe_defaults():
         return [defaults[k] for k in GAN_ORDER]
 
-    def run_action(upload, *args, preview_only: bool = False):
+    def run_action(upload, *args, preview_only: bool = False, state=None):
+        state = state or {"seed_controls": {}}
+        seed_controls = state.get("seed_controls", {})
         cancel_event.clear()
         settings_dict = _gan_dict_from_args(list(args))
         settings = {**defaults, **settings_dict}
@@ -227,16 +237,16 @@ def build_gan_callbacks(
         inp = normalize_path(upload if upload else settings["input_path"])
         if settings.get("batch_enable"):
             if not inp or not Path(inp).exists() or not Path(inp).is_dir():
-                return ("❌ Batch input folder missing", "", None, "", gr.ImageSlider.update(value=None))
+                return ("❌ Batch input folder missing", "", None, "", gr.ImageSlider.update(value=None), state)
         else:
             if not inp or not Path(inp).exists():
-                return ("❌ Input missing", "", None, "", gr.ImageSlider.update(value=None))
+                return ("❌ Input missing", "", None, "", gr.ImageSlider.update(value=None), state)
 
         settings["input_path"] = inp
 
         cuda_warn = _validate_cuda_devices(settings.get("cuda_device", ""))
         if cuda_warn:
-            return (f"⚠️ {cuda_warn}", "", None, "")
+            return (f"⚠️ {cuda_warn}", "", None, "", state)
         devices = [d.strip() for d in str(settings.get("cuda_device") or "").split(",") if d.strip()]
         if len(devices) > 1:
             return (
@@ -245,6 +255,8 @@ def build_gan_callbacks(
                 None,
                 "",
                 gr.ImageSlider.update(value=None),
+                state
+            )
             )
 
         face_apply = bool(args[-1])
@@ -253,29 +265,27 @@ def build_gan_callbacks(
         backend_val = settings.get("backend", "realesrgan")
         # Pull shared output/comparison preferences
         if (not settings.get("output_format")) or settings.get("output_format") == "auto":
-            cached_fmt = seed_controls_cache.get("output_format_val")
+            cached_fmt = seed_controls.get("output_format_val")
             if cached_fmt:
                 settings["output_format"] = cached_fmt
         if (not settings.get("fps_override")) or float(settings.get("fps_override") or 0) == 0:
-            cached_fps = seed_controls_cache.get("fps_override_val")
+            cached_fps = seed_controls.get("fps_override_val")
             if cached_fps:
                 settings["fps_override"] = cached_fps
-        cmp_mode = seed_controls_cache.get("comparison_mode_val", "native")
-        pin_pref = bool(seed_controls_cache.get("pin_reference_val", False))
-        fs_pref = bool(seed_controls_cache.get("fullscreen_val", False))
+        cmp_mode = seed_controls.get("comparison_mode_val", "native")
+        pin_pref = bool(seed_controls.get("pin_reference_val", False))
+        fs_pref = bool(seed_controls.get("fullscreen_val", False))
 
         def prepare_single(single_path: str) -> Dict[str, Any]:
             s = settings.copy()
             s["input_path"] = normalize_path(single_path)
+            s["base_dir"] = str(base_dir)  # Pass base directory for metadata lookup
             meta = _get_gan_meta(s.get("model", ""), base_dir)
-            s["scale"] = meta.get("scale", s.get("scale", 2))
+            s["scale"] = meta.get("scale", s.get("scale", 4))  # Use metadata scale, default to 4x
             s["supports_multi_gpu"] = meta.get("supports_multi_gpu", False)
-            # Enforce 2x/4x-only scale from metadata if present
-            if s["scale"] not in (2, 4):
-                s["scale"] = 4 if s["scale"] > 2 else 2
             s["model_name"] = meta.get("canonical", s.get("model", ""))
             # PNG padding (from Output tab cache if present)
-            s["png_padding"] = int(seed_controls_cache.get("png_padding_val", 5))
+            s["png_padding"] = int(seed_controls.get("png_padding_val", 5))
             return s
 
         def maybe_downscale(s):
@@ -284,15 +294,15 @@ def build_gan_callbacks(
             - Only downscale when ratio_downscale flag is set.
             - Honor per-model cached target/max resolution.
             """
-            if not (s.get("use_resolution_tab") and seed_controls_cache.get("resolution_val")):
+            if not (s.get("use_resolution_tab") and seed_controls.get("resolution_val")):
                 return s
-            model_cache = seed_controls_cache.get("resolution_cache", {}).get(s.get("model"), {})
-            ratio_down = model_cache.get("ratio_downscale", seed_controls_cache.get("ratio_downscale", False))
+            model_cache = seed_controls.get("resolution_cache", {}).get(s.get("model"), {})
+            ratio_down = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
             if not ratio_down:
                 return s
-            target_short = model_cache.get("resolution_val") or seed_controls_cache.get("resolution_val")
-            max_target = model_cache.get("max_resolution_val") or seed_controls_cache.get("max_resolution_val")
-            enable_max = model_cache.get("enable_max_target", seed_controls_cache.get("enable_max_target", True))
+            target_short = model_cache.get("resolution_val") or seed_controls.get("resolution_val")
+            max_target = model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val")
+            enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
             if enable_max and max_target:
                 target_short = min(target_short or max_target, max_target)
             dims = get_media_dimensions(s["input_path"])
@@ -357,7 +367,7 @@ def build_gan_callbacks(
 
         def run_single(prepped_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
             if cancel_event.is_set():
-                return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None))
+                return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None), state)
             header_log = [
                 f"Model: {prepped_settings['model_name']}",
                 f"Backend: {backend_val}",
@@ -374,7 +384,7 @@ def build_gan_callbacks(
                     prepped_settings["model"] = prepped_settings["model_name"].split(".")[0]
                     prepped_settings["model_path"] = str((base_dir / "Image_Upscale_Models" / prepped_settings.get("model_name")).resolve())
                     if not Path(prepped_settings["model_path"]).exists() and not _is_realesrgan_builtin(prepped_settings["model_name"]):
-                        return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.ImageSlider.update(value=None))
+                        return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.ImageSlider.update(value=None), state)
                     result = run_realesrgan(
                         prepped_settings,
                         apply_face=face_apply,
@@ -384,7 +394,7 @@ def build_gan_callbacks(
                     )
                 else:
                     if cancel_event.is_set():
-                        return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None))
+                        return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None), state)
                     result = run_gan_upscale(
                         prepped_settings,
                         apply_face=face_apply,
@@ -396,7 +406,7 @@ def build_gan_callbacks(
                 err_msg = f"❌ GAN upscale failed: {exc}"
                 if progress_cb:
                     progress_cb(err_msg)
-                return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.ImageSlider.update(value=None))
+                return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.ImageSlider.update(value=None), state)
             if cancel_event.is_set():
                 status = "⏹️ Canceled"
             else:
@@ -409,7 +419,7 @@ def build_gan_callbacks(
             if relocated or result.output_path:
                 try:
                     outp = Path(relocated or result.output_path)
-                    seed_controls_cache["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                    state["seed_controls"]["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
                 except Exception:
                     pass
             run_logger.write_summary(
@@ -485,7 +495,7 @@ def build_gan_callbacks(
             folder = Path(settings["input_path"])
             items = [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp")]
             if not items:
-                return ("❌ No media files found in batch folder", "", None, "", gr.ImageSlider.update(value=None))
+                return ("❌ No media files found in batch folder", "", None, "", gr.ImageSlider.update(value=None), state)
             t = threading.Thread(target=worker_batch, args=(items,), daemon=True)
         else:
             prepped = maybe_downscale(prepare_single(settings["input_path"]))
@@ -508,6 +518,10 @@ def build_gan_callbacks(
                     gr.Markdown.update(value="⏳ Running GAN upscale..."),
                     "\n".join(live_logs[-400:]),
                     None,
+                    None,
+                    gr.ImageSlider.update(value=None),
+                    state
+                )
                     "",
                     gr.ImageSlider.update(value=None),
                 )
@@ -516,7 +530,7 @@ def build_gan_callbacks(
 
         status, lg, outp, cmp_html, slider_upd = result_holder.get(
             "payload",
-            ("❌ Failed", "", None, "", gr.ImageSlider.update(value=None)),
+            ("❌ Failed", "", None, "", gr.ImageSlider.update(value=None), state),
         )
         live_logs = result_holder.get("live_logs", [])
         merged_logs = lg if lg else "\n".join(live_logs)
@@ -526,11 +540,12 @@ def build_gan_callbacks(
             outp if outp and str(outp).endswith(".mp4") else outp,
             cmp_html,
             slider_upd,
+            state
         )
 
-    def cancel_action():
+    def cancel_action(state=None):
         cancel_event.set()
-        return gr.Markdown.update(value="⏹️ Cancel requested"), ""
+        return gr.Markdown.update(value="⏹️ Cancel requested"), "", state or {}
 
     return {
         "defaults": defaults,
@@ -539,9 +554,9 @@ def build_gan_callbacks(
         "save_preset": save_preset,
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
-        "run_action": run_action,
+        "run_action": lambda *args: run_action(*args[:-1], args[-1]) if len(args) > 1 else run_action(*args),
         "model_scanner": lambda: _scan_gan_models(base_dir),
-        "cancel_action": cancel_action,
+        "cancel_action": lambda *args: cancel_action(args[0] if args else None),
     }
 
 

@@ -63,13 +63,13 @@ def chunk_estimate(chunk_size: float, chunk_overlap: float):
 
 def build_resolution_callbacks(
     preset_manager: PresetManager,
-    seed_controls_cache: Dict[str, Any],
+    shared_state: gr.State,
     models: List[str],
 ):
     defaults = resolution_defaults(models)
 
-    def _ensure_model_cache(model: str) -> Dict[str, Any]:
-        cache_root = seed_controls_cache.setdefault("resolution_cache", {})
+    def _ensure_model_cache(model: str, state: Dict[str, Any]) -> Dict[str, Any]:
+        cache_root = state["seed_controls"].setdefault("resolution_cache", {})
         model_key = model or defaults["model"]
         return cache_root.setdefault(model_key, {})
 
@@ -126,21 +126,21 @@ def build_resolution_callbacks(
         est = math.ceil(dur / max(0.001, size - ov))
         return gr.Markdown.update(value=f"Duration ~{dur:.1f}s → est. {est} chunks (size {size}s, overlap {ov}s).")
 
-    def cache_resolution(t_res, m_res, model):
-        model_cache = _ensure_model_cache(model)
+    def cache_resolution(t_res, m_res, model, state):
+        model_cache = _ensure_model_cache(model, state)
         model_cache["resolution_val"] = t_res
         model_cache["max_resolution_val"] = m_res
-        return gr.Markdown.update(value=f"Resolution cached for {model}.")
+        return gr.Markdown.update(value=f"Resolution cached for {model}."), state
 
-    def cache_resolution_flags(auto_res, enable_max, chunk_sz, chunk_ov, ratio_down, per_cleanup, model):
-        model_cache = _ensure_model_cache(model)
+    def cache_resolution_flags(auto_res, enable_max, chunk_sz, chunk_ov, ratio_down, per_cleanup, model, state):
+        model_cache = _ensure_model_cache(model, state)
         model_cache["auto_resolution"] = auto_res
         model_cache["enable_max_target"] = enable_max
         model_cache["chunk_size_sec"] = float(chunk_sz or 0)
         model_cache["chunk_overlap_sec"] = float(chunk_ov or 0)
         model_cache["ratio_downscale"] = ratio_down
         model_cache["per_chunk_cleanup"] = per_cleanup
-        return gr.Markdown.update(value=f"Resolution options cached for {model}.")
+        return gr.Markdown.update(value=f"Resolution options cached for {model}."), state
 
     return {
         "defaults": defaults,
@@ -152,8 +152,8 @@ def build_resolution_callbacks(
         "apply_to_seed": apply_to_seed,
         "chunk_estimate": chunk_estimate,
         "estimate_from_input": estimate_from_input,
-        "cache_resolution": cache_resolution,
-        "cache_resolution_flags": cache_resolution_flags,
+        "cache_resolution": lambda *args: cache_resolution(*args[:-1], args[-1]),
+        "cache_resolution_flags": lambda *args: cache_resolution_flags(*args[:-1], args[-1]),
     }
 
 

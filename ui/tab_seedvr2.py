@@ -10,8 +10,7 @@ def build_seedvr2_tab(
     defaults: Dict[str, Any],
     preset_manager,
     global_settings: Dict[str, Any],
-    seed_controls_cache: Dict[str, Any],
-    health_banner: Dict[str, str],
+    shared_state: gr.State,
     comparison_html_slider,
     callbacks: Dict[str, Any],
 ):
@@ -32,7 +31,6 @@ def build_seedvr2_tab(
     """
     models = callbacks["get_models"]()
     values = [defaults[k] for k in callbacks["order"]]
-    seed_controls_cache.setdefault("current_model", values[4] if len(values) > 4 else (models[0] if models else ""))
 
     # GPU hint
     try:
@@ -43,13 +41,13 @@ def build_seedvr2_tab(
     except Exception:
         gpu_hint = "CUDA detection failed"
 
-    def _cache_path_value(val: Any):
-        seed_controls_cache["last_input_path"] = val if val else ""
-        return gr.Markdown.update(value="Input cached for resolution/chunk estimates.")
+    def _cache_path_value(val: Any, state: Dict[str, Any]):
+        state["seed_controls"]["last_input_path"] = val if val else ""
+        return gr.Markdown.update(value="Input cached for resolution/chunk estimates."), state
 
-    def _cache_upload(val: Any):
-        seed_controls_cache["last_input_path"] = val if val else ""
-        return val or "", gr.Markdown.update(value="Input cached for resolution/chunk estimates.")
+    def _cache_upload(val: Any, state: Dict[str, Any]):
+        state["seed_controls"]["last_input_path"] = val if val else ""
+        return val or "", gr.Markdown.update(value="Input cached for resolution/chunk estimates."), state
 
     with gr.Row():
         with gr.Column(scale=3):
@@ -131,8 +129,9 @@ def build_seedvr2_tab(
             debug = gr.Checkbox(label="Debug Logging", value=values[47])
         with gr.Column(scale=2):
             gr.Markdown("### Output / Actions")
-            gr.Markdown(health_banner.get("text", ""))
+            health_display = gr.Markdown(value="")
             status_box = gr.Markdown(value="Ready.")
+            progress_indicator = gr.Markdown(value="", visible=False)
             log_box = gr.Textbox(label="Run Log", value="", lines=16)
             output_video = gr.Video(label="Upscaled Video", interactive=False, show_download_button=True)
             output_image = gr.Image(label="Upscaled Image / Preview", interactive=False, show_download_button=True)
@@ -221,62 +220,95 @@ def build_seedvr2_tab(
     ]
 
     upscale_btn.click(
-        fn=callbacks["run_action"],
-        inputs=[input_file, face_restore_chk] + inputs_list,
-        outputs=[status_box, log_box, output_video, output_image, chunk_info, comparison_note, image_slider],
+        fn=lambda *args: callbacks["run_action"](*args[:-1], preview_only=False, state=args[-1]),
+        inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
+        outputs=[status_box, log_box, output_video, output_image, chunk_info, comparison_note, image_slider, shared_state],
     )
     preview_btn.click(
-        fn=lambda *args: callbacks["run_action"](*args, preview_only=True),
-        inputs=[input_file, face_restore_chk] + inputs_list,
-        outputs=[status_box, log_box, output_video, output_image, chunk_info, comparison_note, image_slider],
+        fn=lambda *args: callbacks["run_action"](*args[:-1], preview_only=True, state=args[-1]),
+        inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
+        outputs=[status_box, log_box, output_video, output_image, chunk_info, comparison_note, image_slider, shared_state],
     )
     cancel_btn.click(
-        fn=lambda ok: callbacks["cancel_action"]() if ok else (gr.Markdown.update(value="ℹ️ Enable 'Confirm cancel' to stop."), ""),
-        inputs=[cancel_confirm],
-        outputs=[status_box, log_box],
+        fn=lambda ok, state: (callbacks["cancel_action"](), state) if ok else (gr.Markdown.update(value="ℹ️ Enable 'Confirm cancel' to stop."), "", state),
+        inputs=[cancel_confirm, shared_state],
+        outputs=[status_box, log_box, shared_state],
     )
-    open_outputs_btn.click(lambda: callbacks["open_outputs_folder"](), outputs=status_box)
-    delete_temp_btn.click(lambda ok: callbacks["clear_temp_folder"](ok), inputs=[delete_confirm], outputs=status_box)
+    open_outputs_btn.click(
+        fn=lambda state: (callbacks["open_outputs_folder"](state), state),
+        inputs=[shared_state],
+        outputs=[status_box, shared_state]
+    )
+    delete_temp_btn.click(
+        fn=lambda ok, state: (callbacks["clear_temp_folder"](ok), state),
+        inputs=[delete_confirm, shared_state],
+        outputs=[status_box, shared_state]
+    )
 
     # Presets wiring
     save_preset_btn.click(
-        fn=callbacks["save_preset"],
-        inputs=[preset_name, dit_model] + inputs_list,
-        outputs=[preset_dropdown, preset_status] + inputs_list,
+        fn=lambda *args: callbacks["save_preset"](*args[:-1]) + (args[-1],),
+        inputs=[preset_name, dit_model] + inputs_list + [shared_state],
+        outputs=[preset_dropdown, preset_status] + inputs_list + [shared_state],
     )
     load_preset_btn.click(
-        fn=lambda preset, model, *vals: callbacks["load_preset"](preset, model, defaults, list(vals)),
-        inputs=[preset_dropdown, dit_model] + inputs_list,
-        outputs=inputs_list,
+        fn=lambda preset, model, *vals: callbacks["load_preset"](preset, model, defaults, list(vals[:-1])) + (vals[-1],),
+        inputs=[preset_dropdown, dit_model] + inputs_list + [shared_state],
+        outputs=inputs_list + [shared_state],
     )
     safe_defaults_btn.click(fn=callbacks["safe_defaults"], outputs=inputs_list)
 
     # Sync upload to textbox
-    input_file.upload(_cache_upload, inputs=input_file, outputs=[input_path, input_cache_msg])
     input_file.upload(
-        fn=lambda fp: callbacks["auto_res_on_input"](fp if fp else ""),
-        inputs=input_file,
-        outputs=[resolution, max_resolution, auto_res_msg],
+        fn=lambda val, state: _cache_upload(val, state),
+        inputs=[input_file, shared_state],
+        outputs=[input_path, input_cache_msg, shared_state]
     )
-    input_path.change(_cache_path_value, inputs=input_path, outputs=input_cache_msg)
+    input_file.upload(
+        fn=lambda fp, state: callbacks["auto_res_on_input"](fp if fp else "", state),
+        inputs=[input_file, shared_state],
+        outputs=[resolution, max_resolution, auto_res_msg, shared_state],
+    )
     input_path.change(
-        fn=lambda p: callbacks["auto_res_on_input"](p),
-        inputs=input_path,
-        outputs=[resolution, max_resolution, auto_res_msg],
+        fn=lambda val, state: _cache_path_value(val, state),
+        inputs=[input_path, shared_state],
+        outputs=[input_cache_msg, shared_state]
+    )
+    input_path.change(
+        fn=lambda p, state: callbacks["auto_res_on_input"](p, state),
+        inputs=[input_path, shared_state],
+        outputs=[resolution, max_resolution, auto_res_msg, shared_state],
     )
 
-    def _set_model_cache(m):
-        seed_controls_cache["current_model"] = m
-        return gr.Markdown.update(value=f"Model cached for resolution/preset: {m}")
+    def _set_model_cache(m, state):
+        state["seed_controls"]["current_model"] = m
+        return gr.Markdown.update(value=f"Model cached for resolution/preset: {m}"), state
 
-    dit_model.change(_set_model_cache, inputs=dit_model, outputs=model_cache_msg)
+    dit_model.change(
+        fn=lambda m, state: _set_model_cache(m, state),
+        inputs=[dit_model, shared_state],
+        outputs=[model_cache_msg, shared_state]
+    )
 
     # Comparison note
     comparison_note.update(comparison_html_slider())
+
+    # Health banner update from state
+    def update_health_display(state):
+        health_text = state.get("health_banner", {}).get("text", "")
+        return gr.Markdown.update(value=health_text)
+
+    shared_state.change(
+        fn=update_health_display,
+        inputs=shared_state,
+        outputs=health_display
+    )
 
     return {
         "resolution": resolution,
         "max_resolution": max_resolution,
         "output_format": output_format,
+        "shared_state": shared_state,
+        "progress_indicator": progress_indicator,
     }
 

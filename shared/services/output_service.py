@@ -52,7 +52,7 @@ def _apply_output_preset(
 
 def build_output_callbacks(
     preset_manager: PresetManager,
-    seed_controls_cache: Dict[str, Any],
+    shared_state: gr.State,
     models: List[str],
 ):
     defaults = output_defaults(models)
@@ -90,50 +90,50 @@ def build_output_callbacks(
         return [defaults[k] for k in OUTPUT_ORDER]
 
     # Cache helpers used by tab_output UI
-    def cache_output(fmt):
-        seed_controls_cache["output_format_val"] = fmt
-        return gr.Markdown.update(value="Output format cached for runs.")
+    def cache_output(fmt, state):
+        state["seed_controls"]["output_format_val"] = fmt
+        return gr.Markdown.update(value="Output format cached for runs."), state
 
-    def cache_fps(fps_val):
-        seed_controls_cache["fps_override_val"] = fps_val
-        return gr.Markdown.update(value="FPS override cached for runs.")
+    def cache_fps(fps_val, state):
+        state["seed_controls"]["fps_override_val"] = fps_val
+        return gr.Markdown.update(value="FPS override cached for runs."), state
 
-    def cache_comparison(mode):
-        seed_controls_cache["comparison_mode_val"] = mode
-        return gr.Markdown.update(value="Comparison mode cached for runs.")
+    def cache_comparison(mode, state):
+        state["seed_controls"]["comparison_mode_val"] = mode
+        return gr.Markdown.update(value="Comparison mode cached for runs."), state
 
-    def cache_pin(val):
-        seed_controls_cache["pin_reference_val"] = bool(val)
-        return gr.Markdown.update(value="Pin reference preference cached.")
+    def cache_pin(val, state):
+        state["seed_controls"]["pin_reference_val"] = bool(val)
+        return gr.Markdown.update(value="Pin reference preference cached."), state
 
-    def cache_fullscreen(val):
-        seed_controls_cache["fullscreen_val"] = bool(val)
-        return gr.Markdown.update(value="Fullscreen preference cached.")
+    def cache_fullscreen(val, state):
+        state["seed_controls"]["fullscreen_val"] = bool(val)
+        return gr.Markdown.update(value="Fullscreen preference cached."), state
 
-    def cache_png_padding(val):
+    def cache_png_padding(val, state):
         try:
-            seed_controls_cache["png_padding_val"] = max(1, int(val))
+            state["seed_controls"]["png_padding_val"] = max(1, int(val))
         except Exception:
-            seed_controls_cache["png_padding_val"] = defaults["png_padding"]
-        return gr.Markdown.update(value="PNG padding cached for runs.")
+            state["seed_controls"]["png_padding_val"] = defaults["png_padding"]
+        return gr.Markdown.update(value="PNG padding cached for runs."), state
 
-    def cache_png_basename(val):
-        seed_controls_cache["png_keep_basename_val"] = bool(val)
-        return gr.Markdown.update(value="PNG base-name preference cached.")
+    def cache_png_basename(val, state):
+        state["seed_controls"]["png_keep_basename_val"] = bool(val)
+        return gr.Markdown.update(value="PNG base-name preference cached."), state
 
-    def cache_skip(val):
+    def cache_skip(val, state):
         try:
-            seed_controls_cache["skip_first_frames_val"] = max(0, int(val))
+            state["seed_controls"]["skip_first_frames_val"] = max(0, int(val))
         except Exception:
-            seed_controls_cache["skip_first_frames_val"] = 0
-        return gr.Markdown.update(value="Skip-first-frames cached for runs.")
+            state["seed_controls"]["skip_first_frames_val"] = 0
+        return gr.Markdown.update(value="Skip-first-frames cached for runs."), state
 
-    def cache_cap(val):
+    def cache_cap(val, state):
         try:
-            seed_controls_cache["load_cap_val"] = max(0, int(val))
+            state["seed_controls"]["load_cap_val"] = max(0, int(val))
         except Exception:
-            seed_controls_cache["load_cap_val"] = 0
-        return gr.Markdown.update(value="Load-cap cached for runs.")
+            state["seed_controls"]["load_cap_val"] = 0
+        return gr.Markdown.update(value="Load-cap cached for runs."), state
 
     return {
         "defaults": defaults,
@@ -142,15 +142,15 @@ def build_output_callbacks(
         "save_preset": save_preset,
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
-        "cache_output": cache_output,
-        "cache_fps": cache_fps,
-        "cache_comparison": cache_comparison,
-        "cache_pin": cache_pin,
-        "cache_fullscreen": cache_fullscreen,
-        "cache_png_padding": cache_png_padding,
-        "cache_png_basename": cache_png_basename,
-        "cache_skip": cache_skip,
-        "cache_cap": cache_cap,
+        "cache_output": lambda *args: cache_output(*args[:-1], args[-1]),
+        "cache_fps": lambda *args: cache_fps(*args[:-1], args[-1]),
+        "cache_comparison": lambda *args: cache_comparison(*args[:-1], args[-1]),
+        "cache_pin": lambda *args: cache_pin(*args[:-1], args[-1]),
+        "cache_fullscreen": lambda *args: cache_fullscreen(*args[:-1], args[-1]),
+        "cache_png_padding": lambda *args: cache_png_padding(*args[:-1], args[-1]),
+        "cache_png_basename": lambda *args: cache_png_basename(*args[:-1], args[-1]),
+        "cache_skip": lambda *args: cache_skip(*args[:-1], args[-1]),
+        "cache_cap": lambda *args: cache_cap(*args[:-1], args[-1]),
     }
 
 

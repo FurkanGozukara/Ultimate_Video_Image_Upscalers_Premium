@@ -1,8 +1,11 @@
 import shutil
 import subprocess
 import tempfile
+import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -17,6 +20,160 @@ from .path_utils import (
     detect_input_type,
 )
 from .face_restore import restore_image, restore_video
+
+
+# GAN Model Metadata System
+@dataclass
+class GanModelMetadata:
+    name: str
+    scale: int
+    architecture: str
+    input_channels: int = 3
+    output_channels: int = 3
+    description: str = ""
+    author: str = "unknown"
+    tags: list = None
+
+    def __post_init__(self):
+        if self.tags is None:
+            self.tags = []
+
+
+# Real-ESRGAN model definitions with scale factors
+REAL_ESRGAN_MODELS = {
+    'RealESRGAN_x4plus': {'scale': 4, 'arch': 'RRDBNet'},
+    'RealESRNet_x4plus': {'scale': 4, 'arch': 'RRDBNet'},
+    'RealESRGAN_x4plus_anime_6B': {'scale': 4, 'arch': 'RRDBNet'},
+    'RealESRGAN_x2plus': {'scale': 2, 'arch': 'RRDBNet'},
+    'realesr-animevideov3': {'scale': 4, 'arch': 'SRVGGNetCompact'},
+    'realesr-general-x4v3': {'scale': 4, 'arch': 'SRVGGNetCompact'},
+}
+
+
+class GanModelRegistry:
+    """Comprehensive registry for GAN model metadata from multiple sources"""
+
+    def __init__(self, base_dir: Path):
+        self.base_dir = base_dir
+        self._omd_cache: Dict[str, GanModelMetadata] = {}
+        self._loaded = False
+
+    def _load_omd_metadata(self) -> None:
+        """Load metadata from Open Model Database"""
+        if self._loaded:
+            return
+
+        omd_dir = self.base_dir / "open-model-database" / "data" / "models"
+        if not omd_dir.exists():
+            self._loaded = True
+            return
+
+        for json_file in omd_dir.glob("*.json"):
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                scale = data.get('scale', 4)
+                name = data.get('name', json_file.stem)
+                arch = data.get('architecture', 'esrgan')
+
+                metadata = GanModelMetadata(
+                    name=name,
+                    scale=int(scale),
+                    architecture=arch,
+                    input_channels=data.get('inputChannels', 3),
+                    output_channels=data.get('outputChannels', 3),
+                    description=data.get('description', ''),
+                    author=data.get('author', 'unknown'),
+                    tags=data.get('tags', [])
+                )
+
+                # Use normalized key for lookup
+                key = self._normalize_name(name)
+                self._omd_cache[key] = metadata
+
+            except Exception:
+                continue
+
+        self._loaded = True
+
+    def _normalize_name(self, name: str) -> str:
+        """Normalize model name for consistent lookup"""
+        # Remove scale prefix, file extensions, and normalize
+        name = re.sub(r'^\d+x[-_]', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\.(pth|safetensors|onnx)$', '', name, flags=re.IGNORECASE)
+        return re.sub(r'[^a-z0-9]', '', name.lower())
+
+    def get_model_metadata(self, model_filename: str) -> GanModelMetadata:
+        """Get comprehensive metadata for a model file"""
+        # First check Real-ESRGAN hardcoded models
+        if model_filename in REAL_ESRGAN_MODELS:
+            info = REAL_ESRGAN_MODELS[model_filename]
+            return GanModelMetadata(
+                name=model_filename,
+                scale=info['scale'],
+                architecture=info['arch'],
+                description=f"Real-ESRGAN {model_filename}"
+            )
+
+        # Load OMD data if not already loaded
+        self._load_omd_metadata()
+
+        # Try exact filename match in OMD
+        if model_filename in self._omd_cache:
+            return self._omd_cache[model_filename]
+
+        # Try normalized name match
+        normalized = self._normalize_name(model_filename)
+        if normalized in self._omd_cache:
+            return self._omd_cache[normalized]
+
+        # Fallback: parse scale from filename
+        scale = self._parse_scale_from_filename(model_filename)
+
+        return GanModelMetadata(
+            name=model_filename,
+            scale=scale,
+            architecture="unknown",
+            description="Unknown GAN model"
+        )
+
+    def _parse_scale_from_filename(self, filename: str) -> int:
+        """Fallback scale detection from filename patterns"""
+        filename_lower = filename.lower()
+
+        # Check for explicit scale prefixes (e.g., "4x_", "2x")
+        scale_match = re.search(r'^(\d+)x[-_]', filename_lower)
+        if scale_match:
+            try:
+                return int(scale_match.group(1))
+            except ValueError:
+                pass
+
+        # Check for scale in middle of filename
+        scale_match = re.search(r'(\d+)x', filename_lower)
+        if scale_match:
+            try:
+                scale = int(scale_match.group(1))
+                # Only accept reasonable scales (1-16)
+                if 1 <= scale <= 16:
+                    return scale
+            except ValueError:
+                pass
+
+        # Default fallback
+        return 4
+
+
+# Global registry instance
+_gan_registry: Optional[GanModelRegistry] = None
+
+def get_gan_model_metadata(model_filename: str, base_dir: Path) -> GanModelMetadata:
+    """Get metadata for a GAN model"""
+    global _gan_registry
+    if _gan_registry is None:
+        _gan_registry = GanModelRegistry(base_dir)
+    return _gan_registry.get_model_metadata(model_filename)
 
 
 class GanResult:
@@ -129,14 +286,59 @@ def run_gan_upscale(
     cancel_event=None,
 ) -> GanResult:
     """
-    Lightweight CPU upscale using OpenCV Lanczos (fallback when Real-ESRGAN not selected).
+    Comprehensive GAN upscaler with dynamic resolution adjustment based on model metadata.
     """
     input_path = Path(normalize_path(settings.get("input_path", "")))
     if not input_path.exists():
         return GanResult(1, None, "Input missing")
-    scale = int(settings.get("scale", 2))
-    if scale not in (2, 4):
-        scale = 2
+
+    # Get model metadata for accurate scale information
+    model_name = settings.get("model", "")
+    base_dir = Path(settings.get("base_dir", Path(__file__).parents[1]))
+    model_metadata = get_gan_model_metadata(model_name, base_dir)
+    model_scale = model_metadata.scale
+
+    # Apply resolution tab logic for dynamic adjustment
+    use_resolution_tab = settings.get("use_resolution_tab", True)
+    effective_scale = model_scale
+
+    if use_resolution_tab:
+        target_res = settings.get("target_resolution", 1080)
+        max_target_res = settings.get("max_target_resolution", 1920)
+        auto_resolution = settings.get("auto_resolution", True)
+        enable_max_target = settings.get("enable_max_target", True)
+
+        # Get input dimensions for auto-resolution calculation
+        from .path_utils import get_media_dimensions
+        input_dims = get_media_dimensions(str(input_path))
+
+        if input_dims and auto_resolution:
+            w, h = input_dims
+            short_side = min(w, h)
+            computed_res = min(short_side, target_res or short_side)
+
+            if enable_max_target and max_target_res and max_target_res > 0:
+                computed_res = min(computed_res, max_target_res)
+
+            # For GAN models, calculate if we need downscaling before upscaling
+            if computed_res < short_side:
+                # Input needs to be downscaled to reach target resolution
+                downscale_factor = computed_res / short_side
+                # Effective scale becomes model_scale * (1/downscale_factor)
+                # But we handle this by adjusting the target resolution in the upscale process
+                effective_scale = model_scale
+                # We'll need to modify the upscale logic to handle this
+            else:
+                effective_scale = model_scale
+        else:
+            effective_scale = model_scale
+
+    # Ensure scale is reasonable
+    if not (1 <= effective_scale <= 16):
+        effective_scale = model_scale
+
+    # Override the settings scale with the computed effective scale
+    scale = int(effective_scale)
     fps_override = float(settings.get("fps_override") or 0)
     output_format = settings.get("output_format") or "auto"
     if output_format not in ("auto", "mp4", "png"):

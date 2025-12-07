@@ -7,7 +7,7 @@ import gradio as gr
 from shared.preset_manager import PresetManager
 
 
-def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabled: bool, face_global: bool, runner, preset_manager: PresetManager, global_settings: dict, run_logger=None):
+def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabled: bool, face_global: bool, runner, preset_manager: PresetManager, global_settings: dict, run_logger=None, state: dict = None):
     global_settings.update(
         {
             "output_dir": output_dir_val or global_settings.get("output_dir"),
@@ -26,30 +26,42 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
             run_logger.enabled = telemetry_enabled
         except Exception:
             pass
-    return gr.Markdown.update(value="✅ Global settings saved")
+
+    # Update state if provided
+    if state:
+        state["seed_controls"]["face_strength_val"] = global_settings.get("face_strength", 0.5)
+
+    return gr.Markdown.update(value="✅ Global settings saved"), state or {}
 
 
-def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager: PresetManager, global_settings: dict, mode_state: dict):
+def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager: PresetManager, global_settings: dict, state: dict = None):
     current = runner.get_mode()
+    state = state or {"mode_state": {"locked": False}}
+    mode_state = state.get("mode_state", {})
+
     if mode_state.get("locked") and current == "in_app" and mode_choice == "subprocess":
         return (
             gr.Markdown.update(value="🔒 In-app mode active; restart to return to subprocess mode."),
             gr.Radio.update(value=current),
+            state
         )
     if mode_choice == "in_app" and not confirm:
         return (
             gr.Markdown.update(value="⚠️ Confirm to switch to in-app mode (requires restart to go back)."),
             gr.Radio.update(value=current),
+            state
         )
     try:
         runner.set_mode(mode_choice)
     except Exception as exc:
-        return gr.Markdown.update(value=f"❌ Mode change failed: {exc}"), gr.Radio.update(value=current)
+        return gr.Markdown.update(value=f"❌ Mode change failed: {exc}"), gr.Radio.update(value=current), state
+
     global_settings["mode"] = runner.get_mode()
     preset_manager.save_global_settings(global_settings)
     if mode_choice == "in_app":
-        mode_state["locked"] = True
-    return gr.Markdown.update(value=f"✅ Mode set to {runner.get_mode()}"), gr.Radio.update(value=runner.get_mode())
+        state["mode_state"]["locked"] = True
+
+    return gr.Markdown.update(value=f"✅ Mode set to {runner.get_mode()}"), gr.Radio.update(value=runner.get_mode()), state
 
 
 def open_outputs_folder(path: str):

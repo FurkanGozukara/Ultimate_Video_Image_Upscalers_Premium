@@ -101,7 +101,7 @@ def build_rife_callbacks(
     global_settings: Dict[str, Any],
     output_dir: Path,
     temp_dir: Path,
-    seed_controls_cache: Dict[str, Any],
+    shared_state: gr.State,
 ):
     defaults = rife_defaults()
 
@@ -137,7 +137,7 @@ def build_rife_callbacks(
     def safe_defaults():
         return [defaults[k] for k in RIFE_ORDER]
 
-    def run_action(uploaded_file, img_folder, *args):
+    def run_action(uploaded_file, img_folder, *args, state=None):
         settings_dict = _rife_dict_from_args(list(args))
         settings = {**defaults, **settings_dict}
 
@@ -156,11 +156,12 @@ def build_rife_callbacks(
         settings["output_override"] = settings.get("output_override") or None
 
         # Apply Resolution tab hints (ratio downscale) for videos when provided
-        model_cache = seed_controls_cache.get("resolution_cache", {}).get(settings.get("model"), {})
-        ratio_down = model_cache.get("ratio_downscale", seed_controls_cache.get("ratio_downscale", False))
-        target_res = model_cache.get("resolution_val") or seed_controls_cache.get("resolution_val")
-        max_res = model_cache.get("max_resolution_val") or seed_controls_cache.get("max_resolution_val")
-        enable_max = model_cache.get("enable_max_target", seed_controls_cache.get("enable_max_target", True))
+        seed_controls = state.get("seed_controls", {})
+        model_cache = seed_controls.get("resolution_cache", {}).get(settings.get("model"), {})
+        ratio_down = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
+        target_res = model_cache.get("resolution_val") or seed_controls.get("resolution_val")
+        max_res = model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val")
+        enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
         if enable_max and max_res:
             target_res = min(target_res or max_res, max_res)
         dims = get_media_dimensions(settings["input_path"])
@@ -190,10 +191,10 @@ def build_rife_callbacks(
             log_lines = []
 
         # Apply cached output/comparison preferences from Output tab
-        cached_fmt = seed_controls_cache.get("output_format_val")
+        cached_fmt = seed_controls.get("output_format_val")
         if settings.get("output_format") in (None, "auto") and cached_fmt:
             settings["output_format"] = cached_fmt
-        cached_fps = seed_controls_cache.get("fps_override_val")
+        cached_fps = seed_controls.get("fps_override_val")
         if (not settings.get("fps_override")) or float(settings.get("fps_override") or 0) == 0:
             if cached_fps:
                 settings["fps_override"] = cached_fps
@@ -303,7 +304,7 @@ def build_rife_callbacks(
                 log_lines.append(f"Face-restored video saved to {restored} (strength {face_strength})")
         if out_path:
             try:
-                seed_controls_cache["last_output_dir"] = str(Path(out_path).parent)
+                state["seed_controls"]["last_output_dir"] = str(Path(out_path).parent)
             except Exception:
                 pass
         meta_md = f"Output: {out_path}\nReturn code: {result.returncode}"
@@ -329,7 +330,7 @@ def build_rife_callbacks(
         "save_preset": save_preset,
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
-        "run_action": run_action,
+        "run_action": lambda *args: run_action(*args[:-1], args[-1]) if len(args) > 1 else run_action(*args),
     }
 
 
