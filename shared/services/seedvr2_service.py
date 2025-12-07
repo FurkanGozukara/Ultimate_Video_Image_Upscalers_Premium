@@ -22,6 +22,7 @@ from shared.face_restore import restore_image, restore_video
 from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
 from shared.video_comparison import build_video_comparison, build_image_comparison
+from shared.model_manager import get_model_manager, ModelType
 
 # Constants --------------------------------------------------------------------
 SEEDVR2_VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
@@ -296,6 +297,24 @@ def build_seedvr2_callbacks(
             return gr.Markdown.update(value="⏹️ Cancel requested"), ""
         return gr.Markdown.update(value="No active process"), ""
 
+    def get_model_loading_status():
+        """Get current model loading status for UI display"""
+        model_manager = get_model_manager()
+        loaded_models = model_manager.get_loaded_models_info()
+        current_model = model_manager.current_model_id
+
+        if not loaded_models:
+            return "No models loaded"
+
+        status_lines = []
+        for model_id, info in loaded_models.items():
+            state = info["state"]
+            marker = "✅" if state == "loaded" else "⏳" if state == "loading" else "❌"
+            current_marker = " ← current" if model_id == current_model else ""
+            status_lines.append(f"{marker} {info['model_name']} ({state}){current_marker}")
+
+        return "\n".join(status_lines)
+
     def _auto_res_from_input(input_path: str, state: Dict[str, Any]):
         """
         Recalculate target/max resolution and chunk estimate when input changes.
@@ -554,6 +573,21 @@ def build_seedvr2_callbacks(
             chunk_info_msg = "No chunking performed."
             chunk_summary = "Single pass (no chunking)."
             status = "⚠️ Upscale exited unexpectedly"
+
+            # Handle model loading for first run
+            model_manager = get_model_manager()
+            dit_model = single_settings.get("dit_model", "")
+
+            # Check if we need to switch/load model
+            if not model_manager.is_model_loaded(ModelType.SEEDVR2, dit_model, **single_settings):
+                on_progress(f"Loading model: {dit_model}...\n")
+
+                # Try to load the model
+                if not runner.ensure_seedvr2_model_loaded(single_settings, on_progress):
+                    error_msg = f"❌ Failed to load model: {dit_model}"
+                    return (error_msg, "", None, None, "Model load failed", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
+
+                on_progress("Model loaded successfully!\n")
 
             # Skip chunking for preview-only runs; process just the first frame instead
             should_chunk = (

@@ -151,6 +151,9 @@ def seedvr2_tab(
             )
             model_cache_msg = gr.Markdown("", visible=False)
 
+            # Model loading status
+            model_status = gr.Markdown("### 🔧 Model Status\nNo models loaded", elem_classes="model-status")
+
             # Resolution controls with auto-resolution
             with gr.Row():
                 resolution = gr.Slider(
@@ -468,6 +471,16 @@ def seedvr2_tab(
         compile_dynamo_recompile_limit, cache_dit, cache_vae, debug, resume_chunking
     ]
 
+    # Update model status on tab load
+    def initialize_model_status():
+        try:
+            from shared.model_manager import get_model_manager
+            model_manager = get_model_manager()
+            status_text = service.get("get_model_loading_status", lambda: "No models loaded")()
+            return gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
+        except Exception:
+            return gr.Markdown.update(value="### 🔧 Model Status\nStatus unavailable")
+
     # Wire up all the event handlers
 
     # Input handling
@@ -491,15 +504,39 @@ def seedvr2_tab(
         outputs=[input_cache_msg, shared_state]
     )
 
-    # Model caching
+    # Model caching and status updates
     def cache_model(m, state):
         state["seed_controls"]["current_model"] = m
-        return gr.Markdown.update(value=f"✅ Model cached for resolution/preset: {m}", visible=True), state
+        # Trigger model loading when model changes
+        try:
+            from shared.model_manager import get_model_manager
+            model_manager = get_model_manager()
+            status_text = service.get("get_model_loading_status", lambda: "Model status unavailable")()
+            return gr.Markdown.update(value=f"✅ Model selected: {m}", visible=True), gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
+        except Exception as e:
+            return gr.Markdown.update(value=f"✅ Model selected: {m}", visible=True), gr.Markdown.update(value=f"### 🔧 Model Status\nError: {str(e)}")
 
     dit_model.change(
         fn=lambda m, state: cache_model(m, state),
         inputs=[dit_model, shared_state],
-        outputs=[model_cache_msg, shared_state]
+        outputs=[model_cache_msg, model_status]
+    )
+
+    # Update model status periodically
+    def update_model_status():
+        try:
+            from shared.model_manager import get_model_manager
+            model_manager = get_model_manager()
+            status_text = service.get("get_model_loading_status", lambda: "Model status unavailable")()
+            return gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
+        except Exception:
+            return gr.Markdown.update(value="### 🔧 Model Status\nStatus unavailable")
+
+    # Add a refresh button for model status
+    refresh_model_status_btn = gr.Button("🔄 Refresh Model Status", size="sm", variant="secondary")
+    refresh_model_status_btn.click(
+        fn=update_model_status,
+        outputs=model_status
     )
 
     # Resume status checking
@@ -576,5 +613,6 @@ def seedvr2_tab(
         outputs=health_display
     )
 
-    # Initialize comparison slider
+    # Initialize comparison slider and model status
     comparison_note.update(service["comparison_html_slider"]())
+    model_status.update(initialize_model_status())

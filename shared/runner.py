@@ -20,6 +20,8 @@ from .path_utils import (
     write_png_metadata,
     detect_input_type,
 )
+from .model_manager import get_model_manager, ModelType
+
 try:
     import torch  # type: ignore
 except Exception:
@@ -51,6 +53,7 @@ class Runner:
         self._canceled = False
         self._telemetry_enabled = telemetry_enabled
         self._last_model_id: Optional[str] = None
+        self._model_manager = get_model_manager()
 
     # ------------------------------------------------------------------ #
     # Mode management
@@ -183,9 +186,19 @@ class Runner:
         # In-app mode: execute within current process to avoid subprocess overhead (not cancelable)
         if self._active_mode == "in_app":
             self._maybe_clear_in_app_model(settings.get("dit_model"))
-            return self._run_seedvr2_in_app(cli_path, cmd, predicted_output, settings)
+            return self._run_seedvr2_in_app(cli_path, cmd, predicted_output, settings, on_progress)
 
         cmd = self._maybe_wrap_with_vcvars(cmd, settings)
+
+        # For subprocess mode, preload model to ensure it's ready (warm up the model cache)
+        if self._active_mode == "subprocess":
+            if on_progress:
+                on_progress("Preloading model for subprocess execution...\n")
+            model_ready = self.ensure_seedvr2_model_loaded(settings, on_progress)
+            if not model_ready:
+                return RunResult(1, None, "Failed to preload required model")
+            if on_progress:
+                on_progress("Model ready, starting subprocess...\n")
 
         env = os.environ.copy()
         env["TEMP"] = str(self.temp_dir)
@@ -251,10 +264,30 @@ class Runner:
         self._last_model_id = settings.get("dit_model", self._last_model_id)
         return RunResult(proc.returncode if proc else -1, output_path, "\n".join(log_lines))
 
-    def _run_seedvr2_in_app(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any]) -> RunResult:
+    def _run_seedvr2_in_app(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
         """
         Execute SeedVR2 CLI inline (single process). Not cancelable mid-run.
+        Uses pre-loaded model from model manager.
         """
+        # Ensure model is loaded
+        dit_model = settings.get("dit_model", "")
+        if not self.ensure_seedvr2_model_loaded(settings, on_progress):
+            error_msg = f"Failed to load SeedVR2 model: {dit_model}"
+            return RunResult(1, None, error_msg)
+
+        # Get the pre-loaded runner
+        runner_result = self._model_manager.get_model_runner(
+            ModelType.SEEDVR2, dit_model, **settings
+        )
+
+        if not runner_result:
+            error_msg = f"Model not available: {dit_model}"
+            return RunResult(1, None, error_msg)
+
+        runner, cache_context = runner_result
+
+        # For now, fall back to CLI execution since the runner integration is complex
+        # TODO: Implement direct runner execution for better performance
         script_args = cmd[1:]  # drop python executable
         buf = io.StringIO()
         rc = 0
@@ -280,13 +313,102 @@ class Runner:
                     "args": settings,
                 },
             )
-        self._last_model_id = settings.get("dit_model", self._last_model_id)
-        try:
-            if torch:
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        self._last_model_id = dit_model
         return RunResult(rc, output_path, buf.getvalue())
+
+    def ensure_seedvr2_model_loaded(self, settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> bool:
+        """
+        Ensure the required SeedVR2 model is loaded, loading it if necessary.
+
+        Returns True if model is ready, False if loading failed.
+        """
+        dit_model = settings.get("dit_model", "")
+        if not dit_model:
+            return False
+
+        # Check if model is already loaded
+        if self._model_manager.is_model_loaded(ModelType.SEEDVR2, dit_model, **settings):
+            return True
+
+        # Model not loaded, need to load it
+        def load_callback():
+            # Import here to avoid circular imports
+            from ..SeedVR2.src.core.generation_utils import setup_generation_context, prepare_runner
+            from ..SeedVR2.src.utils.debug import Debug
+
+            debug = Debug(enabled=False)  # Minimal debug for loading
+
+            # Setup generation context (similar to CLI)
+            device_list = [settings.get("cuda_device", "0")]
+            platform_type = "cuda" if torch and torch.cuda.is_available() else "cpu"
+
+            # Parse devices
+            if isinstance(device_list, str):
+                device_list = [d.strip() for d in device_list.split(",") if d.strip()]
+
+            inference_device = self._device_id_to_name(device_list[0], platform_type)
+
+            # Setup context
+            ctx = setup_generation_context(
+                dit_device=inference_device,
+                vae_device=inference_device,
+                dit_offload_device=settings.get("dit_offload_device", "none"),
+                vae_offload_device=settings.get("vae_offload_device", "none"),
+                tensor_offload_device=settings.get("tensor_offload_device", "cpu"),
+                debug=debug
+            )
+
+            # Build torch compile args
+            torch_compile_args_dit = None
+            if settings.get("compile_dit"):
+                torch_compile_args_dit = {
+                    "backend": settings.get("compile_backend", "inductor"),
+                    "mode": settings.get("compile_mode", "default"),
+                    "fullgraph": settings.get("compile_fullgraph", False),
+                    "dynamic": settings.get("compile_dynamic", False),
+                    "dynamo_cache_size_limit": settings.get("compile_dynamo_cache_size_limit", 64),
+                    "dynamo_recompile_limit": settings.get("compile_dynamo_recompile_limit", 128),
+                }
+
+            # Prepare runner
+            model_dir = settings.get("model_dir") or str(self.base_dir / "models" / "SeedVR2")
+
+            runner, cache_context = prepare_runner(
+                dit_model=dit_model,
+                vae_model="ema_vae_fp16.safetensors",  # Default VAE
+                model_dir=model_dir,
+                debug=debug,
+                ctx=ctx,
+                dit_cache=False,  # Disable caching for now, let model manager handle it
+                vae_cache=False,
+                block_swap_config={
+                    'blocks_to_swap': settings.get('blocks_to_swap', 0),
+                    'swap_io_components': settings.get('swap_io_components', False),
+                    'offload_device': settings.get('dit_offload_device', 'none'),
+                },
+                encode_tiled=settings.get('vae_encode_tiled', False),
+                encode_tile_size=(settings.get('vae_encode_tile_size', 1024), settings.get('vae_encode_tile_size', 1024)),
+                encode_tile_overlap=(settings.get('vae_encode_tile_overlap', 128), settings.get('vae_encode_tile_overlap', 128)),
+                decode_tiled=settings.get('vae_decode_tiled', False),
+                decode_tile_size=(settings.get('vae_decode_tile_size', 1024), settings.get('vae_decode_tile_size', 1024)),
+                decode_tile_overlap=(settings.get('vae_decode_tile_overlap', 128), settings.get('vae_decode_tile_overlap', 128)),
+                tile_debug=settings.get('tile_debug', 'false'),
+                attention_mode=settings.get('attention_mode', 'sdpa'),
+                torch_compile_args_dit=torch_compile_args_dit,
+            )
+
+            return runner, cache_context
+
+        # Load the model using the model manager
+        success = self._model_manager.preload_model(
+            ModelType.SEEDVR2,
+            dit_model,
+            load_callback,
+            on_progress,
+            **settings
+        )
+
+        return success
 
     # ------------------------------------------------------------------ #
     # Command builder
