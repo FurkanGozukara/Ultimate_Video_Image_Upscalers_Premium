@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, Tuple
 import gradio as gr
 
 from shared.preset_manager import PresetManager
@@ -42,6 +42,46 @@ def _parse_scale_from_name(name: str) -> int:
         except Exception:
             pass
     return 4
+
+
+def _calculate_input_resolution_for_target(input_dims: Tuple[int, int], target_resolution: int, model_scale: int, enable_max: bool = True, max_resolution: int = 0) -> Tuple[int, int]:
+    """
+    Calculate optimal input resolution for GAN models with fixed scale factors.
+
+    For fixed-scale GAN models (2x, 4x), we need to determine what input resolution
+    will produce output closest to the desired target resolution.
+    """
+    if not input_dims or target_resolution <= 0:
+        return input_dims
+
+    input_w, input_h = input_dims
+    input_short = min(input_w, input_h)
+
+    # Calculate what input resolution would give us the target when multiplied by scale
+    ideal_input_short = target_resolution / model_scale
+
+    # Apply max resolution constraint if enabled
+    if enable_max and max_resolution > 0:
+        max_input_for_max_res = max_resolution / model_scale
+        ideal_input_short = min(ideal_input_short, max_input_for_max_res)
+
+    # Don't upscale beyond original resolution (would be wasteful)
+    ideal_input_short = min(ideal_input_short, input_short)
+
+    # Calculate new dimensions maintaining aspect ratio
+    aspect_ratio = input_w / input_h
+    if input_w <= input_h:  # Portrait or square
+        new_w = ideal_input_short * aspect_ratio
+        new_h = ideal_input_short
+    else:  # Landscape
+        new_w = ideal_input_short
+        new_h = ideal_input_short / aspect_ratio
+
+    # Round to even numbers (often required by models)
+    new_w = int(new_w // 2 * 2)
+    new_h = int(new_h // 2 * 2)
+
+    return (max(64, new_w), max(64, new_h))  # Minimum 64px
 
 
 def _load_gan_catalog(base_dir: Path):
@@ -92,23 +132,37 @@ def _is_realesrgan_builtin(name: str) -> bool:
 
 
 def _scan_gan_models(base_dir: Path) -> List[str]:
+    """Scan for GAN models with comprehensive metadata"""
     models_dir = base_dir / "Image_Upscale_Models"
     if not models_dir.exists():
         return []
-    files = []
+
+    models = []
     for f in models_dir.iterdir():
         if f.is_file() and f.suffix.lower() in GAN_MODEL_EXTS:
-            files.append(f.name)
-    return sorted(files)
+            models.append(f.name)
+    return sorted(models)
 
 
 def gan_defaults(base_dir: Path) -> Dict[str, Any]:
     models = _scan_gan_models(base_dir)
     default_model = models[0] if models else ""
-    meta = _get_gan_meta(default_model, base_dir) if default_model else {"scale": 4}  # Default to 4x for unknown models
+
+    # Use comprehensive metadata system for scale detection
+    if default_model:
+        try:
+            from shared.gan_runner import get_gan_model_metadata
+            meta = get_gan_model_metadata(default_model, base_dir)
+            detected_scale = meta.scale
+        except Exception:
+            # Fallback to parsing from filename
+            detected_scale = _parse_scale_from_name(default_model)
+    else:
+        detected_scale = 4
+
     return {
         "model": default_model,
-        "scale": meta.get("scale", 4),  # Use metadata scale, default to 4x
+        "scale": detected_scale,  # Dynamically detected from model
         "backend": "realesrgan",
         "input_path": "",
         "cuda_device": "0",
@@ -257,7 +311,6 @@ def build_gan_callbacks(
                 gr.ImageSlider.update(value=None),
                 state
             )
-            )
 
         face_apply = bool(args[-1])
         face_apply = face_apply or global_settings.get("face_global", False)
@@ -290,30 +343,52 @@ def build_gan_callbacks(
 
         def maybe_downscale(s):
             """
-            Respect Resolution tab intent for 2x/4x GANs:
-            - Only downscale when ratio_downscale flag is set.
-            - Honor per-model cached target/max resolution.
+            Dynamic resolution adjustment for fixed-scale GAN models.
+            When using Resolution & Scene Split settings, calculate optimal input resolution
+            that will produce output closest to target resolution after model scaling.
             """
-            if not (s.get("use_resolution_tab") and seed_controls.get("resolution_val")):
+            if not s.get("use_resolution_tab"):
                 return s
+
+            # Get model scale factor
+            model_scale = s.get("scale", 4)
+            if model_scale <= 1:  # Not a scaling model
+                return s
+
+            # Get resolution settings from cache
             model_cache = seed_controls.get("resolution_cache", {}).get(s.get("model"), {})
-            ratio_down = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
-            if not ratio_down:
-                return s
-            target_short = model_cache.get("resolution_val") or seed_controls.get("resolution_val")
-            max_target = model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val")
+            target_resolution = model_cache.get("resolution_val") or seed_controls.get("resolution_val", 0)
+            max_resolution = model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val", 0)
             enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
-            if enable_max and max_target:
-                target_short = min(target_short or max_target, max_target)
+            auto_resolution = model_cache.get("auto_resolution", seed_controls.get("auto_resolution", True))
+
+            if not target_resolution and not auto_resolution:
+                return s
+
+            # Get input dimensions
             dims = get_media_dimensions(s["input_path"])
-            if not (dims and target_short):
+            if not dims:
                 return s
-            short_side = min(dims)
-            desired_input_short = target_short / max(1, s["scale"])
-            if desired_input_short >= short_side:
+
+            # Calculate optimal input resolution for target output
+            optimal_input_dims = _calculate_input_resolution_for_target(
+                dims, target_resolution, model_scale, enable_max, max_resolution
+            )
+
+            input_w, input_h = dims
+            optimal_w, optimal_h = optimal_input_dims
+
+            # Skip if already at optimal resolution (within tolerance)
+            tolerance = 32  # Allow some tolerance for rounding
+            if abs(input_w - optimal_w) <= tolerance and abs(input_h - optimal_h) <= tolerance:
                 return s
-            tmp_path = Path(current_temp_dir) / f"gan_downscale_{Path(s['input_path']).stem}.mp4"
-            if Path(s["input_path"]).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
+
+            # Create temporary adjusted file
+            tmp_path = Path(current_temp_dir) / f"gan_input_adjust_{Path(s['input_path']).stem}.mp4"
+            input_is_video = Path(s["input_path"]).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi")
+
+            if input_is_video:
+                # Video resolution adjustment with ffmpeg
                 subprocess.run(
                     [
                         "ffmpeg",
@@ -321,7 +396,7 @@ def build_gan_callbacks(
                         "-i",
                         s["input_path"],
                         "-vf",
-                        f"scale=-2:{int(desired_input_short)}",
+                        f"scale={optimal_w}:{optimal_h}",
                         str(tmp_path),
                     ],
                     stdout=subprocess.DEVNULL,
@@ -329,22 +404,22 @@ def build_gan_callbacks(
                 )
                 if tmp_path.exists():
                     s["input_path"] = str(tmp_path)
+                    s["resolution_adjusted"] = True
             else:
+                # Image resolution adjustment with OpenCV
                 try:
                     import cv2
-
                     img = cv2.imread(s["input_path"], cv2.IMREAD_UNCHANGED)
                     if img is not None:
-                        h, w = img.shape[:2]
-                        scale_factor = desired_input_short / float(short_side)
-                        new_w = max(1, int(w * scale_factor))
-                        new_h = max(1, int(h * scale_factor))
-                        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                        tmp_img = Path(temp_dir) / f"gan_downscale_{Path(s['input_path']).name}"
-                        cv2.imwrite(str(tmp_img), resized)
-                        s["input_path"] = str(tmp_img)
+                        adjusted = cv2.resize(img, (optimal_w, optimal_h), interpolation=cv2.INTER_LANCZOS4)
+                        tmp_path = tmp_path.with_suffix(Path(s["input_path"]).suffix)
+                        cv2.imwrite(str(tmp_path), adjusted)
+                        if tmp_path.exists():
+                            s["input_path"] = str(tmp_path)
+                            s["resolution_adjusted"] = True
                 except Exception:
                     pass
+
             return s
 
         def relocate_output(path_str: Optional[str]) -> Optional[str]:
@@ -493,9 +568,19 @@ def build_gan_callbacks(
         # Kick off worker thread
         if settings.get("batch_enable"):
             folder = Path(settings["input_path"])
-            items = [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp")]
+            # Check if this is a frame folder (contains only images, treated as a sequence)
+            image_files = [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp")]
+            video_files = [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi")]
+
+            if image_files and len(image_files) > 1 and not video_files:
+                # Treat as frame folder - process as single unit
+                items = [folder]
+            else:
+                # Regular batch processing - individual files
+                items = image_files + video_files
+
             if not items:
-                return ("❌ No media files found in batch folder", "", None, "", gr.ImageSlider.update(value=None), state)
+                return ("❌ No media files or frame folders found in batch folder", "", None, "", gr.ImageSlider.update(value=None), state)
             t = threading.Thread(target=worker_batch, args=(items,), daemon=True)
         else:
             prepped = maybe_downscale(prepare_single(settings["input_path"]))
@@ -522,9 +607,6 @@ def build_gan_callbacks(
                     gr.ImageSlider.update(value=None),
                     state
                 )
-                    "",
-                    gr.ImageSlider.update(value=None),
-                )
             time.sleep(0.1)
         t.join()
 
@@ -547,6 +629,17 @@ def build_gan_callbacks(
         cancel_event.set()
         return gr.Markdown.update(value="⏹️ Cancel requested"), "", state or {}
 
+    def get_model_scale(model_name: str) -> int:
+        """Get the scale factor for a specific model"""
+        if not model_name:
+            return 4
+        try:
+            from shared.gan_runner import get_gan_model_metadata
+            meta = get_gan_model_metadata(model_name, Path(defaults["base_dir"]))
+            return meta.scale
+        except Exception:
+            return _parse_scale_from_name(model_name)
+
     return {
         "defaults": defaults,
         "order": GAN_ORDER,
@@ -557,6 +650,7 @@ def build_gan_callbacks(
         "run_action": lambda *args: run_action(*args[:-1], args[-1]) if len(args) > 1 else run_action(*args),
         "model_scanner": lambda: _scan_gan_models(base_dir),
         "cancel_action": lambda *args: cancel_action(args[0] if args else None),
+        "get_model_scale": get_model_scale,
     }
 
 

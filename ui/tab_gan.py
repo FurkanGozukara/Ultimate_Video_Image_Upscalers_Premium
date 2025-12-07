@@ -34,7 +34,7 @@ def build_gan_tab(
             gr.Markdown(health_banner.get("text", ""))
             model_select = gr.Dropdown(label="Model", choices=models, value=values[0], info="Scanned from Image_Upscale_Models")
             backend = gr.Dropdown(label="Backend", choices=["realesrgan", "opencv"], value=values[2])
-            scale = gr.Dropdown(label="Scale", choices=[2, 4], value=values[1])
+            scale = gr.Number(label="Scale (auto-detected from model)", value=values[1], precision=0, interactive=False, info="Automatically detected from selected model")
             input_file = gr.File(label="Upload image/video (optional)", type="filepath", file_types=["image", "video"])
             input_path = gr.Textbox(label="Input path (image, video, or frames folder)", value=values[3])
             gan_cuda = gr.Textbox(label="CUDA device(s) (e.g., 0 or 0,1)", value=values[4])
@@ -112,6 +112,13 @@ def build_gan_tab(
 
     open_outputs_btn.click(lambda: callbacks["open_outputs_folder"](), outputs=status_box)
     delete_temp_btn.click(lambda ok: callbacks["clear_temp_folder"](ok), inputs=[delete_confirm], outputs=status_box)
+
+    # Update scale when model changes
+    model_select.change(
+        fn=lambda model: callbacks["get_model_scale"](model),
+        inputs=[model_select],
+        outputs=[scale]
+    )
 
     return comparison_help()
 

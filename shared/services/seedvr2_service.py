@@ -17,7 +17,7 @@ from shared.path_utils import (
     get_media_duration_seconds,
     detect_input_type,
 )
-from shared.chunking import chunk_and_process
+from shared.chunking import chunk_and_process, check_resume_available
 from shared.face_restore import restore_image, restore_video
 from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
@@ -83,6 +83,7 @@ def seedvr2_defaults() -> Dict[str, Any]:
         "cache_dit": False,
         "cache_vae": False,
         "debug": False,
+        "resume_chunking": False,
     }
 
 
@@ -133,9 +134,10 @@ SEEDVR2_ORDER: List[str] = [
     "compile_dynamo_cache_size_limit",
     "compile_dynamo_recompile_limit",
     "cache_dit",
-    "cache_vae",
-    "debug",
-]
+        "cache_vae",
+        "debug",
+        "resume_chunking",
+    ]
 
 
 # Guardrails -------------------------------------------------------------------
@@ -278,6 +280,15 @@ def build_seedvr2_callbacks(
 
     def safe_defaults():
         return [defaults[key] for key in SEEDVR2_ORDER]
+
+    def check_resume_status(global_settings, output_format):
+        """Check if chunking resume is available and return status message."""
+        temp_dir = Path(global_settings["temp_dir"])
+        available, message = check_resume_available(temp_dir, output_format or "mp4")
+        if available:
+            return gr.Markdown.update(value=f"✅ {message}", visible=True)
+        else:
+            return gr.Markdown.update(value=f"ℹ️ {message}", visible=True)
 
     def cancel():
         canceled = runner.cancel()
@@ -562,8 +573,10 @@ def build_seedvr2_callbacks(
                     chunk_seconds=float(single_settings.get("chunk_size_sec") or 0),
                     chunk_overlap=float(single_settings.get("chunk_overlap_sec") or 0),
                     per_chunk_cleanup=bool(single_settings.get("per_chunk_cleanup")),
+                    resume_from_partial=bool(single_settings.get("resume_chunking", False)),
                     allow_partial=True,
                     global_output_dir=str(runner.output_dir) if hasattr(runner, "output_dir") else None,
+                    progress_tracker=progress,
                 )
                 status = "✅ Chunked upscale complete" if rc == 0 else f"⚠️ Chunked upscale ended early ({rc})"
                 output_path = final_out if final_out else None
@@ -795,6 +808,7 @@ def build_seedvr2_callbacks(
         "save_preset": save_preset,
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
+        "check_resume_status": check_resume_status,
         "run_action": lambda *args: run_action(*args[:-1], state=args[-1]) if len(args) > 1 else run_action(*args),
         "cancel_action": lambda state=None: cancel(),
         "comparison_html_slider": comparison_html_slider,

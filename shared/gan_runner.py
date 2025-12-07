@@ -278,6 +278,55 @@ def _upscale_video(
     return out
 
 
+def _process_frame_folder(
+    frame_dir: Path,
+    scale: int,
+    output_format: str = "auto",
+    cancel_event=None,
+    log_lines=None,
+) -> Path:
+    """Process a folder containing image frames"""
+    if not frame_dir.exists() or not frame_dir.is_dir():
+        raise ValueError(f"Frame directory not found: {frame_dir}")
+
+    # Find all image frames
+    frame_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
+    frames = sorted([f for f in frame_dir.iterdir() if f.is_file() and f.suffix.lower() in frame_extensions])
+
+    if not frames:
+        raise ValueError(f"No image frames found in {frame_dir}")
+
+    # Create output directory
+    output_dir = frame_dir.parent / f"{frame_dir.name}_gan"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    processed = 0
+    for frame_path in frames:
+        if cancel_event and cancel_event.is_set():
+            break
+
+        # Process individual frame
+        img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            continue
+
+        h, w = img.shape[:2]
+        upscaled = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_LANCZOS4)
+
+        # Save processed frame
+        output_path = output_dir / frame_path.name
+        cv2.imwrite(str(output_path), upscaled)
+        processed += 1
+
+        if log_lines is not None:
+            log_lines.append(f"Processed frame {processed}/{len(frames)}: {frame_path.name}")
+
+    if processed == 0:
+        raise RuntimeError("No frames were successfully processed")
+
+    return output_dir
+
+
 def run_gan_upscale(
     settings: Dict[str, Any],
     apply_face: bool = False,
@@ -287,10 +336,30 @@ def run_gan_upscale(
 ) -> GanResult:
     """
     Comprehensive GAN upscaler with dynamic resolution adjustment based on model metadata.
+    Supports videos, images, and frame folders.
     """
     input_path = Path(normalize_path(settings.get("input_path", "")))
     if not input_path.exists():
         return GanResult(1, None, "Input missing")
+
+    # Detect input type: video, image, or frame folder
+    from .path_utils import detect_input_type
+    input_type = detect_input_type(str(input_path))
+
+    # Handle frame folders
+    if input_type == "directory":
+        log_lines = []
+        try:
+            output_path = _process_frame_folder(
+                input_path,
+                model_scale,
+                settings.get("output_format", "auto"),
+                cancel_event,
+                log_lines
+            )
+            return GanResult(0, str(output_path), "\n".join(log_lines))
+        except Exception as e:
+            return GanResult(1, None, f"Frame folder processing failed: {e}")
 
     # Get model metadata for accurate scale information
     model_name = settings.get("model", "")

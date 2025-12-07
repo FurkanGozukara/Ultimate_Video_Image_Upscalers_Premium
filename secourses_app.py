@@ -249,26 +249,26 @@ def main():
                 _append_warning(f"Last used Resolution preset '{res_last_name}' not found; loaded defaults.")
             res_defaults = preset_manager.merge_config(res_srv["defaults"], res_last or {})
         resolution_callbacks = {
-                "order": res_service.RESOLUTION_ORDER,
+            "order": res_service.RESOLUTION_ORDER,
             "models": lambda: combined_models,
-                "refresh_presets": res_srv["refresh_presets"],
-                "save_preset": res_srv["save_preset"],
-                "load_preset": lambda preset, model, _defaults, vals: res_srv["load_preset"](preset, model, list(vals)),
-                "safe_defaults": res_srv["safe_defaults"],
-                "apply_to_seed": res_srv["apply_to_seed"],
-                "chunk_estimate": res_srv["chunk_estimate"],
-                "estimate_from_input": res_srv["estimate_from_input"],
-                "cache_resolution": res_srv["cache_resolution"],
-                "cache_resolution_flags": res_srv["cache_resolution_flags"],
-                "seed_controls": seed_controls,
-                "shared_state": shared_state,
-            }
-            build_resolution_tab_ui(
-                res_defaults,
-                preset_manager,
-                shared_state,
-                resolution_callbacks,
-            )
+            "refresh_presets": res_srv["refresh_presets"],
+            "save_preset": res_srv["save_preset"],
+            "load_preset": lambda preset, model, _defaults, vals: res_srv["load_preset"](preset, model, list(vals)),
+            "safe_defaults": res_srv["safe_defaults"],
+            "apply_to_seed": res_srv["apply_to_seed"],
+            "chunk_estimate": res_srv["chunk_estimate"],
+            "estimate_from_input": res_srv["estimate_from_input"],
+            "cache_resolution": res_srv["cache_resolution"],
+            "cache_resolution_flags": res_srv["cache_resolution_flags"],
+            "seed_controls": seed_controls,
+            "shared_state": shared_state,
+        }
+        build_resolution_tab_ui(
+            res_defaults,
+            preset_manager,
+            shared_state,
+            resolution_callbacks,
+        )
 
         with gr.Tab("Output & Comparison"):
             out_srv = out_service.build_output_callbacks(preset_manager, shared_state, combined_models)

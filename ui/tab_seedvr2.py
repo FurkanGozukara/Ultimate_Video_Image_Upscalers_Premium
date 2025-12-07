@@ -56,13 +56,12 @@ def build_seedvr2_tab(
             input_path = gr.Textbox(label="Input Video or Frames Folder Path", value=values[0], placeholder="C:/path/to/video.mp4 or /path/to/frames")
             input_cache_msg = gr.Markdown("")
             auto_res_msg = gr.Markdown("")
-            batch_enable = gr.Checkbox(label="Enable Batch Processing (use directory input)", value=values[5])
-            batch_input = gr.Textbox(label="Batch Input Folder", value=values[6], placeholder="Folder containing videos or frames")
-            batch_output = gr.Textbox(label="Batch Output Folder Override", value=values[7], placeholder="Optional override for batch outputs")
             gr.Markdown("#### Scene Split (PySceneDetect)")
             chunk_enable = gr.Checkbox(label="Enable scene-based chunking", value=values[8])
             scene_threshold = gr.Slider(label="Content Threshold", minimum=5, maximum=50, step=1, value=values[9])
             scene_min_len = gr.Slider(label="Min Scene Length (sec)", minimum=1, maximum=20, step=1, value=values[10])
+            resume_chunking = gr.Checkbox(label="Resume from partial chunks", value=values[48], info="Resume interrupted chunking from existing partial outputs")
+            check_resume_btn = gr.Button("Check Resume Status", size="sm")
             output_override = gr.Textbox(label="Output Override (single run)", value=values[1], placeholder="Leave empty for auto naming")
             output_format = gr.Dropdown(label="Output Format", choices=["auto", "mp4", "png"], value=values[2])
             model_dir = gr.Textbox(label="Model Directory (optional)", value=values[3])
@@ -133,10 +132,19 @@ def build_seedvr2_tab(
             status_box = gr.Markdown(value="Ready.")
             progress_indicator = gr.Markdown(value="", visible=False)
             log_box = gr.Textbox(label="Run Log", value="", lines=16)
+            progress_bar = gr.Progress(visible=False)
             output_video = gr.Video(label="Upscaled Video", interactive=False, show_download_button=True)
             output_image = gr.Image(label="Upscaled Image / Preview", interactive=False, show_download_button=True)
             image_slider = gr.ImageSlider(label="Image Comparison", interactive=False, visible=True, height=500)
+
+            # Batch Processing Controls
+            batch_enable = gr.Checkbox(label="Enable Batch Processing (use directory input)", value=values[5])
+            batch_input = gr.Textbox(label="Batch Input Folder", value=values[6], placeholder="Folder containing videos or frames")
+            batch_output = gr.Textbox(label="Batch Output Folder Override", value=values[7], placeholder="Optional override for batch outputs")
+
             chunk_info = gr.Markdown("Last processed chunk will appear here.")
+            resume_status = gr.Markdown("", visible=False)
+            chunk_progress = gr.Markdown("", visible=False)
             alpha_warn = gr.Markdown("⚠️ PNG inputs with alpha are preserved; MP4 output drops alpha. Choose PNG output to retain alpha.")
             comparison_note = gr.HTML("")
             face_restore_chk = gr.Checkbox(label="Apply Face Restoration after upscale", value=global_settings.get("face_global", False))
@@ -217,22 +225,28 @@ def build_seedvr2_tab(
         cache_dit,
         cache_vae,
         debug,
+        resume_chunking,
     ]
 
     upscale_btn.click(
         fn=lambda *args: callbacks["run_action"](*args[:-1], preview_only=False, state=args[-1]),
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
-        outputs=[status_box, log_box, output_video, output_image, chunk_info, comparison_note, image_slider, shared_state],
+        outputs=[status_box, log_box, progress_bar, output_video, output_image, chunk_info, resume_status, chunk_progress, comparison_note, image_slider, shared_state],
     )
     preview_btn.click(
         fn=lambda *args: callbacks["run_action"](*args[:-1], preview_only=True, state=args[-1]),
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
-        outputs=[status_box, log_box, output_video, output_image, chunk_info, comparison_note, image_slider, shared_state],
+        outputs=[status_box, log_box, progress_bar, output_video, output_image, chunk_info, resume_status, chunk_progress, comparison_note, image_slider, shared_state],
     )
     cancel_btn.click(
         fn=lambda ok, state: (callbacks["cancel_action"](), state) if ok else (gr.Markdown.update(value="ℹ️ Enable 'Confirm cancel' to stop."), "", state),
         inputs=[cancel_confirm, shared_state],
         outputs=[status_box, log_box, shared_state],
+    )
+    check_resume_btn.click(
+        fn=lambda fmt, gs: callbacks["check_resume_status"](gs, fmt),
+        inputs=[output_format, global_settings],
+        outputs=resume_status,
     )
     open_outputs_btn.click(
         fn=lambda state: (callbacks["open_outputs_folder"](state), state),

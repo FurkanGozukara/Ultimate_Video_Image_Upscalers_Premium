@@ -104,6 +104,54 @@ def concat_videos(chunk_paths: List[Path], output_path: Path) -> bool:
     return proc.returncode == 0 and output_path.exists()
 
 
+def detect_resume_state(work_dir: Path, output_format: str) -> Tuple[Optional[Path], List[Path]]:
+    """
+    Detect if there's a resumable chunking session.
+    Returns (partial_output_path, completed_chunks) or (None, []) if no resume possible.
+    """
+    if not work_dir.exists():
+        return None, []
+
+    # Check for partial outputs
+    if output_format == "png":
+        partial_candidates = list(work_dir.glob("*_partial"))
+        if partial_candidates:
+            partial_dir = partial_candidates[0]
+            completed_chunks = []
+            chunk_pattern = partial_dir / "chunk_*.png"
+            for chunk_file in sorted(chunk_pattern.parent.glob("chunk_*.png")):
+                if chunk_file.exists():
+                    completed_chunks.append(chunk_file)
+            return partial_dir, completed_chunks
+    else:
+        partial_candidates = list(work_dir.glob("*_partial.mp4"))
+        if partial_candidates:
+            partial_file = partial_candidates[0]
+            # For video, we can't easily resume chunk-by-chunk, so return empty completed list
+            return partial_file, []
+
+    return None, []
+
+
+def check_resume_available(temp_dir: Path, output_format: str) -> Tuple[bool, str]:
+    """
+    Check if resume is available for chunking.
+    Returns (available, status_message).
+    """
+    work_dir = temp_dir / "chunks"
+    partial_path, completed_chunks = detect_resume_state(work_dir, output_format)
+
+    if not partial_path:
+        return False, "No partial chunking session found to resume."
+
+    if output_format == "png" and completed_chunks:
+        return True, f"Found {len(completed_chunks)} completed chunks ready to resume."
+    elif output_format != "png" and partial_path.exists():
+        return True, "Found partial video output ready to resume from."
+    else:
+        return False, "Partial output found but no completed chunks to resume from."
+
+
 def chunk_and_process(
     runner,
     settings: dict,
@@ -116,6 +164,8 @@ def chunk_and_process(
     per_chunk_cleanup: bool = False,
     allow_partial: bool = True,
     global_output_dir: Optional[str] = None,
+    resume_from_partial: bool = False,
+    progress_tracker=None,
 ) -> Tuple[int, str, str, int]:
     """
     Returns (returncode, log, final_output_path, chunk_count)
@@ -126,8 +176,18 @@ def chunk_and_process(
     if output_format in (None, "auto"):
         output_format = "mp4"
     work = Path(temp_dir) / "chunks"
-    shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True, exist_ok=True)
+    existing_partial, existing_chunks = detect_resume_state(work, output_format)
+
+    if resume_from_partial and existing_partial and existing_chunks:
+        on_progress(f"Resuming from partial output: {existing_partial}\n")
+        # Skip re-splitting, use existing chunks
+        chunk_paths = existing_chunks
+        start_chunk_idx = len(existing_chunks)
+    else:
+        # Fresh start - clean work directory
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+        start_chunk_idx = 0
 
     # Predict final output locations for partial/cancel handling
     global_override = settings.get("output_override") or global_output_dir
@@ -201,7 +261,23 @@ def chunk_and_process(
 
     output_chunks: List[Path] = []
     chunk_logs: List[dict] = []
-    for idx, chunk in enumerate(chunk_paths, 1):
+
+    # If resuming, load existing completed chunks
+    if resume_from_partial and existing_chunks:
+        output_chunks = existing_chunks.copy()
+        for i, chunk_path in enumerate(existing_chunks, 1):
+            chunk_logs.append({
+                "chunk_index": i,
+                "input": str(chunk_path),
+                "output": str(chunk_path),
+                "returncode": 0,
+                "resumed": True,
+            })
+        on_progress(f"Loaded {len(existing_chunks)} completed chunks from previous run\n")
+        if progress_tracker:
+            progress_tracker(len(existing_chunks) / len(chunk_paths), desc=f"Resumed {len(existing_chunks)} chunks")
+
+    for idx, chunk in enumerate(chunk_paths[start_chunk_idx:], start_chunk_idx + 1):
         # Respect external cancellation
         try:
             if getattr(runner, "is_canceled", lambda: False)():
@@ -258,6 +334,8 @@ def chunk_and_process(
         except Exception:
             pass
         on_progress(f"Processing chunk {idx}/{len(chunk_paths)}: {chunk.name}\n")
+        if progress_tracker:
+            progress_tracker((idx - 1) / len(chunk_paths), desc=f"Processing chunk {idx}/{len(chunk_paths)}")
         chunk_settings = settings.copy()
         chunk_settings["input_path"] = str(chunk)
         # Direct chunk outputs to temp; choose dir for PNG exports
