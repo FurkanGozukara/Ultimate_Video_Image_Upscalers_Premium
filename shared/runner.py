@@ -50,6 +50,7 @@ class Runner:
         self._log_lines: List[str] = []
         self._canceled = False
         self._telemetry_enabled = telemetry_enabled
+        self._last_model_id: Optional[str] = None
 
     # ------------------------------------------------------------------ #
     # Mode management
@@ -121,8 +122,9 @@ class Runner:
         format_for_cli = None if output_format == "auto" else output_format
 
         batch_mode = bool(settings.get("batch_mode"))
-        # Prefer explicit override, otherwise fall back to configured default output directory
-        effective_output_override = settings.get("output_override") or str(self.output_dir)
+        # Only honor an explicit override; otherwise let resolve_output_location
+        # derive the path using global output dir with _upscaled suffix semantics.
+        effective_output_override = settings.get("output_override") or None
         if preview_only:
             # Force single-frame preview: load_cap=1, image path remains same
             settings = settings.copy()
@@ -139,20 +141,48 @@ class Runner:
 
         # Predict output path: if user supplied an explicit file path, keep it; otherwise mirror CLI logic
         predicted_output: Optional[Path]
-        if effective_output_override and Path(effective_output_override).suffix:
-            predicted_output = Path(normalize_path(effective_output_override))
+        global_override: Optional[str] = None
+        if effective_output_override:
+            override_path = Path(normalize_path(effective_output_override))
+            if override_path.suffix:
+                predicted_output = override_path
+            else:
+                global_override = str(override_path)
+                predicted_output = resolve_output_location(
+                    input_path=input_path,
+                    output_format=effective_output_format,
+                    global_output_dir=global_override,
+                    batch_mode=batch_mode,
+                    png_padding=settings.get("png_padding"),
+                    png_keep_basename=settings.get("png_keep_basename", False),
+                )
         else:
+            global_override = str(self.output_dir)
             predicted_output = resolve_output_location(
                 input_path=input_path,
                 output_format=effective_output_format,
-                global_output_dir=effective_output_override,
+                global_output_dir=global_override,
                 batch_mode=batch_mode,
+                png_padding=settings.get("png_padding"),
+                png_keep_basename=settings.get("png_keep_basename", False),
             )
 
         cmd = self._build_seedvr2_cmd(cli_path, settings, format_for_cli, preview_only, output_override=effective_output_override)
 
+        # Compile guardrail: if compile requested on Windows but vcvars is missing, disable compile flags with a warning.
+        if platform.system() == "Windows" and (settings.get("compile_dit") or settings.get("compile_vae")):
+            vcvars_path = self._find_vcvars()
+            if not vcvars_path:
+                warn_msg = "⚠️ VS Build Tools not found; disabling compile_dit/compile_vae to avoid failures."
+                if on_progress:
+                    on_progress(warn_msg + "\n")
+                settings["compile_dit"] = False
+                settings["compile_vae"] = False
+                cmd = [c for c in cmd if c not in ("--compile_dit", "--compile_vae")]
+
         # In-app mode: execute within current process to avoid subprocess overhead (not cancelable)
         if self._active_mode == "in_app":
+            self._maybe_clear_in_app_model(settings.get("dit_model"))
             return self._run_seedvr2_in_app(cli_path, cmd, predicted_output, settings)
 
         cmd = self._maybe_wrap_with_vcvars(cmd, settings)
@@ -205,6 +235,9 @@ class Runner:
                 self._active_process = None
 
         output_path = str(predicted_output) if predicted_output else None
+        if self._canceled and predicted_output and Path(predicted_output).exists():
+            log_lines.append("Run canceled; partial output preserved.")
+            output_path = str(predicted_output)
         # Emit simple metadata
         if output_path and self._telemetry_enabled:
             emit_metadata(
@@ -215,6 +248,7 @@ class Runner:
                     "args": settings,
                 },
             )
+        self._last_model_id = settings.get("dit_model", self._last_model_id)
         return RunResult(proc.returncode if proc else -1, output_path, "\n".join(log_lines))
 
     def _run_seedvr2_in_app(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any]) -> RunResult:
@@ -246,11 +280,32 @@ class Runner:
                     "args": settings,
                 },
             )
+        self._last_model_id = settings.get("dit_model", self._last_model_id)
+        try:
+            if torch:
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
         return RunResult(rc, output_path, buf.getvalue())
 
     # ------------------------------------------------------------------ #
     # Command builder
     # ------------------------------------------------------------------ #
+    def _find_vcvars(self) -> Optional[Path]:
+        """
+        Try to locate vcvarsall.bat in common VS Build Tools locations.
+        """
+        candidates = [
+            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"),
+            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
     def _build_seedvr2_cmd(
         self,
         cli_path: Path,
@@ -368,16 +423,32 @@ class Runner:
         if not (settings.get("compile_dit") or settings.get("compile_vae")):
             return cmd
 
-        default_vcvars = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat")
-        if not default_vcvars.exists():
+        vcvars_path = self._find_vcvars()
+        if not vcvars_path:
             # add note for downstream log
-            self._log_lines.append("⚠️ VS Build Tools not found at default path; compile may fail.")
+            self._log_lines.append("⚠️ VS Build Tools not found; compile may fail or be disabled.")
             return cmd  # fall back silently; health check will warn elsewhere
 
         # Build cmd /c call "vcvarsall.bat" x64 && original command
         quoted_cmd = " ".join(f'"{c}"' if " " in c else c for c in cmd)
-        wrapped = ["cmd", "/c", f'call "{default_vcvars}" x64 && {quoted_cmd}']
+        wrapped = ["cmd", "/c", f'call "{vcvars_path}" x64 && {quoted_cmd}']
         return wrapped
+
+    def _maybe_clear_in_app_model(self, model_id: Optional[str]):
+        """
+        Best-effort memory trim when switching models in in-app mode.
+        """
+        if self._active_mode != "in_app":
+            return
+        if model_id is None:
+            return
+        if self._last_model_id and self._last_model_id != model_id:
+            try:
+                if torch:
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        self._last_model_id = model_id
 
     # ------------------------------------------------------------------ #
     # RIFE runner
@@ -399,8 +470,15 @@ class Runner:
             raise ValueError("Input path is required for RIFE.")
 
         png_output = bool(settings.get("png_output"))
-        output_override = settings.get("output_override") or str(self.output_dir)
-        predicted_output = rife_output_path(input_path, png_output, output_override)
+        output_override = settings.get("output_override") or None
+        predicted_output = rife_output_path(
+            input_path,
+            png_output,
+            output_override,
+            global_output_dir=str(self.output_dir),
+            png_padding=settings.get("png_padding"),
+            png_keep_basename=settings.get("png_keep_basename", False),
+        )
 
         cmd = self._build_rife_cmd(cli_path, input_path, predicted_output, settings)
 
@@ -519,6 +597,8 @@ class Runner:
             cmd.extend(["--multi", str(settings["fps_multiplier"])])
         if settings.get("model_dir"):
             cmd.extend(["--model", settings["model_dir"]])
+        if settings.get("cuda_device"):
+            cmd.extend(["--cuda_device", str(settings["cuda_device"])])
         if settings.get("png_output"):
             cmd.extend(["--ext", "png"])
 

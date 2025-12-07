@@ -37,6 +37,10 @@ def build_output_tab(
             pin_reference = gr.Checkbox(label="Pin Reference", value=values[4])
             fullscreen = gr.Checkbox(label="Enable Fullscreen/Lightbox", value=values[5])
             apply_to_seed = gr.Button("Apply Output Format to SeedVR2")
+            png_padding = gr.Number(label="PNG frame number padding", value=values[6], precision=0)
+            png_keep_basename = gr.Checkbox(label="Keep input base-name for PNG sequences", value=values[7])
+            skip_first_frames = gr.Number(label="Skip first frames (global hint)", value=values[8], precision=0)
+            load_cap = gr.Number(label="Frame cap (global hint, 0 = all)", value=values[9], precision=0)
 
             comparison_note = comparison_help()
         with gr.Column(scale=2):
@@ -56,6 +60,10 @@ def build_output_tab(
         comparison_mode,
         pin_reference,
         fullscreen,
+        png_padding,
+        png_keep_basename,
+        skip_first_frames,
+        load_cap,
     ]
 
     save_preset_btn.click(
@@ -96,17 +104,37 @@ def build_output_tab(
         seed_controls_cache["fullscreen_val"] = bool(val)
         return gr.Markdown.update(value="Fullscreen preference cached.")
 
+    def cache_png_padding(val):
+        return callbacks["cache_png_padding"](val)
+
+    def cache_png_basename(val):
+        return callbacks["cache_png_basename"](val)
+
+    def cache_skip(val):
+        return callbacks["cache_skip"](val)
+
+    def cache_cap(val):
+        return callbacks["cache_cap"](val)
+
     cmp_cache_msg = gr.Markdown("")
     pin_cache_msg = gr.Markdown("")
     fs_cache_msg = gr.Markdown("")
     output_cache_msg = gr.Markdown("")
     fps_cache_msg = gr.Markdown("")
+    png_pad_cache_msg = gr.Markdown("")
+    png_base_cache_msg = gr.Markdown("")
+    skip_cache_msg = gr.Markdown("")
+    cap_cache_msg = gr.Markdown("")
 
     output_format.change(fn=cache_output, inputs=[output_format], outputs=output_cache_msg)
     fps_override.change(fn=cache_fps, inputs=[fps_override], outputs=fps_cache_msg)
     comparison_mode.change(fn=cache_comparison, inputs=[comparison_mode], outputs=cmp_cache_msg)
     pin_reference.change(fn=cache_pin, inputs=[pin_reference], outputs=pin_cache_msg)
     fullscreen.change(fn=cache_fullscreen, inputs=[fullscreen], outputs=fs_cache_msg)
+    png_padding.change(fn=cache_png_padding, inputs=[png_padding], outputs=png_pad_cache_msg)
+    png_keep_basename.change(fn=cache_png_basename, inputs=[png_keep_basename], outputs=png_base_cache_msg)
+    skip_first_frames.change(fn=cache_skip, inputs=[skip_first_frames], outputs=skip_cache_msg)
+    load_cap.change(fn=cache_cap, inputs=[load_cap], outputs=cap_cache_msg)
 
 
 def comparison_note_block():

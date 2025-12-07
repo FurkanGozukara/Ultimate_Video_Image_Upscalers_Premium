@@ -71,7 +71,7 @@ def seedvr2_defaults() -> Dict[str, Any]:
         "vae_decode_tile_size": 1024,
         "vae_decode_tile_overlap": 128,
         "tile_debug": "false",
-        "attention_mode": "sdpa",
+        "attention_mode": "flash_attn",
         "compile_dit": False,
         "compile_vae": False,
         "compile_backend": "inductor",
@@ -286,6 +286,70 @@ def build_seedvr2_callbacks(
             return gr.Markdown.update(value="⏹️ Cancel requested"), ""
         return gr.Markdown.update(value="No active process"), ""
 
+    def _auto_res_from_input(input_path: str):
+        """
+        Recalculate target/max resolution and chunk estimate when input changes.
+        """
+        model_name = seed_controls_cache.get("current_model") or defaults.get("dit_model")
+        model_cache = seed_controls_cache.get("resolution_cache", {}).get(model_name, {})
+        if not input_path:
+            return (
+                gr.Slider.update(),
+                gr.Slider.update(),
+                gr.Markdown.update(value="Provide an input to auto-calc resolution/chunks."),
+            )
+        p = Path(normalize_path(input_path))
+        if not p.exists():
+            return (
+                gr.Slider.update(),
+                gr.Slider.update(),
+                gr.Markdown.update(value="Input path not found; keeping current resolution."),
+            )
+        auto_res = model_cache.get("auto_resolution", seed_controls_cache.get("auto_resolution", True))
+        enable_max = model_cache.get("enable_max_target", seed_controls_cache.get("enable_max_target", True))
+        ratio_down = model_cache.get("ratio_downscale", seed_controls_cache.get("ratio_downscale", False))
+        chunk_size = float(model_cache.get("chunk_size_sec", seed_controls_cache.get("chunk_size_sec", 0) or 0))
+        chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls_cache.get("chunk_overlap_sec", 0) or 0))
+        target_res = int(model_cache.get("resolution_val") or seed_controls_cache.get("resolution_val") or defaults["resolution"])
+        max_target_res = int(model_cache.get("max_resolution_val") or seed_controls_cache.get("max_resolution_val") or defaults["max_resolution"])
+
+        dims = get_media_dimensions(str(p))
+        msg_lines = []
+        new_res = target_res
+        if auto_res and dims:
+            w, h = dims
+            short_side = min(w, h)
+            computed = min(short_side, target_res or short_side)
+            if ratio_down:
+                computed = min(computed, target_res or computed)
+            if enable_max and max_target_res and max_target_res > 0:
+                computed = min(computed, max_target_res)
+            new_res = int((computed // 16) * 16 or computed)
+            seed_controls_cache["resolution_val"] = new_res
+            msg_lines.append(f"Auto-resolution: input {w}x{h} → target {new_res} (max {max_target_res})")
+        else:
+            msg_lines.append("Auto-resolution disabled; no change.")
+
+        # Chunk estimate
+        est_msg = ""
+        if chunk_size > 0 and chunk_overlap < chunk_size:
+            dur = get_media_duration_seconds(str(p)) if detect_input_type(str(p)) == "video" else None
+            if dur:
+                import math
+
+                est_chunks = math.ceil(dur / max(0.001, chunk_size - chunk_overlap))
+                est_msg = f"Chunk estimate: ~{est_chunks} chunks for {dur:.1f}s (size {chunk_size}s, overlap {chunk_overlap}s)."
+            else:
+                est_msg = f"Chunking: size {chunk_size}s, overlap {chunk_overlap}s (duration unknown)."
+        if est_msg:
+            msg_lines.append(est_msg)
+
+        return (
+            gr.Slider.update(value=new_res),
+            gr.Slider.update(value=max_target_res),
+            gr.Markdown.update(value="\n".join(msg_lines)),
+        )
+
     def _resolve_input_path(file_upload: Optional[str], manual_path: str, batch_enable: bool, batch_input: str) -> str:
         if batch_enable and batch_input:
             return batch_input
@@ -296,16 +360,57 @@ def build_seedvr2_callbacks(
     def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False):
         settings_dict = _seedvr2_dict_from_args(list(args))
         settings = {**defaults, **settings_dict}
+        guardrail_msgs: List[str] = []
         settings["cuda_device"] = _expand_cuda_spec(settings.get("cuda_device", ""))
+        seed_controls_cache["current_model"] = settings.get("dit_model", defaults.get("dit_model"))
+        model_cache = seed_controls_cache.get("resolution_cache", {}).get(settings["dit_model"], {})
         meta = model_meta_map().get(settings.get("dit_model"))
         if meta:
             if settings.get("batch_size") == defaults["batch_size"]:
                 settings["batch_size"] = meta.default_batch_size
-            if settings.get("max_resolution", 0) == 0 and meta.max_resolution > 0:
-                settings["max_resolution"] = meta.max_resolution
+            if meta.max_resolution > 0:
+                settings["max_resolution"] = min(
+                    meta.max_resolution,
+                    settings.get("max_resolution", meta.max_resolution) or meta.max_resolution,
+                )
             if settings.get("attention_mode") == defaults["attention_mode"] and meta.preferred_attention:
                 settings["attention_mode"] = meta.preferred_attention
+            if not meta.compile_compatible and (settings.get("compile_dit") or settings.get("compile_vae")):
+                settings["compile_dit"] = False
+                settings["compile_vae"] = False
+                guardrail_msgs.append(
+                    f"{settings.get('dit_model')} is not compile-compatible; compile_dit/compile_vae disabled."
+                )
+        before_guardrails = settings.copy()
         settings = _enforce_seedvr2_guardrails(settings, defaults)
+
+        if settings.get("attention_mode") == "flash_attn":
+            try:
+                import flash_attn  # type: ignore  # noqa: F401
+            except Exception as exc:
+                settings["attention_mode"] = "sdpa"
+                guardrail_msgs.append(f"flash_attn unavailable ({exc}); falling back to sdpa.")
+        if settings.get("batch_size") != before_guardrails.get("batch_size"):
+            guardrail_msgs.append(
+                f"Batch size adjusted to {settings['batch_size']} (must follow 4n+1 rule)."
+            )
+        if settings.get("vae_encode_tiled") and settings.get("vae_encode_tile_overlap") != before_guardrails.get(
+            "vae_encode_tile_overlap"
+        ):
+            guardrail_msgs.append(
+                f"VAE encode overlap capped to {settings['vae_encode_tile_overlap']} (< tile size)."
+            )
+        if settings.get("vae_decode_tiled") and settings.get("vae_decode_tile_overlap") != before_guardrails.get(
+            "vae_decode_tile_overlap"
+        ):
+            guardrail_msgs.append(
+                f"VAE decode overlap capped to {settings['vae_decode_tile_overlap']} (< tile size)."
+            )
+        blockswap_enabled = settings.get("blocks_to_swap", 0) > 0 or settings.get("swap_io_components")
+        if blockswap_enabled and before_guardrails.get("dit_offload_device", "").lower() in ("", "none") and str(
+            settings.get("dit_offload_device", "")
+        ).lower() == "cpu":
+            guardrail_msgs.append("BlockSwap enabled without offload; dit_offload_device set to cpu.")
 
         settings["cuda_device"] = _expand_cuda_spec(settings.get("cuda_device", ""))
 
@@ -321,6 +426,16 @@ def build_seedvr2_callbacks(
 
         settings["batch_mode"] = bool(settings.get("batch_enable"))
 
+        # Apply global output hints for PNG padding / skip-cap if user set them in Output tab
+        settings["png_padding"] = seed_controls_cache.get("png_padding_val", 5)
+        settings["png_keep_basename"] = seed_controls_cache.get("png_keep_basename_val", True)
+        if settings.get("skip_first_frames", defaults["skip_first_frames"]) == defaults["skip_first_frames"]:
+            if seed_controls_cache.get("skip_first_frames_val") is not None:
+                settings["skip_first_frames"] = seed_controls_cache.get("skip_first_frames_val")
+        if settings.get("load_cap", defaults["load_cap"]) == defaults["load_cap"]:
+            if seed_controls_cache.get("load_cap_val") is not None:
+                settings["load_cap"] = seed_controls_cache.get("load_cap_val")
+
         if settings["output_format"] == "auto":
             settings["output_format"] = None
 
@@ -328,6 +443,7 @@ def build_seedvr2_callbacks(
             return ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None))
 
         face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))
+        face_strength = float(global_settings.get("face_strength", 0.5))
         settings["face_restore_global"] = face_apply
 
         # Apply Resolution tab cached values when available
@@ -335,22 +451,24 @@ def build_seedvr2_callbacks(
             settings["resolution"] = seed_controls_cache["resolution_val"]
         if seed_controls_cache.get("max_resolution_val") is not None:
             settings["max_resolution"] = seed_controls_cache["max_resolution_val"]
-        auto_res = seed_controls_cache.get("auto_resolution", True)
-        enable_max_target = seed_controls_cache.get("enable_max_target", True)
-        chunk_size_sec = float(seed_controls_cache.get("chunk_size_sec", 0) or 0)
-        chunk_overlap_sec = float(seed_controls_cache.get("chunk_overlap_sec", 0) or 0)
+        auto_res = model_cache.get("auto_resolution", seed_controls_cache.get("auto_resolution", True))
+        enable_max_target = model_cache.get("enable_max_target", seed_controls_cache.get("enable_max_target", True))
+        chunk_size_sec = float(model_cache.get("chunk_size_sec", seed_controls_cache.get("chunk_size_sec", 0) or 0))
+        chunk_overlap_sec = float(model_cache.get("chunk_overlap_sec", seed_controls_cache.get("chunk_overlap_sec", 0) or 0))
         if chunk_size_sec > 0 and chunk_overlap_sec >= chunk_size_sec:
             chunk_overlap_sec = max(0.0, chunk_size_sec - 1.0)
-        ratio_downscale = seed_controls_cache.get("ratio_downscale", False)
-        per_chunk_cleanup = seed_controls_cache.get("per_chunk_cleanup", False)
-        target_res = seed_controls_cache.get("resolution_val", settings["resolution"])
-        max_target_res = seed_controls_cache.get("max_resolution_val", settings["max_resolution"])
+        ratio_downscale = model_cache.get("ratio_downscale", seed_controls_cache.get("ratio_downscale", False))
+        per_chunk_cleanup = model_cache.get("per_chunk_cleanup", seed_controls_cache.get("per_chunk_cleanup", False))
+        target_res = model_cache.get("resolution_val", seed_controls_cache.get("resolution_val", settings["resolution"]))
+        max_target_res = model_cache.get("max_resolution_val", seed_controls_cache.get("max_resolution_val", settings["max_resolution"]))
 
         media_dims = get_media_dimensions(settings["input_path"])
         if media_dims and auto_res:
             w, h = media_dims
             short_side = min(w, h)
             computed_res = min(short_side, target_res or short_side)
+            if ratio_downscale:
+                computed_res = min(computed_res, target_res or computed_res)
             if enable_max_target and max_target_res and max_target_res > 0:
                 computed_res = min(computed_res, max_target_res)
             settings["resolution"] = int(computed_res // 16 * 16 or computed_res)
@@ -379,11 +497,23 @@ def build_seedvr2_callbacks(
         if cuda_warning:
             return (f"⚠️ {cuda_warning}", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None))
         devices_list = [d.strip() for d in str(settings.get("cuda_device", "")).split(",") if d.strip()]
+        if meta and not meta.supports_multi_gpu and len(devices_list) > 1:
+            return (
+                f"⚠️ {settings.get('dit_model')} supports single GPU only. Select one CUDA device.",
+                "",
+                None,
+                None,
+                "No chunks",
+                gr.HTML.update(value="No comparison"),
+                gr.ImageSlider.update(value=None),
+            )
         if len(devices_list) > 1 and (settings.get("cache_dit") or settings.get("cache_vae")):
             return ("⚠️ Model caching requires a single GPU selection. Disable caching or choose one GPU.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None))
 
         def _process_single(single_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
             local_logs: List[str] = []
+            if guardrail_msgs:
+                local_logs.extend([f"⚠️ {m}" for m in guardrail_msgs])
             local_media_dims = get_media_dimensions(single_settings["input_path"]) if auto_res else None
             if auto_res and local_media_dims:
                 local_logs.append(
@@ -407,7 +537,14 @@ def build_seedvr2_callbacks(
             chunk_summary = "Single pass (no chunking)."
             status = "⚠️ Upscale exited unexpectedly"
 
-            if single_settings.get("chunk_enable") and detect_input_type(single_settings["input_path"]) == "video":
+            # Skip chunking for preview-only runs; process just the first frame instead
+            should_chunk = (
+                single_settings.get("chunk_enable")
+                and not preview_only
+                and detect_input_type(single_settings["input_path"]) == "video"
+            )
+
+            if should_chunk:
                 rc, clog, final_out, chunk_count = chunk_and_process(
                     runner,
                     single_settings,
@@ -419,6 +556,7 @@ def build_seedvr2_callbacks(
                     chunk_overlap=float(single_settings.get("chunk_overlap_sec") or 0),
                     per_chunk_cleanup=bool(single_settings.get("per_chunk_cleanup")),
                     allow_partial=True,
+                    global_output_dir=str(runner.output_dir) if hasattr(runner, "output_dir") else None,
                 )
                 status = "✅ Chunked upscale complete" if rc == 0 else f"⚠️ Chunked upscale ended early ({rc})"
                 output_path = final_out if final_out else None
@@ -430,13 +568,21 @@ def build_seedvr2_callbacks(
                 result = RunResult(rc, output_path, clog)
             else:
                 result = runner.run_seedvr2(single_settings, on_progress=on_progress, preview_only=preview_only)
-                status = "✅ Upscale complete" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
-                output_video = result.output_path if result.output_path and str(result.output_path).lower().endswith(".mp4") else None
-                output_image = result.output_path if result.output_path and not str(result.output_path).lower().endswith(".mp4") else None
                 chunk_summary = "Single pass (no chunking)."
 
+            status = "✅ Upscale complete" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
+            output_video = result.output_path if result.output_path and str(result.output_path).lower().endswith(".mp4") else None
+            output_image = result.output_path if result.output_path and not str(result.output_path).lower().endswith(".mp4") else None
+
+            current_out_dir = runner.output_dir if hasattr(runner, "output_dir") else output_dir
+        if result.output_path:
+            try:
+                outp = Path(result.output_path)
+                seed_controls_cache["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+            except Exception:
+                pass
             run_logger.write_summary(
-                Path(result.output_path) if result.output_path else output_dir,
+                Path(result.output_path) if result.output_path else current_out_dir,
                 {
                     "input": single_settings["input_path"],
                     "output": result.output_path,
@@ -448,14 +594,14 @@ def build_seedvr2_callbacks(
             )
 
             if face_apply and output_video and Path(output_video).exists():
-                restored = restore_video(output_video, strength=0.5, on_progress=on_progress)
+                restored = restore_video(output_video, strength=face_strength, on_progress=on_progress)
                 if restored:
-                    local_logs.append(f"Face-restored video saved to {restored}")
+                    local_logs.append(f"Face-restored video saved to {restored} (strength {face_strength})")
                     output_video = restored
             if face_apply and output_image and Path(output_image).exists():
-                restored_img = restore_image(output_image, strength=0.5)
+                restored_img = restore_image(output_image, strength=face_strength)
                 if restored_img:
-                    local_logs.append(f"Face-restored image saved to {restored_img}")
+                    local_logs.append(f"Face-restored image saved to {restored_img} (strength {face_strength})")
                     output_image = restored_img
 
             fps_val = seed_controls_cache.get("fps_override_val")
@@ -470,12 +616,14 @@ def build_seedvr2_callbacks(
             pin_pref = bool(seed_controls_cache.get("pin_reference_val", False))
             fs_pref = bool(seed_controls_cache.get("fullscreen_val", False))
             if output_video:
+                use_fallback = comparison_mode in ("html_slider", "fallback")
+                # Native video comparison via ImageSlider not supported; choose HTML slider vs fallback assets
                 comparison_html = build_video_comparison(
                     single_settings.get("input_path"),
                     output_video,
                     pin_reference=pin_pref,
                     start_fullscreen=fs_pref,
-                    use_fallback_assets=(comparison_mode == "fallback"),
+                    use_fallback_assets=use_fallback,
                 )
             elif output_image:
                 image_slider_update = gr.ImageSlider.update(
@@ -502,8 +650,17 @@ def build_seedvr2_callbacks(
         if settings.get("batch_enable") and Path(settings["input_path"]).is_dir() and not preview_only:
             files = _list_media_files(settings["input_path"], SEEDVR2_VIDEO_EXTS, SEEDVR2_IMAGE_EXTS)
             if not files:
-                return ("❌ No media files found in batch folder", "", None, None, "No chunks", gr.HTML.update(value="No comparison"))
+                return (
+                    "❌ No media files found in batch folder",
+                    "",
+                    None,
+                    None,
+                    "No chunks",
+                    gr.HTML.update(value="No comparison"),
+                    gr.ImageSlider.update(value=None),
+                )
             batch_logs = []
+            batch_outputs: List[str] = []
             last_video = None
             last_image = None
             last_chunk_info = "Batch processed."
@@ -518,9 +675,32 @@ def build_seedvr2_callbacks(
                 batch_logs.append(f"[{Path(fp).name}] {status}\n{lg}")
                 last_video = ov or last_video
                 last_image = oi or last_image
+                if ov:
+                    batch_outputs.append(ov)
+                if oi:
+                    batch_outputs.append(oi)
                 last_chunk_info = cinfo
                 last_cmp = cmp_html
                 last_slider = slider_upd
+
+            current_out_dir = runner.output_dir if hasattr(runner, "output_dir") else output_dir
+            if batch_outputs:
+                try:
+                    last_out = Path(batch_outputs[-1])
+                    seed_controls_cache["last_output_dir"] = str(last_out.parent if last_out.is_file() else last_out)
+                except Exception:
+                    pass
+            run_logger.write_summary(
+                Path(last_video or last_image or current_out_dir),
+                {
+                    "batch": True,
+                    "inputs": files,
+                    "outputs": batch_outputs or [last_video, last_image],
+                    "returncode": 0 if (last_video or last_image) else 1,
+                    "args": settings,
+                    "chunk_summary": last_chunk_info,
+                },
+            )
             return (
                 "✅ Batch complete" if last_video or last_image else "⚠️ Batch finished with issues",
                 "\n\n".join(batch_logs),
@@ -534,8 +714,14 @@ def build_seedvr2_callbacks(
         # Streaming: queue progress lines while a worker thread runs the job
         progress_q: "queue.Queue[str]" = queue.Queue()
         result_holder: Dict[str, Any] = {}
+        last_chunk_line = "Processing..."
+        pending_update = False
+        last_emit = time.time()
 
         def progress_cb(line: str):
+            nonlocal last_chunk_line
+            if "chunk" in line.lower():
+                last_chunk_line = line.strip()
             progress_q.put(line)
 
         def worker():
@@ -548,23 +734,26 @@ def build_seedvr2_callbacks(
         t.start()
 
         log_acc: List[str] = []
-        last_yield = time.time()
-        # Stream logs while processing
+        # Stream logs while processing; emit on chunk boundaries or sparse heartbeat
         while t.is_alive() or not progress_q.empty():
             try:
-                line = progress_q.get(timeout=0.2)
+                line = progress_q.get(timeout=0.5)
                 log_acc.append(line)
+                if "chunk" in line.lower():
+                    last_chunk_line = line.strip()
+                    pending_update = True
             except queue.Empty:
                 pass
             now = time.time()
-            if now - last_yield > 0.5:
-                last_yield = now
+            if pending_update or (now - last_emit > 5 and log_acc):
+                last_emit = now
+                pending_update = False
                 yield (
                     gr.Markdown.update(value="⏳ Running SeedVR2..."),
                     "\n".join(log_acc[-400:]),
                     None,
                     None,
-                    "Processing...",
+                    last_chunk_line,
                     gr.HTML.update(value=""),
                     gr.ImageSlider.update(value=None),
                 )
@@ -581,7 +770,7 @@ def build_seedvr2_callbacks(
             final_log,
             output_video,
             output_image,
-            chunk_info_msg,
+            chunk_info_msg if chunk_info_msg else last_chunk_line,
             gr.HTML.update(value=comparison_html),
             image_slider_update,
         )
@@ -596,6 +785,7 @@ def build_seedvr2_callbacks(
         "run_action": run_action,
         "cancel_action": cancel,
         "comparison_html_slider": comparison_html_slider,
+        "auto_res_on_input": _auto_res_from_input,
     }
 
 

@@ -67,7 +67,9 @@ def open_outputs_folder(path: str):
         return gr.Markdown.update(value=f"⚠️ Could not open folder: {exc}")
 
 
-def clear_temp_folder(path: str):
+def clear_temp_folder(path: str, confirm: bool = False):
+    if not confirm:
+        return gr.Markdown.update(value="⚠️ Enable 'Confirm delete' before clearing temp.")
     target = Path(path)
     if target.exists():
         for child in target.iterdir():

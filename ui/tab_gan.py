@@ -45,16 +45,22 @@ def build_gan_tab(
             output_override = gr.Textbox(label="Output override", value=values[9])
             use_resolution = gr.Checkbox(label="Use Resolution & Scene Split settings", value=values[10])
             fps_override = gr.Number(label="FPS override (video)", value=values[11], precision=0)
+            frames_per_batch = gr.Slider(label="Frames per batch (OpenCV backend)", minimum=0, maximum=240, step=1, value=values[12])
             face_restore_chk = gr.Checkbox(label="Apply Face Restoration", value=False)
             status_box = gr.Markdown("Ready.")
             log_box = gr.Textbox(label="Run Log", value="", lines=10)
             output_media = gr.Video(label="Output (video) or PNG folder path in log", interactive=False, show_download_button=True)
             comparison_note = gr.HTML("")
             image_slider = gr.ImageSlider(label="Image Comparison", interactive=False, visible=True, height=500)
+            alpha_warn = gr.Markdown("⚠️ PNG inputs with alpha are preserved; MP4 output drops alpha. Choose PNG output to retain alpha.")
             with gr.Row():
                 run_btn = gr.Button("Run GAN Upscale", variant="primary")
                 cancel_confirm = gr.Checkbox(label="Confirm cancel", value=False)
                 cancel_btn = gr.Button("Cancel", variant="stop")
+            with gr.Row():
+                open_outputs_btn = gr.Button("Open Outputs Folder")
+                delete_confirm = gr.Checkbox(label="Confirm delete temp", value=False)
+                delete_temp_btn = gr.Button("Delete Temp Folder")
         with gr.Column(scale=2):
             preset_dropdown, preset_name, save_preset_btn, load_preset_btn, preset_status, safe_defaults_btn = preset_section(
                 "GAN",
@@ -78,6 +84,7 @@ def build_gan_tab(
         output_override,
         use_resolution,
         fps_override,
+        frames_per_batch,
     ]
 
     save_preset_btn.click(
@@ -102,6 +109,9 @@ def build_gan_tab(
         inputs=[cancel_confirm],
         outputs=[status_box, log_box],
     )
+
+    open_outputs_btn.click(lambda: callbacks["open_outputs_folder"](), outputs=status_box)
+    delete_temp_btn.click(lambda ok: callbacks["clear_temp_folder"](ok), inputs=[delete_confirm], outputs=status_box)
 
     return comparison_help()
 

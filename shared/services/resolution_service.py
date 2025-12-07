@@ -68,6 +68,11 @@ def build_resolution_callbacks(
 ):
     defaults = resolution_defaults(models)
 
+    def _ensure_model_cache(model: str) -> Dict[str, Any]:
+        cache_root = seed_controls_cache.setdefault("resolution_cache", {})
+        model_key = model or defaults["model"]
+        return cache_root.setdefault(model_key, {})
+
     def refresh_presets(model_name: str, select_name: Optional[str] = None):
         presets = preset_manager.list_presets("resolution", model_name)
         last_used = preset_manager.get_last_used_name("resolution", model_name)
@@ -121,19 +126,21 @@ def build_resolution_callbacks(
         est = math.ceil(dur / max(0.001, size - ov))
         return gr.Markdown.update(value=f"Duration ~{dur:.1f}s → est. {est} chunks (size {size}s, overlap {ov}s).")
 
-    def cache_resolution(t_res, m_res):
-        seed_controls_cache["resolution_val"] = t_res
-        seed_controls_cache["max_resolution_val"] = m_res
-        return gr.Markdown.update(value="Resolution values cached for runs.")
+    def cache_resolution(t_res, m_res, model):
+        model_cache = _ensure_model_cache(model)
+        model_cache["resolution_val"] = t_res
+        model_cache["max_resolution_val"] = m_res
+        return gr.Markdown.update(value=f"Resolution cached for {model}.")
 
-    def cache_resolution_flags(auto_res, enable_max, chunk_sz, chunk_ov, ratio_down, per_cleanup):
-        seed_controls_cache["auto_resolution"] = auto_res
-        seed_controls_cache["enable_max_target"] = enable_max
-        seed_controls_cache["chunk_size_sec"] = float(chunk_sz or 0)
-        seed_controls_cache["chunk_overlap_sec"] = float(chunk_ov or 0)
-        seed_controls_cache["ratio_downscale"] = ratio_down
-        seed_controls_cache["per_chunk_cleanup"] = per_cleanup
-        return gr.Markdown.update(value="Resolution options cached for runs.")
+    def cache_resolution_flags(auto_res, enable_max, chunk_sz, chunk_ov, ratio_down, per_cleanup, model):
+        model_cache = _ensure_model_cache(model)
+        model_cache["auto_resolution"] = auto_res
+        model_cache["enable_max_target"] = enable_max
+        model_cache["chunk_size_sec"] = float(chunk_sz or 0)
+        model_cache["chunk_overlap_sec"] = float(chunk_ov or 0)
+        model_cache["ratio_downscale"] = ratio_down
+        model_cache["per_chunk_cleanup"] = per_cleanup
+        return gr.Markdown.update(value=f"Resolution options cached for {model}.")
 
     return {
         "defaults": defaults,

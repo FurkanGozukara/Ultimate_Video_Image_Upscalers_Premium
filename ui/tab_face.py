@@ -58,4 +58,5 @@ def build_face_tab(
 
     # Hook global apply toggle to global settings
     apply_globally.change(fn=callbacks["set_face_global"], inputs=[apply_globally], outputs=info)
+    strength.change(fn=callbacks["cache_strength"], inputs=[strength], outputs=info)
 

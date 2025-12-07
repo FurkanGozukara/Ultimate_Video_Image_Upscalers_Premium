@@ -62,6 +62,7 @@ GLOBAL_DEFAULTS = {
     "temp_dir": os.environ.get("TEMP") or str(BASE_DIR / "temp"),
     "telemetry": True,
     "face_global": False,
+    "face_strength": 0.5,
     "mode": "subprocess",
 }
 global_settings = preset_manager.load_global_settings(GLOBAL_DEFAULTS)
@@ -85,6 +86,11 @@ try:
     for key, info in initial_report.items():
         if info.get("status") not in ("ok", "skipped"):
             warnings.append(f"{key}: {info.get('detail')}")
+    # Surface CPU-only ffmpeg reminder and VS Build Tools guidance up front
+    warnings.append("ffmpeg runs CPU-only; ensure ffmpeg is in PATH. CUDA ffmpeg is not used.")
+    vs_info = initial_report.get("vs_build_tools")
+    if vs_info and vs_info.get("status") != "ok":
+        warnings.append("VS Build Tools not detected; torch.compile will be disabled on Windows until installed.")
     health_banner["text"] = "\n".join(warnings) if warnings else "All health checks passed."
 except Exception:
     health_banner["text"] = "Health check failed to initialize. Run Health Check tab for details."
@@ -97,7 +103,7 @@ except Exception:
 def main():
     seed_defaults = seed_service.seedvr2_defaults()
     gan_model_names = _get_gan_model_names(BASE_DIR)
-    combined_models = get_seedvr2_model_names() + gan_model_names
+    combined_models = sorted(list({*get_seedvr2_model_names(), *gan_model_names}))
     last_used_name = preset_manager.get_last_used_name("seedvr2", seed_defaults.get("dit_model"))
     last_used = preset_manager.load_last_used("seedvr2", seed_defaults.get("dit_model"))
     if last_used_name and last_used is None:
@@ -122,6 +128,7 @@ def main():
                 face_global_toggle = gr.Checkbox(label="Apply Face Restoration globally", value=global_settings.get("face_global", False))
             save_global = gr.Button("Save Global Settings", variant="primary")
             global_status = gr.Markdown("")
+            gr.Markdown("Outputs folder is controlled here (GUI). Launcher/batch defaults are ignored once saved.")
             save_global.click(
                 fn=lambda od, td, tel, face: global_service.save_global_settings(od, td, tel, face, runner, preset_manager, global_settings, run_logger),
                 inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle],
@@ -165,8 +172,8 @@ def main():
                 "safe_defaults": seed_srv["safe_defaults"],
                 "run_action": seed_srv["run_action"],
                 "cancel_action": seed_srv["cancel_action"],
-                "open_outputs_folder": lambda: global_service.open_outputs_folder(global_settings["output_dir"]),
-                "clear_temp_folder": lambda: global_service.clear_temp_folder(global_settings["temp_dir"]),
+                "open_outputs_folder": lambda: global_service.open_outputs_folder(seed_controls_cache.get("last_output_dir") or global_settings["output_dir"]),
+                "clear_temp_folder": lambda confirm=False: global_service.clear_temp_folder(global_settings["temp_dir"], confirm),
             }
             seed_controls = build_seedvr2_tab_ui(
                 seed_defaults,
@@ -185,9 +192,9 @@ def main():
             if res_last_name and res_last is None:
                 _append_warning(f"Last used Resolution preset '{res_last_name}' not found; loaded defaults.")
             res_defaults = preset_manager.merge_config(res_srv["defaults"], res_last or {})
-            resolution_callbacks = {
+        resolution_callbacks = {
                 "order": res_service.RESOLUTION_ORDER,
-                "models": get_seedvr2_model_names,
+            "models": lambda: combined_models,
                 "refresh_presets": res_srv["refresh_presets"],
                 "save_preset": res_srv["save_preset"],
                 "load_preset": lambda preset, model, _defaults, vals: res_srv["load_preset"](preset, model, list(vals)),
@@ -215,12 +222,21 @@ def main():
             out_defaults = preset_manager.merge_config(out_srv["defaults"], out_last or {})
             output_callbacks = {
                 "order": out_service.OUTPUT_ORDER,
-                "models": get_seedvr2_model_names,
+                "models": lambda: combined_models,
                 "refresh_presets": out_srv["refresh_presets"],
                 "save_preset": out_srv["save_preset"],
                 "load_preset": lambda preset, model, _defaults, vals: out_srv["load_preset"](preset, model, list(vals)),
                 "safe_defaults": out_srv["safe_defaults"],
                 "seed_controls": seed_controls,
+                "cache_output": out_srv["cache_output"],
+                "cache_fps": out_srv["cache_fps"],
+                "cache_comparison": out_srv["cache_comparison"],
+                "cache_pin": out_srv["cache_pin"],
+                "cache_fullscreen": out_srv["cache_fullscreen"],
+                "cache_png_padding": out_srv["cache_png_padding"],
+                "cache_png_basename": out_srv["cache_png_basename"],
+                "cache_skip": out_srv["cache_skip"],
+                "cache_cap": out_srv["cache_cap"],
             }
             build_output_tab_ui(
                 out_defaults,
@@ -230,7 +246,7 @@ def main():
             )
 
         with gr.Tab("Face Restoration"):
-            face_srv = face_service.build_face_callbacks(preset_manager, global_settings, get_seedvr2_model_names())
+            face_srv = face_service.build_face_callbacks(preset_manager, global_settings, combined_models)
             face_last_name = preset_manager.get_last_used_name("face", face_srv["defaults"].get("model"))
             face_last = preset_manager.load_last_used("face", face_srv["defaults"].get("model"))
             if face_last_name and face_last is None:
@@ -238,7 +254,7 @@ def main():
             f_defaults = preset_manager.merge_config(face_srv["defaults"], face_last or {})
             face_callbacks = {
                 "order": face_service.FACE_ORDER,
-                "models": get_seedvr2_model_names,
+                "models": lambda: combined_models,
                 "refresh_presets": face_srv["refresh_presets"],
                 "save_preset": face_srv["save_preset"],
                 "load_preset": lambda preset, model, _defaults, vals: face_srv["load_preset"](preset, model, list(vals)),
@@ -253,7 +269,7 @@ def main():
             )
 
         with gr.Tab("RIFE / FPS / Edit Videos"):
-            rife_srv = rife_service.build_rife_callbacks(preset_manager, runner, run_logger, global_settings, output_dir, temp_dir)
+            rife_srv = rife_service.build_rife_callbacks(preset_manager, runner, run_logger, global_settings, output_dir, temp_dir, seed_controls_cache)
             rife_last_name = preset_manager.get_last_used_name("rife", rife_srv["defaults"].get("model"))
             rife_last = preset_manager.load_last_used("rife", rife_srv["defaults"].get("model"))
             if rife_last_name and rife_last is None:
@@ -290,7 +306,9 @@ def main():
                 "load_preset": lambda preset, model, _defaults, vals: gan_srv["load_preset"](preset, model, list(vals)),
                 "safe_defaults": gan_srv["safe_defaults"],
                 "run_action": gan_srv["run_action"],
-                "cancel_action": seed_srv["cancel_action"],
+                "cancel_action": gan_srv["cancel_action"],
+                "open_outputs_folder": lambda: global_service.open_outputs_folder(seed_controls_cache.get("last_output_dir") or global_settings["output_dir"]),
+                "clear_temp_folder": lambda confirm=False: global_service.clear_temp_folder(global_settings["temp_dir"], confirm),
             }
             build_gan_tab_ui(
                 g_defaults,

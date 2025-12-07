@@ -42,10 +42,16 @@ def _check_cuda() -> Dict[str, Optional[str]]:
 def _check_vs_build_tools() -> Dict[str, Optional[str]]:
     if platform.system() != "Windows":
         return {"status": "skipped", "detail": "VS Build Tools not required on this platform"}
-    default_path = Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat")
-    if default_path.exists():
-        return {"status": "ok", "detail": f"Found vcvarsall at {default_path}"}
-    return {"status": "warning", "detail": "VS Build Tools not detected at default path"}
+    candidates = [
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvarsall.bat"),
+    ]
+    found = next((p for p in candidates if p.exists()), None)
+    if found:
+        return {"status": "ok", "detail": f"Found vcvarsall at {found}"}
+    return {"status": "warning", "detail": "VS Build Tools not detected at common paths; compile may be disabled"}
 
 
 def _check_disk(path: Path) -> Dict[str, Optional[str]]:

@@ -12,6 +12,10 @@ def output_defaults(models: List[str]) -> Dict[str, Any]:
         "comparison_mode": "native",
         "pin_reference": False,
         "fullscreen": True,
+        "png_padding": 5,
+        "png_keep_basename": True,
+        "skip_first_frames": 0,
+        "load_cap": 0,
     }
 
 
@@ -22,6 +26,10 @@ OUTPUT_ORDER: List[str] = [
     "comparison_mode",
     "pin_reference",
     "fullscreen",
+    "png_padding",
+    "png_keep_basename",
+    "skip_first_frames",
+    "load_cap",
 ]
 
 
@@ -102,6 +110,31 @@ def build_output_callbacks(
         seed_controls_cache["fullscreen_val"] = bool(val)
         return gr.Markdown.update(value="Fullscreen preference cached.")
 
+    def cache_png_padding(val):
+        try:
+            seed_controls_cache["png_padding_val"] = max(1, int(val))
+        except Exception:
+            seed_controls_cache["png_padding_val"] = defaults["png_padding"]
+        return gr.Markdown.update(value="PNG padding cached for runs.")
+
+    def cache_png_basename(val):
+        seed_controls_cache["png_keep_basename_val"] = bool(val)
+        return gr.Markdown.update(value="PNG base-name preference cached.")
+
+    def cache_skip(val):
+        try:
+            seed_controls_cache["skip_first_frames_val"] = max(0, int(val))
+        except Exception:
+            seed_controls_cache["skip_first_frames_val"] = 0
+        return gr.Markdown.update(value="Skip-first-frames cached for runs.")
+
+    def cache_cap(val):
+        try:
+            seed_controls_cache["load_cap_val"] = max(0, int(val))
+        except Exception:
+            seed_controls_cache["load_cap_val"] = 0
+        return gr.Markdown.update(value="Load-cap cached for runs.")
+
     return {
         "defaults": defaults,
         "order": OUTPUT_ORDER,
@@ -114,6 +147,10 @@ def build_output_callbacks(
         "cache_comparison": cache_comparison,
         "cache_pin": cache_pin,
         "cache_fullscreen": cache_fullscreen,
+        "cache_png_padding": cache_png_padding,
+        "cache_png_basename": cache_png_basename,
+        "cache_skip": cache_skip,
+        "cache_cap": cache_cap,
     }
 
 

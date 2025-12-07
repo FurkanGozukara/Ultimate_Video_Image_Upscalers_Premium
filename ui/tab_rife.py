@@ -29,6 +29,7 @@ def build_rife_tab(
             gr.Markdown("### RIFE / FPS / Edit Videos")
             gr.Markdown(health_banner.get("text", ""))
             model_select = gr.Dropdown(label="Model", choices=["rife"], value=values[0])
+            gpu_ids = gr.Textbox(label="CUDA device(s) (e.g., 0 or 0,1)", value="", placeholder="Leave empty for auto/CPU")
             fps_multiplier = gr.Slider(label="FPS Multiplier", minimum=0.25, maximum=4.0, step=0.05, value=values[1])
             scale = gr.Slider(label="Scale", minimum=0.25, maximum=4.0, step=0.05, value=values[2])
             uhd_half = gr.Checkbox(label="UHD shortcut (0.5x)", value=values[3])
@@ -81,6 +82,7 @@ def build_rife_tab(
         load_cap,
         fps_override,
         output_format,
+        gpu_ids,
     ]
 
     save_preset_btn.click(

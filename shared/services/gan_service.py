@@ -69,7 +69,7 @@ def _get_gan_meta(filename: str, base_dir: Path) -> Dict[str, Any]:
     meta = GAN_META_CACHE.get(norm, {})
     scale = meta.get("scale") or _parse_scale_from_name(stem)
     canonical = meta.get("name", stem)
-    return {"scale": scale, "canonical": canonical}
+    return {"scale": scale, "canonical": canonical, "supports_multi_gpu": False}
 
 
 def _is_realesrgan_builtin(name: str) -> bool:
@@ -113,6 +113,7 @@ def gan_defaults(base_dir: Path) -> Dict[str, Any]:
         "output_override": "",
         "use_resolution_tab": True,
         "fps_override": 0,
+        "frames_per_batch": 0,
     }
 
 
@@ -129,6 +130,7 @@ GAN_ORDER: List[str] = [
     "output_override",
     "use_resolution_tab",
     "fps_override",
+    "frames_per_batch",
 ]
 
 
@@ -177,6 +179,7 @@ def build_gan_callbacks(
     output_dir: Path,
 ):
     defaults = gan_defaults(base_dir)
+    cancel_event = threading.Event()
 
     def refresh_presets(model_name: str, select_name: Optional[str] = None):
         presets = preset_manager.list_presets("gan", model_name)
@@ -211,10 +214,15 @@ def build_gan_callbacks(
         return [defaults[k] for k in GAN_ORDER]
 
     def run_action(upload, *args, preview_only: bool = False):
+        cancel_event.clear()
         settings_dict = _gan_dict_from_args(list(args))
         settings = {**defaults, **settings_dict}
         settings["output_override"] = settings.get("output_override")
         settings["cuda_device"] = settings.get("cuda_device", "")
+
+        # Pull latest global paths in case user changed them in Global tab
+        current_output_dir = Path(global_settings.get("output_dir", output_dir))
+        current_temp_dir = Path(global_settings.get("temp_dir", temp_dir))
 
         inp = normalize_path(upload if upload else settings["input_path"])
         if settings.get("batch_enable"):
@@ -229,60 +237,104 @@ def build_gan_callbacks(
         cuda_warn = _validate_cuda_devices(settings.get("cuda_device", ""))
         if cuda_warn:
             return (f"⚠️ {cuda_warn}", "", None, "")
+        devices = [d.strip() for d in str(settings.get("cuda_device") or "").split(",") if d.strip()]
+        if len(devices) > 1:
+            return (
+                "⚠️ GAN backends currently use a single GPU; select one CUDA device.",
+                "",
+                None,
+                "",
+                gr.ImageSlider.update(value=None),
+            )
 
         face_apply = bool(args[-1])
         face_apply = face_apply or global_settings.get("face_global", False)
+        face_strength = float(global_settings.get("face_strength", 0.5))
         backend_val = settings.get("backend", "realesrgan")
+        # Pull shared output/comparison preferences
+        if (not settings.get("output_format")) or settings.get("output_format") == "auto":
+            cached_fmt = seed_controls_cache.get("output_format_val")
+            if cached_fmt:
+                settings["output_format"] = cached_fmt
+        if (not settings.get("fps_override")) or float(settings.get("fps_override") or 0) == 0:
+            cached_fps = seed_controls_cache.get("fps_override_val")
+            if cached_fps:
+                settings["fps_override"] = cached_fps
+        cmp_mode = seed_controls_cache.get("comparison_mode_val", "native")
+        pin_pref = bool(seed_controls_cache.get("pin_reference_val", False))
+        fs_pref = bool(seed_controls_cache.get("fullscreen_val", False))
 
         def prepare_single(single_path: str) -> Dict[str, Any]:
             s = settings.copy()
             s["input_path"] = normalize_path(single_path)
             meta = _get_gan_meta(s.get("model", ""), base_dir)
             s["scale"] = meta.get("scale", s.get("scale", 2))
+            s["supports_multi_gpu"] = meta.get("supports_multi_gpu", False)
+            # Enforce 2x/4x-only scale from metadata if present
+            if s["scale"] not in (2, 4):
+                s["scale"] = 4 if s["scale"] > 2 else 2
             s["model_name"] = meta.get("canonical", s.get("model", ""))
+            # PNG padding (from Output tab cache if present)
+            s["png_padding"] = int(seed_controls_cache.get("png_padding_val", 5))
             return s
 
         def maybe_downscale(s):
-            if s.get("use_resolution_tab") and seed_controls_cache.get("resolution_val"):
-                target_short = seed_controls_cache.get("resolution_val")
-                dims = get_media_dimensions(s["input_path"])
-                if dims and target_short:
-                    short_side = min(dims)
-                    desired_input_short = target_short / max(1, s["scale"])
-                    if desired_input_short < short_side:
-                        tmp_path = Path(temp_dir) / f"gan_downscale_{Path(s['input_path']).stem}.mp4"
-                        if Path(s["input_path"]).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
-                            subprocess.run(
-                                [
-                                    "ffmpeg",
-                                    "-y",
-                                    "-i",
-                                    s["input_path"],
-                                    "-vf",
-                                    f"scale=-2:{int(desired_input_short)}",
-                                    str(tmp_path),
-                                ],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                            )
-                            if tmp_path.exists():
-                                s["input_path"] = str(tmp_path)
-                        else:
-                            try:
-                                import cv2
+            """
+            Respect Resolution tab intent for 2x/4x GANs:
+            - Only downscale when ratio_downscale flag is set.
+            - Honor per-model cached target/max resolution.
+            """
+            if not (s.get("use_resolution_tab") and seed_controls_cache.get("resolution_val")):
+                return s
+            model_cache = seed_controls_cache.get("resolution_cache", {}).get(s.get("model"), {})
+            ratio_down = model_cache.get("ratio_downscale", seed_controls_cache.get("ratio_downscale", False))
+            if not ratio_down:
+                return s
+            target_short = model_cache.get("resolution_val") or seed_controls_cache.get("resolution_val")
+            max_target = model_cache.get("max_resolution_val") or seed_controls_cache.get("max_resolution_val")
+            enable_max = model_cache.get("enable_max_target", seed_controls_cache.get("enable_max_target", True))
+            if enable_max and max_target:
+                target_short = min(target_short or max_target, max_target)
+            dims = get_media_dimensions(s["input_path"])
+            if not (dims and target_short):
+                return s
+            short_side = min(dims)
+            desired_input_short = target_short / max(1, s["scale"])
+            if desired_input_short >= short_side:
+                return s
+            tmp_path = Path(current_temp_dir) / f"gan_downscale_{Path(s['input_path']).stem}.mp4"
+            if Path(s["input_path"]).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        s["input_path"],
+                        "-vf",
+                        f"scale=-2:{int(desired_input_short)}",
+                        str(tmp_path),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if tmp_path.exists():
+                    s["input_path"] = str(tmp_path)
+            else:
+                try:
+                    import cv2
 
-                                img = cv2.imread(s["input_path"], cv2.IMREAD_UNCHANGED)
-                                if img is not None:
-                                    h, w = img.shape[:2]
-                                    scale_factor = desired_input_short / float(short_side)
-                                    new_w = int(w * scale_factor)
-                                    new_h = int(h * scale_factor)
-                                    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                                    tmp_img = Path(temp_dir) / f"gan_downscale_{Path(s['input_path']).name}"
-                                    cv2.imwrite(str(tmp_img), resized)
-                                    s["input_path"] = str(tmp_img)
-                            except Exception:
-                                pass
+                    img = cv2.imread(s["input_path"], cv2.IMREAD_UNCHANGED)
+                    if img is not None:
+                        h, w = img.shape[:2]
+                        scale_factor = desired_input_short / float(short_side)
+                        new_w = max(1, int(w * scale_factor))
+                        new_h = max(1, int(h * scale_factor))
+                        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                        tmp_img = Path(temp_dir) / f"gan_downscale_{Path(s['input_path']).name}"
+                        cv2.imwrite(str(tmp_img), resized)
+                        s["input_path"] = str(tmp_img)
+                except Exception:
+                    pass
             return s
 
         def relocate_output(path_str: Optional[str]) -> Optional[str]:
@@ -304,10 +356,13 @@ def build_gan_callbacks(
                 return str(dest)
 
         def run_single(prepped_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
+            if cancel_event.is_set():
+                return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None))
             header_log = [
                 f"Model: {prepped_settings['model_name']}",
                 f"Backend: {backend_val}",
                 f"Scale: {prepped_settings['scale']}x",
+                f"GPU: {prepped_settings.get('cuda_device') or 'auto/CPU'} (single GPU enforced)",
                 f"Input: {prepped_settings['input_path']}",
             ]
             if progress_cb:
@@ -320,20 +375,43 @@ def build_gan_callbacks(
                     prepped_settings["model_path"] = str((base_dir / "Image_Upscale_Models" / prepped_settings.get("model_name")).resolve())
                     if not Path(prepped_settings["model_path"]).exists() and not _is_realesrgan_builtin(prepped_settings["model_name"]):
                         return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.ImageSlider.update(value=None))
-                    result = run_realesrgan(prepped_settings, apply_face=face_apply)
+                    result = run_realesrgan(
+                        prepped_settings,
+                        apply_face=face_apply,
+                        face_strength=face_strength,
+                        cancel_event=cancel_event,
+                        global_output_dir=str(current_output_dir),
+                    )
                 else:
-                    result = run_gan_upscale(prepped_settings, apply_face=face_apply)
+                    if cancel_event.is_set():
+                        return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None))
+                    result = run_gan_upscale(
+                        prepped_settings,
+                        apply_face=face_apply,
+                        face_strength=face_strength,
+                        global_output_dir=str(current_output_dir),
+                        cancel_event=cancel_event,
+                    )
             except Exception as exc:  # surface ffmpeg or other runtime issues
                 err_msg = f"❌ GAN upscale failed: {exc}"
                 if progress_cb:
                     progress_cb(err_msg)
                 return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.ImageSlider.update(value=None))
-            status = "✅ GAN upscale complete" if result.returncode == 0 else f"⚠️ GAN upscale failed"
+            if cancel_event.is_set():
+                status = "⏹️ Canceled"
+            else:
+                status = "✅ GAN upscale complete" if result.returncode == 0 else f"⚠️ GAN upscale failed"
             log_body = result.log or ""
             full_log = "\n".join(header_log + [log_body])
             if progress_cb:
                 progress_cb(status)
             relocated = relocate_output(result.output_path)
+            if relocated or result.output_path:
+                try:
+                    outp = Path(relocated or result.output_path)
+                    seed_controls_cache["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                except Exception:
+                    pass
             run_logger.write_summary(
                 Path(relocated) if relocated else output_dir,
                 {
@@ -352,12 +430,19 @@ def build_gan_callbacks(
                 outp = relocated or result.output_path
                 if outp and Path(outp).exists():
                     if Path(outp).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
-                        cmp_html = build_video_comparison(src, outp)
+                        use_fallback = cmp_mode == "fallback"
+                        cmp_html = build_video_comparison(
+                            src,
+                            outp,
+                            pin_reference=pin_pref,
+                            start_fullscreen=fs_pref,
+                            use_fallback_assets=use_fallback or cmp_mode == "html_slider",
+                        )
                     elif Path(outp).is_dir():
                         cmp_html = f"<p>PNG frames saved to {outp}</p>"
                     else:
                         slider_update = gr.ImageSlider.update(value=(src, outp), visible=True)
-                        cmp_html = build_image_comparison(src, outp)
+                        cmp_html = build_image_comparison(src, outp, pin_reference=pin_pref)
             return status, full_log, relocated if relocated else (result.output_path if result.output_path else None), cmp_html, slider_update
 
         # Streaming: run in background thread, stream log lines if available
@@ -374,6 +459,9 @@ def build_gan_callbacks(
             last_cmp = ""
             last_slider = gr.ImageSlider.update(value=None)
             for item in batch_items:
+                if cancel_event.is_set():
+                    logs.append("Canceled batch processing.")
+                    break
                 ps = maybe_downscale(prepare_single(str(item)))
                 status, lg, outp, cmp_html, slider_upd = run_single(ps, progress_cb=progress_q.put)
                 logs.append(lg)
@@ -440,6 +528,10 @@ def build_gan_callbacks(
             slider_upd,
         )
 
+    def cancel_action():
+        cancel_event.set()
+        return gr.Markdown.update(value="⏹️ Cancel requested"), ""
+
     return {
         "defaults": defaults,
         "order": GAN_ORDER,
@@ -449,6 +541,7 @@ def build_gan_callbacks(
         "safe_defaults": safe_defaults,
         "run_action": run_action,
         "model_scanner": lambda: _scan_gan_models(base_dir),
+        "cancel_action": cancel_action,
     }
 
 

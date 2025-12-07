@@ -5,6 +5,9 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
+import cv2
+import numpy as np
+
 from .path_utils import collision_safe_path, normalize_path
 
 
@@ -48,7 +51,21 @@ def restore_image(image_path: str, strength: float = 0.5) -> Optional[str]:
     if not candidates:
         return None
     final = collision_safe_path(out_dir / f"{img.stem}_fr{img.suffix}")
-    shutil.copyfile(candidates[-1], final)
+
+    # Blend with original based on strength (0 = original, 1 = restored)
+    try:
+        strength = float(strength)
+    except Exception:
+        strength = 0.5
+    strength = max(0.0, min(1.0, strength))
+
+    orig = cv2.imread(str(img), cv2.IMREAD_UNCHANGED)
+    restored = cv2.imread(str(candidates[-1]), cv2.IMREAD_UNCHANGED)
+    if orig is not None and restored is not None and 0.0 <= strength < 1.0:
+        blended = cv2.addWeighted(restored.astype(np.float32), strength, orig.astype(np.float32), 1.0 - strength, 0)
+        cv2.imwrite(str(final), blended.astype(orig.dtype))
+    else:
+        shutil.copyfile(candidates[-1], final)
     return str(final)
 
 
@@ -74,6 +91,24 @@ def restore_video(video_path: str, strength: float = 0.5, on_progress: Optional[
             on_progress("gfpgan restoration failed\n")
         shutil.rmtree(work, ignore_errors=True)
         return None
+
+    # Blend restored frames with originals based on strength
+    try:
+        strength_val = float(strength)
+    except Exception:
+        strength_val = 0.5
+    strength_val = max(0.0, min(1.0, strength_val))
+    if strength_val < 1.0:
+        for frame_file in sorted(restored_dir.glob("frame_*.png")):
+            orig_file = frames_dir / frame_file.name
+            if not orig_file.exists():
+                continue
+            orig = cv2.imread(str(orig_file), cv2.IMREAD_UNCHANGED)
+            restored = cv2.imread(str(frame_file), cv2.IMREAD_UNCHANGED)
+            if orig is None or restored is None:
+                continue
+            blended = cv2.addWeighted(restored.astype(np.float32), strength_val, orig.astype(np.float32), 1.0 - strength_val, 0)
+            cv2.imwrite(str(frame_file), blended.astype(orig.dtype))
 
     # Re-encode video (no audio)
     out_path = collision_safe_path(video.parent / f"{video.stem}_fr.mp4")

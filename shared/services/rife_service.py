@@ -9,7 +9,7 @@ import gradio as gr
 
 from shared.preset_manager import PresetManager
 from shared.runner import Runner
-from shared.path_utils import normalize_path, ffmpeg_set_fps
+from shared.path_utils import normalize_path, ffmpeg_set_fps, get_media_dimensions
 from shared.face_restore import restore_video
 from shared.logging_utils import RunLogger
 
@@ -31,6 +31,7 @@ def rife_defaults() -> Dict[str, Any]:
         "load_cap": 0,
         "fps_override": 0,
         "output_format": "auto",
+        "cuda_device": "",
     }
 
 
@@ -50,6 +51,7 @@ RIFE_ORDER: List[str] = [
     "load_cap",
     "fps_override",
     "output_format",
+    "cuda_device",
 ]
 
 
@@ -74,6 +76,24 @@ def _ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
+    try:
+        import torch  # type: ignore
+
+        if not cuda_spec:
+            return None
+        if not torch.cuda.is_available():
+            return "CUDA is not available on this system, but CUDA devices were specified."
+        devices = [d.strip() for d in str(cuda_spec).split(",") if d.strip() != ""]
+        count = torch.cuda.device_count()
+        invalid = [d for d in devices if (not d.isdigit()) or int(d) >= count]
+        if invalid:
+            return f"Invalid CUDA device id(s): {', '.join(invalid)}. Available: 0-{count-1}"
+    except Exception as exc:
+        return f"CUDA validation failed: {exc}"
+    return None
+
+
 def build_rife_callbacks(
     preset_manager: PresetManager,
     runner: Runner,
@@ -81,6 +101,7 @@ def build_rife_callbacks(
     global_settings: Dict[str, Any],
     output_dir: Path,
     temp_dir: Path,
+    seed_controls_cache: Dict[str, Any],
 ):
     defaults = rife_defaults()
 
@@ -123,18 +144,80 @@ def build_rife_callbacks(
         input_path = normalize_path(uploaded_file if uploaded_file else img_folder)
         if not input_path or not Path(input_path).exists():
             return ("❌ Input missing", "", None, "No metadata")
+        if settings.get("img_mode"):
+            # In --img mode, require a frames folder (or image file); block video files to avoid misuse.
+            if Path(input_path).is_file() and Path(input_path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
+                return ("⚠️ --img mode expects frames folder or images, not a video file.", "", None, "No metadata")
+        else:
+            # In video mode, require a video file
+            if Path(input_path).is_dir():
+                return ("⚠️ Video mode expects a video file. Enable --img for frame folders.", "", None, "No metadata")
         settings["input_path"] = input_path
-        settings["output_override"] = settings.get("output_override") or global_settings.get("output_dir", str(output_dir))
+        settings["output_override"] = settings.get("output_override") or None
 
+        # Apply Resolution tab hints (ratio downscale) for videos when provided
+        model_cache = seed_controls_cache.get("resolution_cache", {}).get(settings.get("model"), {})
+        ratio_down = model_cache.get("ratio_downscale", seed_controls_cache.get("ratio_downscale", False))
+        target_res = model_cache.get("resolution_val") or seed_controls_cache.get("resolution_val")
+        max_res = model_cache.get("max_resolution_val") or seed_controls_cache.get("max_resolution_val")
+        enable_max = model_cache.get("enable_max_target", seed_controls_cache.get("enable_max_target", True))
+        if enable_max and max_res:
+            target_res = min(target_res or max_res, max_res)
+        dims = get_media_dimensions(settings["input_path"])
+        if ratio_down and target_res and dims and Path(settings["input_path"]).is_file() and not settings.get("img_mode"):
+            short_side = min(dims)
+            if short_side > target_res:
+                desired = int(target_res)
+                tmp_resized = Path(temp_dir) / f"rife_downscale_{Path(settings['input_path']).stem}.mp4"
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    settings["input_path"],
+                    "-vf",
+                    f"scale=-2:{desired}",
+                    str(tmp_resized),
+                ]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if tmp_resized.exists():
+                    settings["input_path"] = str(tmp_resized)
+                    log_lines = [f"Applied ratio downscale to ~{desired}p before RIFE."]
+                else:
+                    log_lines = []
+            else:
+                log_lines = []
+        else:
+            log_lines = []
+
+        # Apply cached output/comparison preferences from Output tab
+        cached_fmt = seed_controls_cache.get("output_format_val")
+        if settings.get("output_format") in (None, "auto") and cached_fmt:
+            settings["output_format"] = cached_fmt
+        cached_fps = seed_controls_cache.get("fps_override_val")
+        if (not settings.get("fps_override")) or float(settings.get("fps_override") or 0) == 0:
+            if cached_fps:
+                settings["fps_override"] = cached_fps
+
+        cuda_warn = _validate_cuda_devices(settings.get("cuda_device", ""))
+        if cuda_warn:
+            return (f"⚠️ {cuda_warn}", "", None, "No metadata")
+        if settings.get("output_format") not in ("auto", "mp4", "png"):
+            settings["output_format"] = "auto"
+
+        # Harmonize output format flags
         if settings.get("output_format") == "png":
             settings["png_output"] = True
         elif settings.get("output_format") == "mp4":
+            settings["png_output"] = False
+        else:
+            # auto: choose based on input type (default to mp4 for videos)
             settings["png_output"] = False
 
         if not _ffmpeg_available():
             return ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, "No metadata")
 
-        log_lines: List[str] = []
+        # Continue collecting logs (pre-filled with any resize note)
+        log_lines: List[str] = log_lines or []
         progress_q: "queue.Queue[str]" = queue.Queue()
 
         def on_progress(line: str):
@@ -143,11 +226,13 @@ def build_rife_callbacks(
             progress_q.put(line)
 
         try:
-            skip_frames = int(settings.get("skip_first_frames") or 0)
-            cap_frames = int(settings.get("load_cap") or 0)
+            skip_frames = max(0, int(settings.get("skip_first_frames") or 0))
+            cap_frames = max(0, int(settings.get("load_cap") or 0))
         except Exception:
             skip_frames = 0
             cap_frames = 0
+        settings["skip_first_frames"] = skip_frames
+        settings["load_cap"] = cap_frames
         trimmed_path = None
         if (skip_frames > 0 or cap_frames > 0) and Path(settings["input_path"]).is_file():
             trimmed_path = Path(temp_dir) / f"rife_trim_{Path(settings['input_path']).stem}.mp4"
@@ -167,6 +252,7 @@ def build_rife_callbacks(
                 settings["input_path"] = str(trimmed_path)
 
         face_apply = bool(args[-1]) or global_settings.get("face_global", False)
+        face_strength = float(global_settings.get("face_strength", 0.5))
 
         result_holder: Dict[str, Any] = {}
 
@@ -211,13 +297,19 @@ def build_rife_callbacks(
             out_path = str(ffmpeg_set_fps(Path(out_path), float(settings["fps_override"])))
             log_lines.append(f"FPS overridden to {settings['fps_override']}")
         if face_apply and out_path and Path(out_path).exists():
-            restored = restore_video(out_path, strength=0.5, on_progress=on_progress)
+            restored = restore_video(out_path, strength=face_strength, on_progress=on_progress)
             if restored:
                 out_path = restored
-                log_lines.append(f"Face-restored video saved to {restored}")
+                log_lines.append(f"Face-restored video saved to {restored} (strength {face_strength})")
+        if out_path:
+            try:
+                seed_controls_cache["last_output_dir"] = str(Path(out_path).parent)
+            except Exception:
+                pass
         meta_md = f"Output: {out_path}\nReturn code: {result.returncode}"
+        current_out_dir = runner.output_dir if hasattr(runner, "output_dir") else output_dir
         run_logger.write_summary(
-            Path(out_path) if out_path else output_dir,
+            Path(out_path) if out_path else current_out_dir,
             {
                 "input": input_path,
                 "output": out_path,

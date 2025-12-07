@@ -9,7 +9,7 @@ def mode_banner(text: str):
 def comparison_help(
     message: str = (
         "Use the comparison slider to swipe between input and output. Pin keeps the reference fixed; "
-        "Fullscreen opens a lightbox-style view; fallback slider loads bundled assets if native is insufficient."
+        "Fullscreen opens a lightbox-style view. For video we use an HTML/fallback slider (native video slider not available)."
     )
 ):
     """Reusable comparison info block with pin/fullscreen guidance."""

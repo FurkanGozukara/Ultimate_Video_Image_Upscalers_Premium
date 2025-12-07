@@ -35,13 +35,17 @@ def build_video_comparison(
 
     pin_js = _pin_js(pin_reference)
     fs_js = _pin_js(start_fullscreen)
+    # Normalize paths for file:// usage
+    safe_inp = input_video.replace("\\", "/")
+    safe_out = output_video.replace("\\", "/")
     return f"""
 <style>
 .vid-cmp-shell {{
   width: 100%;
-  max-width: 1080px;
+  max-width: 1280px;
   margin: 0 auto;
   font-family: Inter, system-ui, sans-serif;
+  color: #eee;
 }}
 .vid-cmp-container {{
   position: relative;
@@ -49,13 +53,14 @@ def build_video_comparison(
   aspect-ratio: 16 / 9;
   background: #0f0f0f;
   overflow: hidden;
-  border-radius: 10px;
-  border: 1px solid #333;
+  border-radius: 12px;
+  border: 1px solid #2b2b2b;
 }}
 .vid-base, .vid-overlay {{
   width: 100%;
   height: 100%;
   object-fit: contain;
+  background: #000;
 }}
 .vid-overlay {{
   position: absolute;
@@ -67,7 +72,7 @@ def build_video_comparison(
 .vid-range {{
   width: 100%;
   margin-top: 10px;
-  accent-color: #08f;
+  accent-color: #6d8bff;
 }}
 .vid-toolbar {{
   display: flex;
@@ -75,31 +80,43 @@ def build_video_comparison(
   margin-top: 8px;
   flex-wrap: wrap;
 }}
-.vid-toolbar button {{
+.vid-toolbar button, .vid-toolbar a {{
   flex: 1 1 auto;
   min-width: 120px;
-  padding: 8px 10px;
-  background: #1e1e1e;
+  padding: 9px 10px;
+  background: #1f2430;
   color: #eee;
-  border: 1px solid #333;
-  border-radius: 6px;
+  text-decoration: none;
+  text-align: center;
+  border: 1px solid #2f3650;
+  border-radius: 8px;
   cursor: pointer;
+  font-weight: 600;
 }}
-.vid-toolbar button:hover {{
-  border-color: #08f;
+.vid-toolbar button:hover, .vid-toolbar a:hover {{
+  border-color: #6d8bff;
+}}
+.vid-hint {{
+  margin-top: 6px;
+  font-size: 13px;
+  color: #cfd7ff;
 }}
 </style>
-<div class="vid-cmp-shell">
+<div class="vid-cmp-shell" id="vidCmpShell">
   <div class="vid-cmp-container" id="vidCmpRoot">
-    <video class="vid-base" id="vidBase" src="file:///{input_video}" controls></video>
-    <video id="vidOverlay" class="vid-overlay" src="file:///{output_video}" controls muted></video>
+    <video class="vid-base" id="vidBase" src="file:///{safe_inp}" controls preload="metadata"></video>
+    <video id="vidOverlay" class="vid-overlay" src="file:///{safe_out}" controls muted preload="metadata"></video>
   </div>
   <input id="vidRange" type="range" min="0" max="100" value="50" class="vid-range">
   <div class="vid-toolbar">
     <button id="swapBtn">Swap</button>
     <button id="pinBtn">Pin Reference</button>
     <button id="fsBtn">Fullscreen</button>
-    <button id="resetBtn">Reset Slider</button>
+    <button id="resetBtn">Reset</button>
+    <a id="popoutBtn" href="#" title="Open comparison in a new window">Pop-out</a>
+  </div>
+  <div class="vid-hint">
+    Keys: ←/→ adjust slider, S swap, P toggle pin, F fullscreen, R reset.
   </div>
 </div>
 <script>
@@ -111,7 +128,9 @@ def build_video_comparison(
   const pinBtn = document.getElementById('pinBtn');
   const fsBtn = document.getElementById('fsBtn');
   const resetBtn = document.getElementById('resetBtn');
+  const popoutBtn = document.getElementById('popoutBtn');
   const root = document.getElementById('vidCmpRoot');
+  const shell = document.getElementById('vidCmpShell');
 
   let pinned = {pin_js};
 
@@ -119,8 +138,13 @@ def build_video_comparison(
     o.style.clipPath = `inset(0 ${100 - val}% 0 0)`;
   }};
 
+  const syncPinLabel = () => {{
+    pinBtn.textContent = pinned ? "Unpin" : "Pin Reference";
+  }};
+
   r.oninput = () => applyClip(r.value);
   applyClip(r.value);
+  syncPinLabel();
 
   swapBtn.onclick = () => {{
     const tmp = o.src;
@@ -130,7 +154,7 @@ def build_video_comparison(
 
   pinBtn.onclick = () => {{
     pinned = !pinned;
-    pinBtn.textContent = pinned ? "Unpin" : "Pin Reference";
+    syncPinLabel();
     if (pinned) {{
       o.pause(); b.pause();
     }}
@@ -145,9 +169,28 @@ def build_video_comparison(
     applyClip(50);
   }};
 
+  popoutBtn.onclick = (e) => {{
+    e.preventDefault();
+    const popup = window.open("", "_blank", "width=1400,height=900");
+    if (!popup) return;
+    const tpl = shell.outerHTML;
+    popup.document.write(`<!doctype html><html><head><title>Video Comparison</title></head><body style="margin:0;background:#0f0f0f;color:#eee;font-family:Inter,system-ui,sans-serif;">${{tpl}}</body></html>`);
+    popup.document.close();
+  }};
+
+  // Keyboard shortcuts
+  window.addEventListener('keydown', (ev) => {{
+    const step = 2;
+    if (ev.key === 'ArrowLeft') {{ r.value = Math.max(0, r.value - step); r.dispatchEvent(new Event('input')); }}
+    if (ev.key === 'ArrowRight') {{ r.value = Math.min(100, parseInt(r.value) + step); r.dispatchEvent(new Event('input')); }}
+    if (ev.key.toLowerCase() === 's') swapBtn.click();
+    if (ev.key.toLowerCase() === 'p' || ev.key === ' ') {{ ev.preventDefault(); pinBtn.click(); }}
+    if (ev.key.toLowerCase() === 'f') fsBtn.click();
+    if (ev.key.toLowerCase() === 'r') resetBtn.click();
+  }});
+
   // Initialize pin state
   if (pinned) {{
-    pinBtn.textContent = "Unpin";
     o.pause(); b.pause();
   }}
 

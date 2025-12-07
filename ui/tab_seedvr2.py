@@ -28,9 +28,11 @@ def build_seedvr2_tab(
       - cancel_action()
       - open_outputs_folder()
       - clear_temp_folder()
+      - auto_res_on_input(path)
     """
     models = callbacks["get_models"]()
     values = [defaults[k] for k in callbacks["order"]]
+    seed_controls_cache.setdefault("current_model", values[4] if len(values) > 4 else (models[0] if models else ""))
 
     # GPU hint
     try:
@@ -55,6 +57,7 @@ def build_seedvr2_tab(
             input_file = gr.File(label="Upload video or image (optional)", type="filepath", file_types=["video", "image"])
             input_path = gr.Textbox(label="Input Video or Frames Folder Path", value=values[0], placeholder="C:/path/to/video.mp4 or /path/to/frames")
             input_cache_msg = gr.Markdown("")
+            auto_res_msg = gr.Markdown("")
             batch_enable = gr.Checkbox(label="Enable Batch Processing (use directory input)", value=values[5])
             batch_input = gr.Textbox(label="Batch Input Folder", value=values[6], placeholder="Folder containing videos or frames")
             batch_output = gr.Textbox(label="Batch Output Folder Override", value=values[7], placeholder="Optional override for batch outputs")
@@ -66,6 +69,7 @@ def build_seedvr2_tab(
             output_format = gr.Dropdown(label="Output Format", choices=["auto", "mp4", "png"], value=values[2])
             model_dir = gr.Textbox(label="Model Directory (optional)", value=values[3])
             dit_model = gr.Dropdown(label="SeedVR2 Model", choices=models, value=values[4])
+            model_cache_msg = gr.Markdown("")
 
             with gr.Row():
                 resolution = gr.Slider(label="Target Resolution (short side)", minimum=256, maximum=4096, step=16, value=values[11])
@@ -146,6 +150,7 @@ def build_seedvr2_tab(
 
             with gr.Row():
                 open_outputs_btn = gr.Button("Open Outputs Folder")
+                delete_confirm = gr.Checkbox(label="Confirm delete temp", value=False)
                 delete_temp_btn = gr.Button("Delete Temp Folder")
 
             # Preset block
@@ -160,7 +165,7 @@ def build_seedvr2_tab(
 
             gr.Markdown("#### Mode (info)")
             gr.Markdown(
-                "Subprocess mode is active (recommended). In-app mode will be added with confirmation before switching and will require restart to return to subprocess."
+                "Subprocess mode is active by default. Use the Global tab to switch to In-app mode (keeps models loaded, higher memory). Restart to return to subprocess."
             )
             gr.Markdown("Comparison: native slider will be used when available; HTML fallback when not.")
 
@@ -231,7 +236,7 @@ def build_seedvr2_tab(
         outputs=[status_box, log_box],
     )
     open_outputs_btn.click(lambda: callbacks["open_outputs_folder"](), outputs=status_box)
-    delete_temp_btn.click(lambda: callbacks["clear_temp_folder"](), outputs=status_box)
+    delete_temp_btn.click(lambda ok: callbacks["clear_temp_folder"](ok), inputs=[delete_confirm], outputs=status_box)
 
     # Presets wiring
     save_preset_btn.click(
@@ -248,7 +253,23 @@ def build_seedvr2_tab(
 
     # Sync upload to textbox
     input_file.upload(_cache_upload, inputs=input_file, outputs=[input_path, input_cache_msg])
+    input_file.upload(
+        fn=lambda fp: callbacks["auto_res_on_input"](fp if fp else ""),
+        inputs=input_file,
+        outputs=[resolution, max_resolution, auto_res_msg],
+    )
     input_path.change(_cache_path_value, inputs=input_path, outputs=input_cache_msg)
+    input_path.change(
+        fn=lambda p: callbacks["auto_res_on_input"](p),
+        inputs=input_path,
+        outputs=[resolution, max_resolution, auto_res_msg],
+    )
+
+    def _set_model_cache(m):
+        seed_controls_cache["current_model"] = m
+        return gr.Markdown.update(value=f"Model cached for resolution/preset: {m}")
+
+    dit_model.change(_set_model_cache, inputs=dit_model, outputs=model_cache_msg)
 
     # Comparison note
     comparison_note.update(comparison_html_slider())

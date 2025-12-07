@@ -103,42 +103,42 @@ def build_resolution_tab(
     cache_msg = gr.Markdown("")
     target_resolution.change(
         fn=callbacks["cache_resolution"],
-        inputs=[target_resolution, max_target_resolution],
+        inputs=[target_resolution, max_target_resolution, model_select],
         outputs=cache_msg,
     )
     max_target_resolution.change(
         fn=callbacks["cache_resolution"],
-        inputs=[target_resolution, max_target_resolution],
+        inputs=[target_resolution, max_target_resolution, model_select],
         outputs=cache_msg,
     )
     auto_resolution.change(
         fn=callbacks["cache_resolution_flags"],
-        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup],
+        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup, model_select],
         outputs=flags_msg,
     )
     enable_max.change(
         fn=callbacks["cache_resolution_flags"],
-        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup],
+        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup, model_select],
         outputs=flags_msg,
     )
     chunk_size.change(
         fn=callbacks["cache_resolution_flags"],
-        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup],
+        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup, model_select],
         outputs=flags_msg,
     )
     chunk_overlap.change(
         fn=callbacks["cache_resolution_flags"],
-        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup],
+        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup, model_select],
         outputs=flags_msg,
     )
     ratio_downscale.change(
         fn=callbacks["cache_resolution_flags"],
-        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup],
+        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup, model_select],
         outputs=flags_msg,
     )
     per_chunk_cleanup.change(
         fn=callbacks["cache_resolution_flags"],
-        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup],
+        inputs=[auto_resolution, enable_max, chunk_size, chunk_overlap, ratio_downscale, per_chunk_cleanup, model_select],
         outputs=flags_msg,
     )
 

@@ -72,6 +72,11 @@ def build_face_callbacks(
         defaults_with_model["model"] = model_name
         current_map = dict(zip(FACE_ORDER, current_values))
         values = _apply_face_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
+        try:
+            global_settings["face_strength"] = float(values[2])
+            preset_manager.save_global_settings(global_settings)
+        except Exception:
+            pass
         return values
 
     def safe_defaults():
@@ -82,6 +87,16 @@ def build_face_callbacks(
         preset_manager.save_global_settings(global_settings)
         return gr.Markdown.update(value="✅ Global face restoration updated")
 
+    def cache_strength(strength_val: float):
+        try:
+            strength_num = float(strength_val)
+        except Exception:
+            strength_num = defaults["strength"]
+        strength_num = max(0.0, min(1.0, strength_num))
+        global_settings["face_strength"] = strength_num
+        preset_manager.save_global_settings(global_settings)
+        return gr.Markdown.update(value=f"✅ Face strength set to {strength_num}")
+
     return {
         "defaults": defaults,
         "order": FACE_ORDER,
@@ -90,6 +105,7 @@ def build_face_callbacks(
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
         "set_face_global": set_face_global,
+        "cache_strength": cache_strength,
     }
 
 

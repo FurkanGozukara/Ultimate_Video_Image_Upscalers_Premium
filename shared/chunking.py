@@ -3,9 +3,16 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Optional
 
-from .path_utils import collision_safe_dir, collision_safe_path, normalize_path, resolve_output_location
+from .path_utils import (
+    collision_safe_dir,
+    collision_safe_path,
+    normalize_path,
+    resolve_output_location,
+    detect_input_type,
+    emit_metadata,
+)
 
 
 def _has_scenedetect() -> bool:
@@ -108,11 +115,13 @@ def chunk_and_process(
     chunk_overlap: float = 0.0,
     per_chunk_cleanup: bool = False,
     allow_partial: bool = True,
+    global_output_dir: Optional[str] = None,
 ) -> Tuple[int, str, str, int]:
     """
     Returns (returncode, log, final_output_path, chunk_count)
     """
     input_path = normalize_path(settings["input_path"])
+    input_type = detect_input_type(input_path)
     output_format = settings.get("output_format") or "mp4"
     if output_format in (None, "auto"):
         output_format = "mp4"
@@ -121,11 +130,14 @@ def chunk_and_process(
     work.mkdir(parents=True, exist_ok=True)
 
     # Predict final output locations for partial/cancel handling
+    global_override = settings.get("output_override") or global_output_dir
     predicted_final = resolve_output_location(
         input_path=input_path,
         output_format=output_format,
-        global_output_dir=settings.get("output_override"),
+        global_output_dir=global_override,
         batch_mode=False,
+        png_padding=settings.get("png_padding"),
+        png_keep_basename=settings.get("png_keep_basename", False),
     )
     predicted_final_path = Path(predicted_final)
     if output_format == "png":
@@ -143,14 +155,49 @@ def chunk_and_process(
             predicted_final_path.with_name(f"{predicted_final_path.stem}_partial{predicted_final_path.suffix}")
         )
 
-    scenes = detect_scenes(input_path, threshold=scene_threshold, min_scene_len=min_scene_len)
-    if not scenes or chunk_seconds > 0:
-        effective_seconds = chunk_seconds if chunk_seconds > 0 else max(min_scene_len, 30)
-        scenes = fallback_scenes(input_path, chunk_seconds=effective_seconds, overlap_seconds=max(0.0, chunk_overlap))
-    on_progress(f"Detected {len(scenes)} scenes for chunking\n")
+    # Special handling for frame-folder inputs (image sequences)
+    if input_type == "directory":
+        frames = sorted(
+            [
+                f
+                for f in Path(input_path).iterdir()
+                if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
+            ]
+        )
+        if not frames:
+            return 1, "No frames found in folder for chunking", "", 0
+        fps_guess = 30.0
+        frame_window = len(frames) if chunk_seconds <= 0 else max(1, int(chunk_seconds * fps_guess))
+        overlap_frames = 0 if chunk_overlap <= 0 else int(chunk_overlap * fps_guess)
+        if overlap_frames >= frame_window:
+            overlap_frames = max(0, frame_window - 1)
+        chunk_specs = []
+        start = 0
+        idx = 1
+        while start < len(frames):
+            end = min(len(frames), start + frame_window)
+            chunk_specs.append((idx, frames[start:end]))
+            if end == len(frames):
+                break
+            start = end - overlap_frames
+            idx += 1
+        on_progress(f"Detected {len(chunk_specs)} frame chunks\n")
+        chunk_paths = []
+        for idx, frame_list in chunk_specs:
+            cdir = work / f"chunk_{idx:04d}"
+            cdir.mkdir(parents=True, exist_ok=True)
+            for f in frame_list:
+                shutil.copy2(f, cdir / f.name)
+            chunk_paths.append(cdir)
+    else:
+        scenes = detect_scenes(input_path, threshold=scene_threshold, min_scene_len=min_scene_len)
+        if not scenes or chunk_seconds > 0:
+            effective_seconds = chunk_seconds if chunk_seconds > 0 else max(min_scene_len, 30)
+            scenes = fallback_scenes(input_path, chunk_seconds=effective_seconds, overlap_seconds=max(0.0, chunk_overlap))
+        on_progress(f"Detected {len(scenes)} scenes for chunking\n")
 
-    chunk_paths = split_video(input_path, scenes, work)
-    on_progress(f"Split into {len(chunk_paths)} chunks\n")
+        chunk_paths = split_video(input_path, scenes, work)
+        on_progress(f"Split into {len(chunk_paths)} chunks\n")
 
     output_chunks: List[Path] = []
     chunk_logs: List[dict] = []
@@ -170,6 +217,19 @@ def chunk_and_process(
                             else:
                                 shutil.copy2(outp, dest)
                         log_blob = f"Chunking canceled at chunk {idx}; partial PNG outputs saved to {partial_target}"
+                        try:
+                            emit_metadata(
+                                partial_target,
+                                {
+                                    "returncode": 1,
+                                    "chunks": chunk_logs,
+                                    "partial": True,
+                                    "canceled": True,
+                                    "chunk_index": idx,
+                                },
+                            )
+                        except Exception:
+                            pass
                         if per_chunk_cleanup:
                             shutil.rmtree(work, ignore_errors=True)
                         return 1, log_blob, str(partial_target), len(chunk_paths)
@@ -177,6 +237,19 @@ def chunk_and_process(
                         partial_target = partial_video_target or collision_safe_path(work / "partial_concat.mp4")
                         ok = concat_videos(output_chunks, partial_target)
                         log_blob = f"Chunking canceled at chunk {idx}; partial output saved: {partial_target}"
+                        try:
+                            emit_metadata(
+                                partial_target,
+                                {
+                                    "returncode": 1 if not ok else 0,
+                                    "chunks": chunk_logs,
+                                    "partial": True,
+                                    "canceled": True,
+                                    "chunk_index": idx,
+                                },
+                            )
+                        except Exception:
+                            pass
                         if per_chunk_cleanup:
                             shutil.rmtree(work, ignore_errors=True)
                         if ok:
@@ -207,6 +280,19 @@ def chunk_and_process(
                         else:
                             shutil.copy2(outp, dest)
                     log_blob = f"Chunking stopped early at chunk {idx}; partial PNG outputs saved to {partial_target}"
+                    try:
+                        emit_metadata(
+                            partial_target,
+                            {
+                                "returncode": res.returncode,
+                                "chunks": chunk_logs,
+                                "partial": True,
+                                "failed_chunk": idx,
+                                "canceled": getattr(runner, "is_canceled", lambda: False)(),
+                            },
+                        )
+                    except Exception:
+                        pass
                     if per_chunk_cleanup:
                         shutil.rmtree(work, ignore_errors=True)
                     return res.returncode, log_blob, str(partial_target), len(chunk_paths)
@@ -223,6 +309,20 @@ def chunk_and_process(
                             "canceled": getattr(runner, "is_canceled", lambda: False)(),
                         }
                         log_blob = f"Chunking stopped early at chunk {idx}; partial output saved: {partial_target}\n{meta}"
+                        try:
+                            emit_metadata(
+                                partial_target,
+                                {
+                                    "returncode": res.returncode,
+                                    "chunks": chunk_logs,
+                                    "partial": True,
+                                    "failed_chunk": idx,
+                                    "processed_chunks": len(output_chunks),
+                                    "canceled": getattr(runner, "is_canceled", lambda: False)(),
+                                },
+                            )
+                        except Exception:
+                            pass
                         if per_chunk_cleanup:
                             shutil.rmtree(work, ignore_errors=True)
                         return res.returncode, log_blob, str(partial_target), len(chunk_paths)
@@ -243,13 +343,16 @@ def chunk_and_process(
         target_dir = resolve_output_location(
             input_path=input_path,
             output_format="png",
-            global_output_dir=settings.get("output_override"),
+            global_output_dir=global_override,
             batch_mode=False,
+            png_padding=settings.get("png_padding"),
+            png_keep_basename=settings.get("png_keep_basename", False),
         )
         target_dir = collision_safe_dir(Path(target_dir))
         target_dir.mkdir(parents=True, exist_ok=True)
+        pad_val = max(1, int(settings.get("png_padding") or 5))
         for i, outp in enumerate(output_chunks, 1):
-            dest = target_dir / f"chunk_{i:04d}"
+            dest = target_dir / f"chunk_{i:0{pad_val}d}"
             if Path(outp).is_dir():
                 shutil.copytree(outp, dest, dirs_exist_ok=True)
             else:
@@ -258,13 +361,27 @@ def chunk_and_process(
         if per_chunk_cleanup:
             shutil.rmtree(work, ignore_errors=True)
         log_blob = "Chunked processing complete (PNG)\n" + "\n".join([str(c) for c in chunk_logs])
+        try:
+            emit_metadata(
+                target_dir,
+                {
+                    "returncode": 0,
+                    "chunks": chunk_logs,
+                    "partial": False,
+                    "output_format": output_format,
+                },
+            )
+        except Exception:
+            pass
         return 0, log_blob, str(target_dir), len(chunk_paths)
 
     final_path = resolve_output_location(
         input_path=input_path,
         output_format="mp4",
-        global_output_dir=settings.get("output_override"),
+        global_output_dir=global_override,
         batch_mode=False,
+        png_padding=settings.get("png_padding"),
+        png_keep_basename=settings.get("png_keep_basename", False),
     )
     final_path = collision_safe_path(Path(final_path))
     ok = concat_videos(output_chunks, final_path)
@@ -282,5 +399,18 @@ def chunk_and_process(
     except Exception:
         pass
     log_blob = "Chunked processing complete\n" + "\n".join([str(c) for c in chunk_logs])
+    # Emit consolidated metadata for chunked runs
+    try:
+        emit_metadata(
+            final_path,
+            {
+                "returncode": 0,
+                "chunks": chunk_logs,
+                "partial": False,
+                "output_format": output_format,
+            },
+        )
+    except Exception:
+        pass
     return 0, log_blob, str(final_path), len(chunk_paths)
 

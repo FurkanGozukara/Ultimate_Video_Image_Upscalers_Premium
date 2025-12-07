@@ -189,11 +189,18 @@ def collision_safe_dir(path: Path) -> Path:
         counter += 1
 
 
-def rife_output_path(input_path: str, png_output: bool, override: Optional[str]) -> Path:
+def rife_output_path(
+    input_path: str,
+    png_output: bool,
+    override: Optional[str],
+    global_output_dir: Optional[str] = None,
+    png_padding: Optional[int] = None,
+    png_keep_basename: bool = False,
+) -> Path:
     """
-    Simple collision-safe output for RIFE:
-    - If override provided, use it (file or dir) as-is.
-    - Otherwise sibling <name>_rife.mp4 or .png (if png_output True).
+    Collision-safe output for RIFE, reusing the shared SeedVR2-style helper:
+    - If override is provided, use it (file or dir) as-is.
+    - Otherwise mirror generate_output_path semantics with optional global override.
     """
     if override:
         target = Path(normalize_path(override))
@@ -205,16 +212,20 @@ def rife_output_path(input_path: str, png_output: bool, override: Optional[str])
         ensure_dir(target.parent)
         return collision_safe_path(target)
 
-    inp = Path(normalize_path(input_path))
-    suffix = ".png" if png_output else ".mp4"
-    if png_output:
-        target_dir = inp.with_name(f"{inp.stem}_rife")
-        target_dir = collision_safe_dir(target_dir)
-        ensure_dir(target_dir)
-        return target_dir
-    target = inp.with_name(f"{inp.stem}_rife{suffix}")
-    ensure_dir(target.parent)
-    return collision_safe_path(target)
+    output_fmt = "png" if png_output else "mp4"
+    target = resolve_output_location(
+        input_path=input_path,
+        output_format=output_fmt,
+        global_output_dir=global_output_dir,
+        batch_mode=False,
+        png_padding=png_padding,
+        png_keep_basename=png_keep_basename,
+    )
+    # resolve_output_location may return file or dir; ensure collision safety
+    target_path = Path(target)
+    if target_path.suffix.lower() in (".mp4", ".png"):
+        return collision_safe_path(target_path)
+    return collision_safe_dir(target_path)
 
 
 def write_png_metadata(dir_path: Path, payload: dict):
@@ -237,9 +248,15 @@ def generate_output_path(
     output_dir: Optional[str] = None,
     input_type: Optional[str] = None,
     from_directory: bool = False,
+    png_padding: Optional[int] = None,
+    png_keep_basename: bool = False,
 ) -> Path:
     """
     Mirror SeedVR2 CLI generate_output_path behavior, then apply collision safety.
+
+    We keep the `_upscaled` suffix for single runs even when an explicit output
+    directory/global override is provided, but avoid the suffix for directory
+    (batch) mode to preserve original names inside the batch folder.
     """
     input_path_obj = Path(input_path)
     input_name = input_path_obj.stem
@@ -247,19 +264,20 @@ def generate_output_path(
     if input_type is None:
         input_type = detect_input_type(input_path)
 
-    # Determine base directory and suffix policy
+    # Determine base directory; suffix is applied for single runs.
     if output_dir:
         base_dir = Path(normalize_path(output_dir))
-        add_suffix = False
     elif from_directory:
         original_dir = input_path_obj.parent
         base_dir = original_dir.parent / f"{original_dir.name}_upscaled"
-        add_suffix = False
     else:
         base_dir = input_path_obj.parent
-        add_suffix = True
 
+    # Keep the CLI-style suffix for single runs even when an output_dir override is used.
+    add_suffix = not from_directory
     file_suffix = "_upscaled" if add_suffix else ""
+    if png_keep_basename and output_format == "png":
+        file_suffix = ""
 
     if output_format == "png":
         if input_type == "image":
@@ -283,24 +301,22 @@ def resolve_output_location(
     output_format: str,
     global_output_dir: Optional[str],
     batch_mode: bool,
+    png_padding: Optional[int] = None,
+    png_keep_basename: bool = False,
 ) -> Path:
     """
     Resolve where outputs should go respecting CLI semantics first, then applying
     global overrides when provided.
     """
-    if global_output_dir:
-        return generate_output_path(
-            input_path=input_path,
-            output_format=output_format,
-            output_dir=global_output_dir,
-            input_type=detect_input_type(input_path),
-            from_directory=batch_mode,
-        )
+    target_dir = global_output_dir if global_output_dir else None
     return generate_output_path(
         input_path=input_path,
         output_format=output_format,
+        output_dir=target_dir,
         input_type=detect_input_type(input_path),
         from_directory=batch_mode,
+        png_padding=png_padding,
+        png_keep_basename=png_keep_basename,
     )
 
 
