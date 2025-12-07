@@ -291,17 +291,18 @@ def build_gan_callbacks(
         return [defaults[k] for k in GAN_ORDER]
 
     def run_action(upload, *args, preview_only: bool = False, state=None):
-        state = state or {"seed_controls": {}}
-        seed_controls = state.get("seed_controls", {})
-        cancel_event.clear()
-        settings_dict = _gan_dict_from_args(list(args))
-        settings = {**defaults, **settings_dict}
-        settings["output_override"] = settings.get("output_override")
-        settings["cuda_device"] = settings.get("cuda_device", "")
+        try:
+            state = state or {"seed_controls": {}}
+            seed_controls = state.get("seed_controls", {})
+            cancel_event.clear()
+            settings_dict = _gan_dict_from_args(list(args))
+            settings = {**defaults, **settings_dict}
+            settings["output_override"] = settings.get("output_override")
+            settings["cuda_device"] = settings.get("cuda_device", "")
 
-        # Pull latest global paths in case user changed them in Global tab
-        current_output_dir = Path(global_settings.get("output_dir", output_dir))
-        current_temp_dir = Path(global_settings.get("temp_dir", temp_dir))
+            # Pull latest global paths in case user changed them in Global tab
+            current_output_dir = Path(global_settings.get("output_dir", output_dir))
+            current_temp_dir = Path(global_settings.get("temp_dir", temp_dir))
 
         inp = normalize_path(upload if upload else settings["input_path"])
         if settings.get("batch_enable"):
@@ -639,6 +640,16 @@ def build_gan_callbacks(
             slider_upd,
             state
         )
+        except Exception as e:
+            error_msg = f"Critical error in GAN processing: {str(e)}"
+            yield (
+                "❌ Critical error",
+                error_msg,
+                None,
+                "",
+                gr.ImageSlider.update(value=None),
+                state or {}
+            )
 
     def cancel_action(state=None):
         cancel_event.set()

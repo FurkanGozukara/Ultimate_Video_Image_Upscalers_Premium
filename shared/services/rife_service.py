@@ -149,22 +149,23 @@ def build_rife_callbacks(
         return [defaults[k] for k in RIFE_ORDER]
 
     def run_action(uploaded_file, img_folder, *args, state=None):
-        settings_dict = _rife_dict_from_args(list(args))
-        settings = {**defaults, **settings_dict}
+        try:
+            settings_dict = _rife_dict_from_args(list(args))
+            settings = {**defaults, **settings_dict}
 
-        input_path = normalize_path(uploaded_file if uploaded_file else img_folder)
-        if not input_path or not Path(input_path).exists():
-            return ("❌ Input missing", "", None, "No metadata")
-        if settings.get("img_mode"):
-            # In --img mode, require a frames folder (or image file); block video files to avoid misuse.
-            if Path(input_path).is_file() and Path(input_path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
-                return ("⚠️ --img mode expects frames folder or images, not a video file.", "", None, "No metadata")
-        else:
-            # In video mode, require a video file
-            if Path(input_path).is_dir():
-                return ("⚠️ Video mode expects a video file. Enable --img for frame folders.", "", None, "No metadata")
-        settings["input_path"] = input_path
-        settings["output_override"] = settings.get("output_override") or None
+            input_path = normalize_path(uploaded_file if uploaded_file else img_folder)
+            if not input_path or not Path(input_path).exists():
+                return ("❌ Input missing", "", None, "No metadata")
+            if settings.get("img_mode"):
+                # In --img mode, require a frames folder (or image file); block video files to avoid misuse.
+                if Path(input_path).is_file() and Path(input_path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
+                    return ("⚠️ --img mode expects frames folder or images, not a video file.", "", None, "No metadata")
+            else:
+                # In video mode, require a video file
+                if Path(input_path).is_dir():
+                    return ("⚠️ Video mode expects a video file. Enable --img for frame folders.", "", None, "No metadata")
+            settings["input_path"] = input_path
+            settings["output_override"] = settings.get("output_override") or None
 
         # Apply Resolution tab hints (ratio downscale) for videos when provided
         seed_controls = state.get("seed_controls", {})
@@ -333,6 +334,9 @@ def build_rife_callbacks(
         )
         final_log = "\n".join(log_lines) or result.log
         yield (status, final_log, out_path, meta_md)
+        except Exception as e:
+            error_msg = f"Critical error in RIFE processing: {str(e)}"
+            yield ("❌ Critical error", error_msg, None, "Error occurred")
 
     return {
         "defaults": defaults,
