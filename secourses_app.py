@@ -1,0 +1,316 @@
+import os
+from pathlib import Path
+from typing import Any, Dict
+
+import gradio as gr
+
+from shared.health import collect_health_report
+from shared.logging_utils import RunLogger
+from shared.path_utils import get_default_output_dir, get_default_temp_dir
+from shared.preset_manager import PresetManager
+from shared.runner import Runner
+from shared.models.seedvr2_meta import get_seedvr2_model_names
+import shared.services.seedvr2_service as seed_service
+import shared.services.resolution_service as res_service
+import shared.services.output_service as out_service
+import shared.services.face_service as face_service
+import shared.services.rife_service as rife_service
+import shared.services.gan_service as gan_service
+import shared.services.global_service as global_service
+import shared.services.health_service as health_service
+from ui.tab_seedvr2 import build_seedvr2_tab as build_seedvr2_tab_ui
+from ui.tab_resolution import build_resolution_tab as build_resolution_tab_ui
+from ui.tab_output import build_output_tab as build_output_tab_ui
+from ui.tab_face import build_face_tab as build_face_tab_ui
+from ui.tab_rife import build_rife_tab as build_rife_tab_ui
+from ui.tab_gan import build_gan_tab as build_gan_tab_ui
+
+BASE_DIR = Path(__file__).parent.resolve()
+PRESET_DIR = BASE_DIR / "presets"
+APP_TITLE = "SECourses Ultimate Video and Image Upscaler Pro V1.0 – https://www.patreon.com/posts/134405610"
+seed_controls_cache: Dict[str, Any] = {}
+health_banner: Dict[str, str] = {}
+mode_state: Dict[str, bool] = {"locked": False}
+
+
+def _get_gan_model_names(base_dir: Path) -> list:
+    models_dir = base_dir / "Image_Upscale_Models"
+    if not models_dir.exists():
+        return []
+    choices = []
+    for f in models_dir.iterdir():
+        if f.is_file() and f.suffix.lower() in (".pth", ".safetensors"):
+            choices.append(f.name)
+    return sorted(choices)
+
+
+def _append_warning(text: str):
+    """Append a warning line to the health banner."""
+    existing = health_banner.get("text", "")
+    if existing:
+        health_banner["text"] = existing + "\n" + text
+    else:
+        health_banner["text"] = text
+
+# --------------------------------------------------------------------- #
+# Global setup
+# --------------------------------------------------------------------- #
+preset_manager = PresetManager(PRESET_DIR)
+
+GLOBAL_DEFAULTS = {
+    "output_dir": str(BASE_DIR / "outputs"),
+    "temp_dir": os.environ.get("TEMP") or str(BASE_DIR / "temp"),
+    "telemetry": True,
+    "face_global": False,
+    "mode": "subprocess",
+}
+global_settings = preset_manager.load_global_settings(GLOBAL_DEFAULTS)
+
+temp_dir = get_default_temp_dir(BASE_DIR, global_settings)
+output_dir = get_default_output_dir(BASE_DIR, global_settings)
+runner = Runner(
+    BASE_DIR,
+    temp_dir=temp_dir,
+    output_dir=output_dir,
+    telemetry_enabled=global_settings.get("telemetry", True),
+)
+runner.set_mode(global_settings.get("mode", "subprocess"))
+if runner.get_mode() == "in_app":
+    mode_state["locked"] = True
+run_logger = RunLogger(enabled=global_settings.get("telemetry", True))
+# Precompute a health banner so the UI always shows guidance even before user clicks
+try:
+    initial_report = collect_health_report(temp_dir=Path(global_settings["temp_dir"]), output_dir=Path(global_settings["output_dir"]))
+    warnings = []
+    for key, info in initial_report.items():
+        if info.get("status") not in ("ok", "skipped"):
+            warnings.append(f"{key}: {info.get('detail')}")
+    health_banner["text"] = "\n".join(warnings) if warnings else "All health checks passed."
+except Exception:
+    health_banner["text"] = "Health check failed to initialize. Run Health Check tab for details."
+
+
+
+# --------------------------------------------------------------------- #
+# UI construction
+# --------------------------------------------------------------------- #
+def main():
+    seed_defaults = seed_service.seedvr2_defaults()
+    gan_model_names = _get_gan_model_names(BASE_DIR)
+    combined_models = get_seedvr2_model_names() + gan_model_names
+    last_used_name = preset_manager.get_last_used_name("seedvr2", seed_defaults.get("dit_model"))
+    last_used = preset_manager.load_last_used("seedvr2", seed_defaults.get("dit_model"))
+    if last_used_name and last_used is None:
+        _append_warning(f"Last used SeedVR2 preset '{last_used_name}' not found; loaded defaults.")
+    seed_defaults = preset_manager.merge_config(seed_defaults, last_used or {})
+
+    modern_theme = gr.themes.Soft(primary_hue="indigo", font=["Inter", "Arial", "sans-serif"])
+    css_overrides = """
+    .gr-button { padding: 12px 16px; font-size: 16px; }
+    .gr-markdown, .gr-textbox label, .gr-number label, .gr-dropdown label { font-size: 16px; }
+    """
+
+    with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=css_overrides) as demo:
+        banner = gr.Markdown(health_banner.get("text", ""))
+        gr.Markdown(f"# {APP_TITLE}")
+
+        with gr.Tab("Global"):
+            with gr.Row():
+                output_dir_box = gr.Textbox(label="Default Outputs Folder", value=global_settings["output_dir"])
+                temp_dir_box = gr.Textbox(label="Temp Folder", value=global_settings["temp_dir"])
+                telemetry_toggle = gr.Checkbox(label="Save run metadata (local)", value=global_settings.get("telemetry", True))
+                face_global_toggle = gr.Checkbox(label="Apply Face Restoration globally", value=global_settings.get("face_global", False))
+            save_global = gr.Button("Save Global Settings", variant="primary")
+            global_status = gr.Markdown("")
+            save_global.click(
+                fn=lambda od, td, tel, face: global_service.save_global_settings(od, td, tel, face, runner, preset_manager, global_settings, run_logger),
+                inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle],
+                outputs=global_status,
+            )
+            gr.Markdown("#### Execution Mode")
+            mode_radio = gr.Radio(
+                choices=["subprocess", "in_app"],
+                value=runner.get_mode(),
+                label="Mode",
+                info="Subprocess (default) fully cleans memory; In-app keeps models loaded but may leak. Restart required to return to subprocess after switching.",
+            )
+            mode_confirm = gr.Checkbox(label="I understand switching to in-app locks until restart", value=False)
+            apply_mode_btn = gr.Button("Apply Mode", variant="secondary")
+            mode_status = gr.Markdown("")
+            apply_mode_btn.click(
+                fn=lambda mode_choice, confirm: global_service.apply_mode_selection(
+                    mode_choice, confirm, runner, preset_manager, global_settings, mode_state
+                ),
+                inputs=[mode_radio, mode_confirm],
+                outputs=[mode_status, mode_radio],
+            )
+
+        with gr.Tab("SeedVR2"):
+            seed_srv = seed_service.build_seedvr2_callbacks(
+                preset_manager,
+                runner,
+                run_logger,
+                global_settings,
+                seed_controls_cache,
+                output_dir,
+                temp_dir,
+                mode_state,
+            )
+            seed_callbacks = {
+                "order": seed_service.SEEDVR2_ORDER,
+                "get_models": get_seedvr2_model_names,
+                "refresh_presets": seed_srv["refresh_presets"],
+                "save_preset": seed_srv["save_preset"],
+                "load_preset": lambda preset, model, _defaults, vals: seed_srv["load_preset"](preset, model, list(vals)),
+                "safe_defaults": seed_srv["safe_defaults"],
+                "run_action": seed_srv["run_action"],
+                "cancel_action": seed_srv["cancel_action"],
+                "open_outputs_folder": lambda: global_service.open_outputs_folder(global_settings["output_dir"]),
+                "clear_temp_folder": lambda: global_service.clear_temp_folder(global_settings["temp_dir"]),
+            }
+            seed_controls = build_seedvr2_tab_ui(
+                seed_defaults,
+                preset_manager,
+                global_settings,
+                seed_controls_cache,
+                health_banner,
+                seed_srv["comparison_html_slider"],
+                seed_callbacks,
+            )
+
+        with gr.Tab("Resolution & Scene Split"):
+            res_srv = res_service.build_resolution_callbacks(preset_manager, seed_controls_cache, combined_models)
+            res_last_name = preset_manager.get_last_used_name("resolution", res_srv["defaults"].get("model"))
+            res_last = preset_manager.load_last_used("resolution", res_srv["defaults"].get("model"))
+            if res_last_name and res_last is None:
+                _append_warning(f"Last used Resolution preset '{res_last_name}' not found; loaded defaults.")
+            res_defaults = preset_manager.merge_config(res_srv["defaults"], res_last or {})
+            resolution_callbacks = {
+                "order": res_service.RESOLUTION_ORDER,
+                "models": get_seedvr2_model_names,
+                "refresh_presets": res_srv["refresh_presets"],
+                "save_preset": res_srv["save_preset"],
+                "load_preset": lambda preset, model, _defaults, vals: res_srv["load_preset"](preset, model, list(vals)),
+                "safe_defaults": res_srv["safe_defaults"],
+                "apply_to_seed": res_srv["apply_to_seed"],
+                "chunk_estimate": res_srv["chunk_estimate"],
+                "estimate_from_input": res_srv["estimate_from_input"],
+                "cache_resolution": res_srv["cache_resolution"],
+                "cache_resolution_flags": res_srv["cache_resolution_flags"],
+                "seed_controls": seed_controls,
+            }
+            build_resolution_tab_ui(
+                res_defaults,
+                preset_manager,
+                seed_controls_cache,
+                resolution_callbacks,
+            )
+
+        with gr.Tab("Output & Comparison"):
+            out_srv = out_service.build_output_callbacks(preset_manager, seed_controls_cache, combined_models)
+            out_last_name = preset_manager.get_last_used_name("output", out_srv["defaults"].get("model"))
+            out_last = preset_manager.load_last_used("output", out_srv["defaults"].get("model"))
+            if out_last_name and out_last is None:
+                _append_warning(f"Last used Output preset '{out_last_name}' not found; loaded defaults.")
+            out_defaults = preset_manager.merge_config(out_srv["defaults"], out_last or {})
+            output_callbacks = {
+                "order": out_service.OUTPUT_ORDER,
+                "models": get_seedvr2_model_names,
+                "refresh_presets": out_srv["refresh_presets"],
+                "save_preset": out_srv["save_preset"],
+                "load_preset": lambda preset, model, _defaults, vals: out_srv["load_preset"](preset, model, list(vals)),
+                "safe_defaults": out_srv["safe_defaults"],
+                "seed_controls": seed_controls,
+            }
+            build_output_tab_ui(
+                out_defaults,
+                preset_manager,
+                seed_controls_cache,
+                output_callbacks,
+            )
+
+        with gr.Tab("Face Restoration"):
+            face_srv = face_service.build_face_callbacks(preset_manager, global_settings, get_seedvr2_model_names())
+            face_last_name = preset_manager.get_last_used_name("face", face_srv["defaults"].get("model"))
+            face_last = preset_manager.load_last_used("face", face_srv["defaults"].get("model"))
+            if face_last_name and face_last is None:
+                _append_warning(f"Last used Face preset '{face_last_name}' not found; loaded defaults.")
+            f_defaults = preset_manager.merge_config(face_srv["defaults"], face_last or {})
+            face_callbacks = {
+                "order": face_service.FACE_ORDER,
+                "models": get_seedvr2_model_names,
+                "refresh_presets": face_srv["refresh_presets"],
+                "save_preset": face_srv["save_preset"],
+                "load_preset": lambda preset, model, _defaults, vals: face_srv["load_preset"](preset, model, list(vals)),
+                "safe_defaults": face_srv["safe_defaults"],
+                "set_face_global": face_srv["set_face_global"],
+            }
+            build_face_tab_ui(
+                f_defaults,
+                preset_manager,
+                global_settings,
+                face_callbacks,
+            )
+
+        with gr.Tab("RIFE / FPS / Edit Videos"):
+            rife_srv = rife_service.build_rife_callbacks(preset_manager, runner, run_logger, global_settings, output_dir, temp_dir)
+            rife_last_name = preset_manager.get_last_used_name("rife", rife_srv["defaults"].get("model"))
+            rife_last = preset_manager.load_last_used("rife", rife_srv["defaults"].get("model"))
+            if rife_last_name and rife_last is None:
+                _append_warning(f"Last used RIFE preset '{rife_last_name}' not found; loaded defaults.")
+            r_defaults = preset_manager.merge_config(rife_srv["defaults"], rife_last or {})
+            rife_callbacks = {
+                "order": rife_service.RIFE_ORDER,
+                "refresh_presets": rife_srv["refresh_presets"],
+                "save_preset": rife_srv["save_preset"],
+                "load_preset": lambda preset, model, _defaults, vals: rife_srv["load_preset"](preset, model, list(vals)),
+                "safe_defaults": rife_srv["safe_defaults"],
+                "run_action": rife_srv["run_action"],
+                "cancel_action": seed_srv["cancel_action"],
+            }
+            build_rife_tab_ui(
+                r_defaults,
+                preset_manager,
+                health_banner,
+                rife_callbacks,
+            )
+
+        with gr.Tab("Image-Based (GAN)"):
+            gan_srv = gan_service.build_gan_callbacks(preset_manager, run_logger, global_settings, seed_controls_cache, BASE_DIR, temp_dir, output_dir)
+            gan_last_name = preset_manager.get_last_used_name("gan", gan_srv["defaults"].get("model"))
+            gan_last = preset_manager.load_last_used("gan", gan_srv["defaults"].get("model"))
+            if gan_last_name and gan_last is None:
+                _append_warning(f"Last used GAN preset '{gan_last_name}' not found; loaded defaults.")
+            g_defaults = preset_manager.merge_config(gan_srv["defaults"], gan_last or {})
+            gan_callbacks = {
+                "order": gan_service.GAN_ORDER,
+                "models": gan_srv["model_scanner"],
+                "refresh_presets": gan_srv["refresh_presets"],
+                "save_preset": gan_srv["save_preset"],
+                "load_preset": lambda preset, model, _defaults, vals: gan_srv["load_preset"](preset, model, list(vals)),
+                "safe_defaults": gan_srv["safe_defaults"],
+                "run_action": gan_srv["run_action"],
+                "cancel_action": seed_srv["cancel_action"],
+            }
+            build_gan_tab_ui(
+                g_defaults,
+                preset_manager,
+                health_banner,
+                seed_controls_cache,
+                gan_callbacks,
+            )
+
+        health_srv = health_service.build_health_callbacks(global_settings, health_banner)
+        with gr.Tab("Health Check"):
+            health_btn = gr.Button("Run Health Check")
+            health_report = gr.Markdown("Run to verify ffmpeg, CUDA, VS Build Tools, and disk/temp/output writability.")
+            health_btn.click(fn=lambda: health_srv["health_check_action"]()[0], outputs=health_report)
+
+        demo.load(fn=lambda: health_srv["health_check_action"]()[0], inputs=None, outputs=health_report)
+        demo.load(fn=lambda: health_srv["health_check_action"]()[1], inputs=None, outputs=banner)
+
+    demo.launch()
+
+
+if __name__ == "__main__":
+    main()
