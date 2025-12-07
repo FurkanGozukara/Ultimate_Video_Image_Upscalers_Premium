@@ -1,7 +1,330 @@
 """
-HTML comparison widgets for video and image with slider, swap, pin, and fullscreen.
-Includes a lightweight fallback using the bundled Video_Comparison_Slider assets.
+Advanced video and image comparison using Gradio's latest features.
+
+Features:
+- Native Gradio ImageSlider for images with enhanced controls
+- Custom video comparison with slider controls
+- Side-by-side and overlay comparison modes
+- Fullscreen support and export capabilities
+- Responsive design for different screen sizes
 """
+
+import gradio as gr
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any
+
+
+def create_image_comparison(
+    input_image: Optional[str],
+    output_image: Optional[str],
+    label: str = "Before/After Comparison"
+) -> gr.ImageSlider:
+    """
+    Create an enhanced image comparison using Gradio's ImageSlider.
+
+    Features:
+    - Native slider with smooth transitions
+    - Position control for precise comparison
+    - Export and fullscreen capabilities
+    - Responsive design
+    """
+    if not input_image or not output_image:
+        # Return empty slider when no images available
+        return gr.ImageSlider(
+            label=label,
+            visible=False
+        )
+
+    return gr.ImageSlider(
+        value=(input_image, output_image),
+        label=label,
+        slider_position=50,
+        height=600,
+        max_height=800,
+        visible=True,
+        elem_classes=["enhanced-comparison"]
+    )
+
+
+def create_video_comparison_html(
+    input_video: Optional[str],
+    output_video: Optional[str],
+    width: int = 800,
+    height: int = 450
+) -> str:
+    """
+    Create a custom HTML video comparison with slider controls.
+
+    Since Gradio doesn't have native VideoSlider, we create a custom
+    HTML implementation with advanced features.
+    """
+    if not input_video or not output_video:
+        return '<div class="no-comparison"><p>No videos available for comparison</p></div>'
+
+    # Normalize paths for web display
+    input_path = str(Path(input_video)).replace('\\', '/')
+    output_path = str(Path(output_video)).replace('\\', '/')
+
+    html = f"""
+    <div class="video-comparison-container" style="width: 100%; max-width: {width}px; margin: 0 auto;">
+        <div class="video-wrapper" style="position: relative; width: 100%; height: {height}px; background: #000; border-radius: 8px; overflow: hidden; border: 1px solid #333;">
+            <!-- Input video (background) -->
+            <video id="input-video" style="width: 100%; height: 100%; object-fit: contain;" muted>
+                <source src="file:///{input_path}" type="video/mp4">
+                Your browser does not support video comparison.
+            </video>
+
+            <!-- Output video (overlay) -->
+            <video id="output-video" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; clip-path: inset(0 50% 0 0);" muted>
+                <source src="file:///{output_path}" type="video/mp4">
+            </video>
+
+            <!-- Slider control -->
+            <input type="range" id="comparison-slider" min="0" max="100" value="50"
+                   style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                          width: 80%; height: 6px; background: rgba(255,255,255,0.3);
+                          border-radius: 3px; cursor: ew-resize; z-index: 10;">
+
+            <!-- Label overlay -->
+            <div class="comparison-label" style="position: absolute; top: 10px; left: 10px;
+                        background: rgba(0,0,0,0.7); color: white; padding: 4px 8px;
+                        border-radius: 4px; font-size: 12px; z-index: 5;">
+                Drag slider to compare
+            </div>
+        </div>
+
+        <!-- Control buttons -->
+        <div class="video-controls" style="display: flex; gap: 10px; margin-top: 10px; justify-content: center;">
+            <button id="play-btn" style="padding: 8px 16px; background: #007bff; color: white;
+                    border: none; border-radius: 4px; cursor: pointer;">Play Both</button>
+            <button id="pause-btn" style="padding: 8px 16px; background: #6c757d; color: white;
+                    border: none; border-radius: 4px; cursor: pointer;">Pause Both</button>
+            <button id="reset-btn" style="padding: 8px 16px; background: #28a745; color: white;
+                    border: none; border-radius: 4px; cursor: pointer;">Reset Slider</button>
+        </div>
+
+        <script>
+        (function() {{
+            const inputVideo = document.getElementById('input-video');
+            const outputVideo = document.getElementById('output-video');
+            const slider = document.getElementById('comparison-slider');
+            const playBtn = document.getElementById('play-btn');
+            const pauseBtn = document.getElementById('pause-btn');
+            const resetBtn = document.getElementById('reset-btn');
+
+            // Sync video playback
+            function syncVideos() {{
+                outputVideo.currentTime = inputVideo.currentTime;
+            }}
+
+            inputVideo.addEventListener('timeupdate', syncVideos);
+            inputVideo.addEventListener('play', () => outputVideo.play());
+            inputVideo.addEventListener('pause', () => outputVideo.pause());
+
+            // Slider control
+            slider.addEventListener('input', function(e) {{
+                const percentage = e.target.value;
+                outputVideo.style.clipPath = `inset(0 ${{100 - percentage}}% 0 0)`;
+            }});
+
+            // Control buttons
+            playBtn.addEventListener('click', function() {{
+                inputVideo.play();
+                outputVideo.play();
+            }});
+
+            pauseBtn.addEventListener('click', function() {{
+                inputVideo.pause();
+                outputVideo.pause();
+            }});
+
+            resetBtn.addEventListener('click', function() {{
+                slider.value = 50;
+                outputVideo.style.clipPath = 'inset(0 50% 0 0)';
+            }});
+
+            // Initialize
+            slider.value = 50;
+            outputVideo.style.clipPath = 'inset(0 50% 0 0)';
+        }})();
+        </script>
+
+        <style>
+        .video-comparison-container {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }}
+
+        .video-wrapper {{
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: box-shadow 0.3s ease;
+        }}
+
+        .video-wrapper:hover {{
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+        }}
+
+        #comparison-slider:hover {{
+            background: rgba(255,255,255,0.5);
+        }}
+
+        .video-controls button:hover {{
+            opacity: 0.8;
+            transform: translateY(-1px);
+        }}
+
+        .video-controls button:active {{
+            transform: translateY(0);
+        }}
+
+        @media (max-width: 768px) {{
+            .video-wrapper {{
+                height: {int(height * 0.7)}px;
+            }}
+
+            .video-controls {{
+                flex-wrap: wrap;
+            }}
+
+            .video-controls button {{
+                flex: 1 1 100%;
+                margin-bottom: 5px;
+            }}
+        }}
+        </style>
+    </div>
+    """
+
+    return html
+
+
+def create_side_by_side_comparison(
+    input_path: Optional[str],
+    output_path: Optional[str],
+    title: str = "Side-by-Side Comparison"
+) -> str:
+    """
+    Create a side-by-side comparison layout.
+    Works for both images and videos.
+    """
+    if not input_path or not output_path:
+        return '<div class="no-comparison"><p>No content available for comparison</p></div>'
+
+    input_ext = Path(input_path).suffix.lower()
+    output_ext = Path(output_path).suffix.lower()
+
+    is_video = input_ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
+
+    if is_video:
+        media_html = f"""
+        <div class="side-by-side-video">
+            <div class="video-item">
+                <h4>Input Video</h4>
+                <video controls style="width: 100%; max-height: 400px;">
+                    <source src="file:///{input_path.replace(chr(92), '/')}" type="video/mp4">
+                </video>
+            </div>
+            <div class="video-item">
+                <h4>Output Video</h4>
+                <video controls style="width: 100%; max-height: 400px;">
+                    <source src="file:///{output_path.replace(chr(92), '/')}" type="video/mp4">
+                </video>
+            </div>
+        </div>
+        """
+    else:
+        media_html = f"""
+        <div class="side-by-side-image">
+            <div class="image-item">
+                <h4>Input Image</h4>
+                <img src="file:///{input_path.replace(chr(92), '/')}" style="width: 100%; max-height: 400px; object-fit: contain;" />
+            </div>
+            <div class="image-item">
+                <h4>Output Image</h4>
+                <img src="file:///{output_path.replace(chr(92), '/')}" style="width: 100%; max-height: 400px; object-fit: contain;" />
+            </div>
+        </div>
+        """
+
+    html = f"""
+    <div class="comparison-container">
+        <h3 style="text-align: center; margin-bottom: 20px;">{title}</h3>
+        {media_html}
+    </div>
+
+    <style>
+    .comparison-container {{
+        width: 100%;
+        max-width: 1200px;
+        margin: 0 auto;
+    }}
+
+    .side-by-side-video, .side-by-side-image {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        align-items: start;
+    }}
+
+    .video-item, .image-item {{
+        text-align: center;
+    }}
+
+    .video-item h4, .image-item h4 {{
+        margin-bottom: 10px;
+        color: #333;
+        font-weight: 600;
+    }}
+
+    .video-item video, .image-item img {{
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }}
+
+    @media (max-width: 768px) {{
+        .side-by-side-video, .side-by-side-image {{
+            grid-template-columns: 1fr;
+            gap: 15px;
+        }}
+    }}
+    </style>
+    """
+
+    return html
+
+
+def create_comparison_selector(
+    input_path: Optional[str],
+    output_path: Optional[str],
+    comparison_mode: str = "slider"
+) -> Tuple[str, Optional[gr.ImageSlider]]:
+    """
+    Create the appropriate comparison component based on mode and content type.
+
+    Returns:
+        Tuple of (HTML content, ImageSlider component or None)
+    """
+    if not input_path or not output_path:
+        return '<div class="no-comparison"><p>No content available for comparison</p></div>', None
+
+    input_ext = Path(input_path).suffix.lower()
+
+    if input_ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp']:
+        # Image comparison
+        if comparison_mode == "slider":
+            return "", create_image_comparison(input_path, output_path)
+        elif comparison_mode == "side_by_side":
+            return create_side_by_side_comparison(input_path, output_path), None
+        else:
+            return create_side_by_side_comparison(input_path, output_path), None
+    else:
+        # Video comparison
+        if comparison_mode == "slider":
+            return create_video_comparison_html(input_path, output_path), None
+        elif comparison_mode == "side_by_side":
+            return create_side_by_side_comparison(input_path, output_path), None
+        else:
+            return create_video_comparison_html(input_path, output_path), None
 
 
 def _pin_js(val: bool) -> str:

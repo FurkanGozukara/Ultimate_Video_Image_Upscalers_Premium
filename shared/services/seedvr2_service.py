@@ -21,8 +21,9 @@ from shared.chunking import chunk_and_process, check_resume_available
 from shared.face_restore import restore_image, restore_video
 from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
-from shared.video_comparison import build_video_comparison, build_image_comparison
+from shared.video_comparison import create_comparison_selector
 from shared.model_manager import get_model_manager, ModelType
+from shared.batch_processor import BatchProcessor, BatchJob, BatchProgress
 
 # Constants --------------------------------------------------------------------
 SEEDVR2_VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
@@ -440,69 +441,69 @@ def build_seedvr2_callbacks(
             before_guardrails = settings.copy()
             settings = _enforce_seedvr2_guardrails(settings, defaults)
 
-        if settings.get("attention_mode") == "flash_attn":
-            try:
-                import flash_attn  # type: ignore  # noqa: F401
-            except Exception as exc:
-                settings["attention_mode"] = "sdpa"
-                guardrail_msgs.append(f"flash_attn unavailable ({exc}); falling back to sdpa.")
-        if settings.get("batch_size") != before_guardrails.get("batch_size"):
-            guardrail_msgs.append(
-                f"Batch size adjusted to {settings['batch_size']} (must follow 4n+1 rule)."
-            )
-        if settings.get("vae_encode_tiled") and settings.get("vae_encode_tile_overlap") != before_guardrails.get(
-            "vae_encode_tile_overlap"
-        ):
-            guardrail_msgs.append(
-                f"VAE encode overlap capped to {settings['vae_encode_tile_overlap']} (< tile size)."
-            )
-        if settings.get("vae_decode_tiled") and settings.get("vae_decode_tile_overlap") != before_guardrails.get(
-            "vae_decode_tile_overlap"
-        ):
-            guardrail_msgs.append(
-                f"VAE decode overlap capped to {settings['vae_decode_tile_overlap']} (< tile size)."
-            )
-        blockswap_enabled = settings.get("blocks_to_swap", 0) > 0 or settings.get("swap_io_components")
-        if blockswap_enabled and before_guardrails.get("dit_offload_device", "").lower() in ("", "none") and str(
-            settings.get("dit_offload_device", "")
-        ).lower() == "cpu":
-            guardrail_msgs.append("BlockSwap enabled without offload; dit_offload_device set to cpu.")
+            if settings.get("attention_mode") == "flash_attn":
+                try:
+                    import flash_attn  # type: ignore  # noqa: F401
+                except Exception as exc:
+                    settings["attention_mode"] = "sdpa"
+                    guardrail_msgs.append(f"flash_attn unavailable ({exc}); falling back to sdpa.")
+            if settings.get("batch_size") != before_guardrails.get("batch_size"):
+                guardrail_msgs.append(
+                    f"Batch size adjusted to {settings['batch_size']} (must follow 4n+1 rule)."
+                )
+            if settings.get("vae_encode_tiled") and settings.get("vae_encode_tile_overlap") != before_guardrails.get(
+                "vae_encode_tile_overlap"
+            ):
+                guardrail_msgs.append(
+                    f"VAE encode overlap capped to {settings['vae_encode_tile_overlap']} (< tile size)."
+                )
+            if settings.get("vae_decode_tiled") and settings.get("vae_decode_tile_overlap") != before_guardrails.get(
+                "vae_decode_tile_overlap"
+            ):
+                guardrail_msgs.append(
+                    f"VAE decode overlap capped to {settings['vae_decode_tile_overlap']} (< tile size)."
+                )
+            blockswap_enabled = settings.get("blocks_to_swap", 0) > 0 or settings.get("swap_io_components")
+            if blockswap_enabled and before_guardrails.get("dit_offload_device", "").lower() in ("", "none") and str(
+                settings.get("dit_offload_device", "")
+            ).lower() == "cpu":
+                guardrail_msgs.append("BlockSwap enabled without offload; dit_offload_device set to cpu.")
 
-        settings["cuda_device"] = _expand_cuda_spec(settings.get("cuda_device", ""))
+            settings["cuda_device"] = _expand_cuda_spec(settings.get("cuda_device", ""))
 
-        input_path = _resolve_input_path(uploaded_file, settings["input_path"], settings["batch_enable"], settings["batch_input_path"])
-        settings["input_path"] = normalize_path(input_path)
-        state["seed_controls"]["last_input_path"] = settings["input_path"]
+            input_path = _resolve_input_path(uploaded_file, settings["input_path"], settings["batch_enable"], settings["batch_input_path"])
+            settings["input_path"] = normalize_path(input_path)
+            state["seed_controls"]["last_input_path"] = settings["input_path"]
 
-        if not settings["input_path"] or not Path(settings["input_path"]).exists():
-            return ("❌ Input path missing or not found", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
+            if not settings["input_path"] or not Path(settings["input_path"]).exists():
+                return ("❌ Input path missing or not found", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
 
-        if settings.get("batch_enable") and settings.get("batch_output_path"):
-            settings["output_override"] = settings["batch_output_path"]
+            if settings.get("batch_enable") and settings.get("batch_output_path"):
+                settings["output_override"] = settings["batch_output_path"]
 
-        settings["batch_mode"] = bool(settings.get("batch_enable"))
+            settings["batch_mode"] = bool(settings.get("batch_enable"))
 
-        # Apply global output hints for PNG padding / skip-cap if user set them in Output tab
-        settings["png_padding"] = seed_controls.get("png_padding_val", 5)
-        settings["png_keep_basename"] = seed_controls.get("png_keep_basename_val", True)
-        if settings.get("skip_first_frames", defaults["skip_first_frames"]) == defaults["skip_first_frames"]:
-            if seed_controls.get("skip_first_frames_val") is not None:
-                settings["skip_first_frames"] = seed_controls.get("skip_first_frames_val")
-        if settings.get("load_cap", defaults["load_cap"]) == defaults["load_cap"]:
-            if seed_controls.get("load_cap_val") is not None:
-                settings["load_cap"] = seed_controls.get("load_cap_val")
+            # Apply global output hints for PNG padding / skip-cap if user set them in Output tab
+            settings["png_padding"] = seed_controls.get("png_padding_val", 5)
+            settings["png_keep_basename"] = seed_controls.get("png_keep_basename_val", True)
+            if settings.get("skip_first_frames", defaults["skip_first_frames"]) == defaults["skip_first_frames"]:
+                if seed_controls.get("skip_first_frames_val") is not None:
+                    settings["skip_first_frames"] = seed_controls.get("skip_first_frames_val")
+            if settings.get("load_cap", defaults["load_cap"]) == defaults["load_cap"]:
+                if seed_controls.get("load_cap_val") is not None:
+                    settings["load_cap"] = seed_controls.get("load_cap_val")
 
-        if settings["output_format"] == "auto":
-            settings["output_format"] = None
+            if settings["output_format"] == "auto":
+                settings["output_format"] = None
 
-        if not _ffmpeg_available():
-            return ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
+            if not _ffmpeg_available():
+                return ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
 
-        face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))
-        face_strength = float(global_settings.get("face_strength", 0.5))
-        settings["face_restore_global"] = face_apply
+            face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))
+            face_strength = float(global_settings.get("face_strength", 0.5))
+            settings["face_restore_global"] = face_apply
 
-        # Apply Resolution tab cached values when available
+            # Apply Resolution tab cached values when available
         if seed_controls.get("resolution_val") is not None:
             settings["resolution"] = seed_controls["resolution_val"]
         if seed_controls.get("max_resolution_val") is not None:
@@ -716,32 +717,22 @@ def build_seedvr2_callbacks(
                 output_video = str(adjusted)
                 local_logs.append(f"FPS overridden to {fps_val}: {adjusted}")
 
-            comparison_html = ""
-            image_slider_update = gr.ImageSlider.update(value=None)
-            comparison_mode = seed_controls.get("comparison_mode_val", "native")
-            pin_pref = bool(seed_controls.get("pin_reference_val", False))
-            fs_pref = bool(seed_controls.get("fullscreen_val", False))
-            if output_video:
-                use_fallback = comparison_mode in ("html_slider", "fallback")
-                # Native video comparison via ImageSlider not supported; choose HTML slider vs fallback assets
-                comparison_html = build_video_comparison(
-                    single_settings.get("input_path"),
-                    output_video,
-                    pin_reference=pin_pref,
-                    start_fullscreen=fs_pref,
-                    use_fallback_assets=use_fallback,
-                )
-            elif output_image:
+            # Enhanced comparison using latest Gradio features
+            comparison_mode = seed_controls.get("comparison_mode_val", "slider")
+            comparison_html, image_slider_update = create_comparison_selector(
+                input_path=single_settings.get("input_path"),
+                output_path=output_video or output_image,
+                comparison_mode=comparison_mode
+            )
+
+            # If no HTML comparison, use ImageSlider for images
+            if not comparison_html and output_image and not output_video:
                 image_slider_update = gr.ImageSlider.update(
                     value=(single_settings.get("input_path"), output_image),
                     visible=True,
                 )
-                if comparison_mode in ("html_slider", "fallback"):
-                    comparison_html = build_image_comparison(
-                        single_settings.get("input_path"),
-                        output_image,
-                        pin_reference=pin_pref,
-                    )
+            elif not image_slider_update:
+                image_slider_update = gr.ImageSlider.update(value=None, visible=False)
 
             return (
                 status,
@@ -755,10 +746,19 @@ def build_seedvr2_callbacks(
             )
 
         if settings.get("batch_enable") and Path(settings["input_path"]).is_dir() and not preview_only:
-            files = _list_media_files(settings["input_path"], SEEDVR2_VIDEO_EXTS, SEEDVR2_IMAGE_EXTS)
-            if not files:
+            # Use the new BatchProcessor for robust batch processing
+            batch_processor = BatchProcessor(
+                max_workers=1,  # Sequential processing for GPU-bound tasks
+                logger=run_logger
+            )
+
+            # Discover all supported files
+            supported_exts = list(SEEDVR2_VIDEO_EXTS | SEEDVR2_IMAGE_EXTS)
+            input_files = batch_processor.discover_files(settings["input_path"], supported_exts)
+
+            if not input_files:
                 return (
-                    "❌ No media files found in batch folder",
+                    "❌ No supported media files found in batch folder",
                     "",
                     None,
                     None,
@@ -767,30 +767,94 @@ def build_seedvr2_callbacks(
                     gr.ImageSlider.update(value=None),
                     state
                 )
+
+            # Create batch jobs
+            batch_jobs = batch_processor.create_batch_jobs(
+                input_files=input_files,
+                settings=settings,
+                output_dir=runner.output_dir if hasattr(runner, "output_dir") else str(output_dir)
+            )
+
+            # Progress tracking
+            batch_progress_updates = []
+
+            def batch_progress_callback(progress: BatchProgress):
+                """Update UI with batch progress"""
+                if progress.current_file:
+                    current_name = Path(progress.current_file).name
+                    status_msg = f"Batch Progress: {progress.completed_files}/{progress.total_files} files completed"
+                    if progress.estimated_time_remaining:
+                        eta_minutes = int(progress.estimated_time_remaining / 60)
+                        status_msg += f" (ETA: {eta_minutes}min)"
+
+                    batch_progress_updates.append(f"[{current_name}] Processing... ({progress.overall_progress:.1%})")
+
+                    # Update state with current progress
+                    state["operation_status"] = "running"
+
+            batch_processor.progress_callback = batch_progress_callback
+
+            # Process batch
+            def process_single_job(job: BatchJob) -> bool:
+                """Process a single file in the batch"""
+                try:
+                    single_settings = settings.copy()
+                    single_settings["input_path"] = job.input_path
+                    single_settings["batch_enable"] = False
+                    single_settings["batch_mode"] = False
+                    single_settings["output_override"] = job.output_path
+
+                    # Process the single file
+                    result = _process_single(single_settings)
+
+                    # Update job with results
+                    if result and len(result) >= 4:
+                        status, log, output_video, output_image = result[:4]
+                        job.output_path = output_video or output_image
+                        job.metadata.update({
+                            "status": status,
+                            "log": log,
+                            "output_video": output_video,
+                            "output_image": output_image
+                        })
+                        return bool(output_video or output_image)
+                    else:
+                        job.error_message = "Processing failed - invalid result"
+                        return False
+
+                except Exception as e:
+                    job.error_message = str(e)
+                    return False
+
+            # Run batch processing
+            batch_result = batch_processor.process_batch(
+                jobs=batch_jobs,
+                processor_func=process_single_job,
+                max_concurrent=1  # Sequential for GPU tasks
+            )
+
+            # Collect results
+            batch_outputs = []
             batch_logs = []
-            batch_outputs: List[str] = []
             last_video = None
             last_image = None
-            last_chunk_info = "Batch processed."
-            last_cmp = ""
-            last_slider = gr.ImageSlider.update(value=None)
-            for fp in files:
-                single = settings.copy()
-                single["input_path"] = normalize_path(fp)
-                single["batch_enable"] = False
-                single["batch_mode"] = False
-                status, lg, ov, oi, cinfo, cmp_html, slider_upd = _process_single(single)
-                batch_logs.append(f"[{Path(fp).name}] {status}\n{lg}")
-                last_video = ov or last_video
-                last_image = oi or last_image
-                if ov:
-                    batch_outputs.append(ov)
-                if oi:
-                    batch_outputs.append(oi)
-                last_chunk_info = cinfo
-                last_cmp = cmp_html
-                last_slider = slider_upd
 
+            for job in batch_result.jobs:
+                batch_logs.append(f"[{Path(job.input_path).name}] {job.status.upper()}")
+                if job.error_message:
+                    batch_logs.append(f"  Error: {job.error_message}")
+
+                if job.output_path:
+                    batch_outputs.append(job.output_path)
+                    if job.metadata.get("output_video"):
+                        last_video = job.metadata["output_video"]
+                    if job.metadata.get("output_image"):
+                        last_image = job.metadata["output_image"]
+
+            # Create batch summary
+            batch_summary = batch_processor.get_batch_summary(batch_result)
+
+            # Update state with final results
             current_out_dir = runner.output_dir if hasattr(runner, "output_dir") else output_dir
             if batch_outputs:
                 try:
@@ -798,20 +862,32 @@ def build_seedvr2_callbacks(
                     seed_controls_cache["last_output_dir"] = str(last_out.parent if last_out.is_file() else last_out)
                 except Exception:
                     pass
+
+            # Log batch summary
             run_logger.write_summary(
                 Path(last_video or last_image or current_out_dir),
                 {
-                    "batch": True,
-                    "inputs": files,
-                    "outputs": batch_outputs or [last_video, last_image],
-                    "returncode": 0 if (last_video or last_image) else 1,
+                    "batch_summary": batch_summary,
+                    "input": settings["input_path"],
+                    "output": batch_outputs,
+                    "returncode": 0 if batch_result.completed_files > 0 else 1,
                     "args": settings,
-                    "chunk_summary": last_chunk_info,
                 },
             )
+
+            # Format final status message
+            status_msg = f"Batch complete: {batch_result.completed_files}/{batch_result.total_files} files processed"
+            if batch_result.failed_files > 0:
+                status_msg += f" ({batch_result.failed_files} failed)"
+
+            # Return results for UI update
+            last_chunk_info = f"Batch: {batch_result.completed_files}/{batch_result.total_files} completed"
+            last_cmp = f'<div class="batch-summary"><h4>Batch Results</h4><p>{status_msg}</p></div>'
+            last_slider = gr.ImageSlider.update(value=None)  # No comparison for batch
+
             return (
-                "✅ Batch complete" if last_video or last_image else "⚠️ Batch finished with issues",
-                "\n\n".join(batch_logs),
+                status_msg,
+                "\n".join(batch_logs[-20:]),  # Show last 20 log entries
                 last_video,
                 last_image,
                 last_chunk_info,

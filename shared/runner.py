@@ -172,6 +172,17 @@ class Runner:
 
         cmd = self._build_seedvr2_cmd(cli_path, settings, format_for_cli, preview_only, output_override=effective_output_override)
 
+        return self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
+
+    def _run_seedvr2_subprocess(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
+        """
+        Execute SeedVR2 CLI as a subprocess with proper error handling and logging.
+        """
+        # Log the command being executed for debugging
+        cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
+        if on_progress:
+            on_progress(f"Executing command: {cmd_str}\n")
+
         # Compile guardrail: if compile requested on Windows but vcvars is missing, disable compile flags with a warning.
         if platform.system() == "Windows" and (settings.get("compile_dit") or settings.get("compile_vae")):
             from .health import is_vs_build_tools_available
@@ -183,22 +194,10 @@ class Runner:
                 settings["compile_vae"] = False
                 cmd = [c for c in cmd if c not in ("--compile_dit", "--compile_vae")]
 
-        # In-app mode: execute within current process to avoid subprocess overhead (not cancelable)
-        if self._active_mode == "in_app":
-            self._maybe_clear_in_app_model(settings.get("dit_model"))
-            return self._run_seedvr2_in_app(cli_path, cmd, predicted_output, settings, on_progress)
-
         cmd = self._maybe_wrap_with_vcvars(cmd, settings)
 
-        # For subprocess mode, preload model to ensure it's ready (warm up the model cache)
-        if self._active_mode == "subprocess":
-            if on_progress:
-                on_progress("Preloading model for subprocess execution...\n")
-            model_ready = self.ensure_seedvr2_model_loaded(settings, on_progress)
-            if not model_ready:
-                return RunResult(1, None, "Failed to preload required model")
-            if on_progress:
-                on_progress("Model ready, starting subprocess...\n")
+        if on_progress:
+            on_progress("Starting SeedVR2 subprocess (CLI will handle model loading)...\n")
 
         env = os.environ.copy()
         env["TEMP"] = str(self.temp_dir)
@@ -218,7 +217,12 @@ class Runner:
 
         proc: Optional[subprocess.Popen] = None
         log_lines: List[str] = []
+        returncode = -1
+
         try:
+            if on_progress:
+                on_progress("Starting subprocess...\n")
+
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -229,175 +233,144 @@ class Runner:
                 creationflags=creationflags,
                 preexec_fn=preexec_fn,
             )
+
             with self._lock:
                 self._active_process = proc
                 self._canceled = False
 
+            if on_progress:
+                on_progress("Subprocess started, monitoring output...\n")
+
             assert proc.stdout is not None
-            for line in proc.stdout:
-                log_lines.append(line.rstrip())
-                if on_progress:
-                    on_progress(line)
-                # Stop early if canceled
+
+            # Read output line by line with timeout handling
+            while True:
+                # Check if process is still running and not canceled
                 with self._lock:
                     if self._active_process is None:
+                        if on_progress:
+                            on_progress("Process canceled by user\n")
                         break
-            proc.wait()
+
+                try:
+                    # Use timeout to avoid blocking indefinitely
+                    if platform.system() == "Windows":
+                        # Windows doesn't have select for file handles, use simpler approach
+                        line = proc.stdout.readline()
+                        if not line:
+                            break
+                    else:
+                        # Unix systems can use select
+                        import select
+                        ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+                        if ready:
+                            line = proc.stdout.readline()
+                            if not line:
+                                break
+                        else:
+                            continue
+
+                    line = line.rstrip()
+                    if line:  # Only add non-empty lines
+                        log_lines.append(line)
+                        if on_progress:
+                            on_progress(line + "\n")
+
+                except Exception as e:
+                    if on_progress:
+                        on_progress(f"Error reading subprocess output: {e}\n")
+                    break
+
+            # Wait for process to complete
+            returncode = proc.wait()
+
+            if on_progress:
+                on_progress(f"Subprocess completed with return code: {returncode}\n")
+
+        except FileNotFoundError as e:
+            error_msg = f"CLI script not found: {e}"
+            log_lines.append(error_msg)
+            if on_progress:
+                on_progress(f"❌ {error_msg}\n")
+            returncode = 1
+        except Exception as e:
+            error_msg = f"Failed to execute subprocess: {e}"
+            log_lines.append(error_msg)
+            if on_progress:
+                on_progress(f"❌ {error_msg}\n")
+            returncode = 1
         finally:
             with self._lock:
                 self._active_process = None
 
-        output_path = str(predicted_output) if predicted_output else None
+        # Determine output path
+        output_path = None
+        if predicted_output and Path(predicted_output).exists():
+            output_path = str(predicted_output)
+            if on_progress:
+                on_progress(f"Output file created: {output_path}\n")
+        elif predicted_output:
+            if on_progress:
+                on_progress(f"Expected output not found: {predicted_output}\n")
+
+        # Handle cancellation case
         if self._canceled and predicted_output and Path(predicted_output).exists():
             log_lines.append("Run canceled; partial output preserved.")
             output_path = str(predicted_output)
-        # Emit simple metadata
-        if output_path and self._telemetry_enabled:
-            emit_metadata(
-                Path(output_path),
-                {
-                    "returncode": proc.returncode if proc else -1,
-                    "output": output_path,
-                    "args": settings,
-                },
-            )
+
+        # Emit metadata if successful
+        if output_path and returncode == 0 and self._telemetry_enabled:
+            try:
+                emit_metadata(
+                    Path(output_path),
+                    {
+                        "returncode": returncode,
+                        "output": output_path,
+                        "args": settings,
+                        "command": cmd_str,
+                    },
+                )
+            except Exception as e:
+                if on_progress:
+                    on_progress(f"Warning: Failed to emit metadata: {e}\n")
+
         self._last_model_id = settings.get("dit_model", self._last_model_id)
-        return RunResult(proc.returncode if proc else -1, output_path, "\n".join(log_lines))
+
+        # Combine all log lines
+        full_log = "\n".join(log_lines)
+
+        return RunResult(returncode, output_path, full_log)
 
     def _run_seedvr2_in_app(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
         """
         Execute SeedVR2 CLI inline (single process). Not cancelable mid-run.
-        Uses pre-loaded model from model manager.
+
+        For now, this falls back to subprocess execution due to dependency issues.
         """
-        # Ensure model is loaded
-        dit_model = settings.get("dit_model", "")
-        if not self.ensure_seedvr2_model_loaded(settings, on_progress):
-            error_msg = f"Failed to load SeedVR2 model: {dit_model}"
-            return RunResult(1, None, error_msg)
+        if on_progress:
+            on_progress("In-app mode not available, falling back to subprocess execution\n")
 
-        # Get the pre-loaded runner
-        runner_result = self._model_manager.get_model_runner(
-            ModelType.SEEDVR2, dit_model, **settings
-        )
-
-        if not runner_result:
-            error_msg = f"Model not available: {dit_model}"
-            return RunResult(1, None, error_msg)
-
-        runner, cache_context = runner_result
-
-        # For now, fall back to CLI execution since the runner integration is complex
-        # TODO: Implement direct runner execution for better performance
-        script_args = cmd[1:]  # drop python executable
-        buf = io.StringIO()
-        rc = 0
-        try:
-            with redirect_stdout(buf), redirect_stderr(buf):
-                sys.argv = script_args
-                runpy.run_path(str(cli_path), run_name="__main__")
-        except SystemExit as exc:  # argparse exits
-            rc = int(exc.code) if isinstance(exc.code, int) else 1
-        except Exception as exc:
-            buf.write(f"{exc}\n")
-            rc = 1
-        finally:
-            sys.argv = [sys.executable]
-
-        output_path = str(predicted_output) if predicted_output else None
-        if output_path and self._telemetry_enabled:
-            emit_metadata(
-                Path(output_path),
-                {
-                    "returncode": rc,
-                    "output": output_path,
-                    "args": settings,
-                },
-            )
-        self._last_model_id = dit_model
+        # Fall back to subprocess execution
+        return self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
         return RunResult(rc, output_path, buf.getvalue())
 
     def ensure_seedvr2_model_loaded(self, settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> bool:
         """
         Ensure the required SeedVR2 model is loaded, loading it if necessary.
 
-        Returns True if model is ready, False if loading failed.
+        For now, this just returns True since the CLI handles model loading.
+        Future versions may implement preloading for better performance.
         """
         dit_model = settings.get("dit_model", "")
         if not dit_model:
             return False
 
-        # Check if model is already loaded
-        if self._model_manager.is_model_loaded(ModelType.SEEDVR2, dit_model, **settings):
-            return True
+        # For now, let the CLI handle model loading
+        # This avoids complex dependency issues with the current codebase
+        if on_progress:
+            on_progress(f"Model '{dit_model}' will be loaded by CLI when needed\n")
 
-        # Model not loaded, need to load it
-        def load_callback():
-            # Import here to avoid circular imports
-            from ..SeedVR2.src.core.generation_utils import setup_generation_context, prepare_runner
-            from ..SeedVR2.src.utils.debug import Debug
-
-            debug = Debug(enabled=False)  # Minimal debug for loading
-
-            # Setup generation context (similar to CLI)
-            device_list = [settings.get("cuda_device", "0")]
-            platform_type = "cuda" if torch and torch.cuda.is_available() else "cpu"
-
-            # Parse devices
-            if isinstance(device_list, str):
-                device_list = [d.strip() for d in device_list.split(",") if d.strip()]
-
-            inference_device = self._device_id_to_name(device_list[0], platform_type)
-
-            # Setup context
-            ctx = setup_generation_context(
-                dit_device=inference_device,
-                vae_device=inference_device,
-                dit_offload_device=settings.get("dit_offload_device", "none"),
-                vae_offload_device=settings.get("vae_offload_device", "none"),
-                tensor_offload_device=settings.get("tensor_offload_device", "cpu"),
-                debug=debug
-            )
-
-            # Build torch compile args
-            torch_compile_args_dit = None
-            if settings.get("compile_dit"):
-                torch_compile_args_dit = {
-                    "backend": settings.get("compile_backend", "inductor"),
-                    "mode": settings.get("compile_mode", "default"),
-                    "fullgraph": settings.get("compile_fullgraph", False),
-                    "dynamic": settings.get("compile_dynamic", False),
-                    "dynamo_cache_size_limit": settings.get("compile_dynamo_cache_size_limit", 64),
-                    "dynamo_recompile_limit": settings.get("compile_dynamo_recompile_limit", 128),
-                }
-
-            # Prepare runner
-            model_dir = settings.get("model_dir") or str(self.base_dir / "models" / "SeedVR2")
-
-            runner, cache_context = prepare_runner(
-                dit_model=dit_model,
-                vae_model="ema_vae_fp16.safetensors",  # Default VAE
-                model_dir=model_dir,
-                debug=debug,
-                ctx=ctx,
-                dit_cache=False,  # Disable caching for now, let model manager handle it
-                vae_cache=False,
-                block_swap_config={
-                    'blocks_to_swap': settings.get('blocks_to_swap', 0),
-                    'swap_io_components': settings.get('swap_io_components', False),
-                    'offload_device': settings.get('dit_offload_device', 'none'),
-                },
-                encode_tiled=settings.get('vae_encode_tiled', False),
-                encode_tile_size=(settings.get('vae_encode_tile_size', 1024), settings.get('vae_encode_tile_size', 1024)),
-                encode_tile_overlap=(settings.get('vae_encode_tile_overlap', 128), settings.get('vae_encode_tile_overlap', 128)),
-                decode_tiled=settings.get('vae_decode_tiled', False),
-                decode_tile_size=(settings.get('vae_decode_tile_size', 1024), settings.get('vae_decode_tile_size', 1024)),
-                decode_tile_overlap=(settings.get('vae_decode_tile_overlap', 128), settings.get('vae_decode_tile_overlap', 128)),
-                tile_debug=settings.get('tile_debug', 'false'),
-                attention_mode=settings.get('attention_mode', 'sdpa'),
-                torch_compile_args_dit=torch_compile_args_dit,
-            )
-
-            return runner, cache_context
+        return True
 
         # Load the model using the model manager
         success = self._model_manager.preload_model(
@@ -733,44 +706,130 @@ class Runner:
 
         cmd.extend(["--output", str(output_path)])
 
-        if settings.get("montage"):
-            cmd.append("--montage")
+        # Model and device settings
+        if settings.get("model_dir"):
+            cmd.extend(["--model", settings["model_dir"]])
+        if settings.get("fp16_mode"):
+            cmd.append("--fp16")
+        if settings.get("uhd_mode"):
+            cmd.append("--UHD")
+
+        # Processing parameters
+        if settings.get("scale") and settings["scale"] != 1.0:
+            cmd.extend(["--scale", str(settings["scale"])])
+        if settings.get("fps_multiplier") and settings["fps_multiplier"] != 2:
+            cmd.extend(["--multi", str(int(settings["fps_multiplier"]))])
+        if settings.get("fps_override") and settings["fps_override"] > 0:
+            cmd.extend(["--fps", str(settings["fps_override"])])
+        if settings.get("exp") and settings["exp"] != 1:
+            cmd.extend(["--exp", str(settings["exp"])])
+
+        # Output options
         if settings.get("png_output"):
             cmd.append("--png")
+        if settings.get("montage"):
+            cmd.append("--montage")
         if settings.get("no_audio"):
             cmd.append("--no-audio")
         if settings.get("show_ffmpeg"):
             cmd.append("--show-ffmpeg")
-        if settings.get("uhd_half"):
-            cmd.append("--UHD")
-        if settings.get("scale"):
-            cmd.extend(["--scale", str(settings["scale"])])
-        if settings.get("fps_multiplier"):
-            cmd.extend(["--multi", str(settings["fps_multiplier"])])
-        if settings.get("model_dir"):
-            cmd.extend(["--model", settings["model_dir"]])
-        if settings.get("cuda_device"):
-            cmd.extend(["--cuda_device", str(settings["cuda_device"])])
-        if settings.get("png_output"):
-            cmd.extend(["--ext", "png"])
+        if settings.get("skip_static_frames"):
+            cmd.append("--skip")
+
+        # Frame control
+        if settings.get("skip_first_frames") and settings["skip_first_frames"] > 0:
+            # RIFE uses --skip for static frames, not for frame skipping
+            pass
+        if settings.get("load_cap") and settings["load_cap"] > 0:
+            # RIFE doesn't have a direct load_cap equivalent
+            pass
 
         return cmd
 
     # ------------------------------------------------------------------ #
     # Placeholder GAN/image-based upscaler runner (stub)
     # ------------------------------------------------------------------ #
-    def run_gan_placeholder(
+    def run_gan(
         self,
         settings: Dict[str, Any],
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> RunResult:
         """
-        Stub runner for GAN/image-based upscalers.
-        Emits a not-implemented message to keep UI responsive until pipeline is wired.
+        Run GAN-based upscaling using the gan_runner module.
         """
-        msg = "Image-based GAN upscaler is not yet wired to a backend. Configure pipeline to enable runs."
-        if on_progress:
-            on_progress(msg + "\n")
-        return RunResult(returncode=1, output_path=None, log=msg)
+        from .gan_runner import GanRunner, GanResult
+
+        try:
+            # Initialize GAN runner
+            gan_runner = GanRunner()
+
+            # Convert settings to GAN runner format
+            model_name = settings.get("model", "")
+            if not model_name:
+                error_msg = "No GAN model specified"
+                if on_progress:
+                    on_progress(f"❌ {error_msg}\n")
+                return RunResult(1, None, error_msg)
+
+            input_path = normalize_path(settings.get("input_path"))
+            if not input_path or not Path(input_path).exists():
+                error_msg = f"Input path not found: {input_path}"
+                if on_progress:
+                    on_progress(f"❌ {error_msg}\n")
+                return RunResult(1, None, error_msg)
+
+            # Determine output path
+            output_format = settings.get("output_format", "auto")
+            batch_mode = bool(settings.get("batch_mode", False))
+
+            predicted_output = resolve_output_location(
+                input_path=input_path,
+                output_format=output_format if output_format != "auto" else ("png" if detect_input_type(input_path) == "image" else "mp4"),
+                global_output_dir=str(self.output_dir),
+                batch_mode=batch_mode,
+                png_padding=settings.get("png_padding", 5),
+                png_keep_basename=settings.get("png_keep_basename", True),
+            )
+
+            if on_progress:
+                on_progress(f"Starting GAN upscaling with model: {model_name}\n")
+                on_progress(f"Input: {input_path}\n")
+                on_progress(f"Output: {predicted_output}\n")
+
+            # Run the GAN processing
+            result: GanResult = gan_runner.run_gan_processing(
+                input_path=input_path,
+                model_name=model_name,
+                output_path=str(predicted_output),
+                settings=settings,
+                on_progress=on_progress
+            )
+
+            # Check if output was created
+            output_path = str(predicted_output) if predicted_output and Path(predicted_output).exists() else None
+
+            # Emit metadata if successful
+            if output_path and result.returncode == 0 and self._telemetry_enabled:
+                try:
+                    emit_metadata(
+                        Path(output_path),
+                        {
+                            "returncode": result.returncode,
+                            "output": output_path,
+                            "args": settings,
+                            "model": model_name,
+                        },
+                    )
+                except Exception as e:
+                    if on_progress:
+                        on_progress(f"Warning: Failed to emit metadata: {e}\n")
+
+            return RunResult(result.returncode, output_path, result.log)
+
+        except Exception as e:
+            error_msg = f"GAN processing failed: {str(e)}"
+            if on_progress:
+                on_progress(f"❌ {error_msg}\n")
+            return RunResult(1, None, error_msg)
 
 

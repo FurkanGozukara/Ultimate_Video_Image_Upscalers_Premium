@@ -290,74 +290,19 @@ def build_gan_callbacks(
     def safe_defaults():
         return [defaults[k] for k in GAN_ORDER]
 
-    def run_action(upload, *args, preview_only: bool = False, state=None):
-        try:
-            state = state or {"seed_controls": {}}
-            seed_controls = state.get("seed_controls", {})
-            cancel_event.clear()
-            settings_dict = _gan_dict_from_args(list(args))
-            settings = {**defaults, **settings_dict}
-            settings["output_override"] = settings.get("output_override")
-            settings["cuda_device"] = settings.get("cuda_device", "")
+    def prepare_single(single_path: str) -> Dict[str, Any]:
+        s = settings.copy()
+        s["input_path"] = normalize_path(single_path)
+        s["base_dir"] = str(base_dir)  # Pass base directory for metadata lookup
+        meta = _get_gan_meta(s.get("model", ""), base_dir)
+        s["scale"] = meta.get("scale", s.get("scale", 4))  # Use metadata scale, default to 4x
+        s["supports_multi_gpu"] = meta.get("supports_multi_gpu", False)
+        s["model_name"] = meta.get("canonical", s.get("model", ""))
+        # PNG padding (from Output tab cache if present)
+        s["png_padding"] = int(seed_controls.get("png_padding_val", 5))
+        return s
 
-            # Pull latest global paths in case user changed them in Global tab
-            current_output_dir = Path(global_settings.get("output_dir", output_dir))
-            current_temp_dir = Path(global_settings.get("temp_dir", temp_dir))
-
-        inp = normalize_path(upload if upload else settings["input_path"])
-        if settings.get("batch_enable"):
-            if not inp or not Path(inp).exists() or not Path(inp).is_dir():
-                return ("❌ Batch input folder missing", "", None, "", gr.ImageSlider.update(value=None), state)
-        else:
-            if not inp or not Path(inp).exists():
-                return ("❌ Input missing", "", None, "", gr.ImageSlider.update(value=None), state)
-
-        settings["input_path"] = inp
-
-        cuda_warn = _validate_cuda_devices(settings.get("cuda_device", ""))
-        if cuda_warn:
-            return (f"⚠️ {cuda_warn}", "", None, "", state)
-        devices = [d.strip() for d in str(settings.get("cuda_device") or "").split(",") if d.strip()]
-        if len(devices) > 1:
-            return (
-                "⚠️ GAN backends currently use a single GPU; select one CUDA device.",
-                "",
-                None,
-                "",
-                gr.ImageSlider.update(value=None),
-                state
-            )
-
-        face_apply = bool(args[-1])
-        face_apply = face_apply or global_settings.get("face_global", False)
-        face_strength = float(global_settings.get("face_strength", 0.5))
-        backend_val = settings.get("backend", "realesrgan")
-        # Pull shared output/comparison preferences
-        if (not settings.get("output_format")) or settings.get("output_format") == "auto":
-            cached_fmt = seed_controls.get("output_format_val")
-            if cached_fmt:
-                settings["output_format"] = cached_fmt
-        if (not settings.get("fps_override")) or float(settings.get("fps_override") or 0) == 0:
-            cached_fps = seed_controls.get("fps_override_val")
-            if cached_fps:
-                settings["fps_override"] = cached_fps
-        cmp_mode = seed_controls.get("comparison_mode_val", "native")
-        pin_pref = bool(seed_controls.get("pin_reference_val", False))
-        fs_pref = bool(seed_controls.get("fullscreen_val", False))
-
-        def prepare_single(single_path: str) -> Dict[str, Any]:
-            s = settings.copy()
-            s["input_path"] = normalize_path(single_path)
-            s["base_dir"] = str(base_dir)  # Pass base directory for metadata lookup
-            meta = _get_gan_meta(s.get("model", ""), base_dir)
-            s["scale"] = meta.get("scale", s.get("scale", 4))  # Use metadata scale, default to 4x
-            s["supports_multi_gpu"] = meta.get("supports_multi_gpu", False)
-            s["model_name"] = meta.get("canonical", s.get("model", ""))
-            # PNG padding (from Output tab cache if present)
-            s["png_padding"] = int(seed_controls.get("png_padding_val", 5))
-            return s
-
-        def maybe_downscale(s):
+    def maybe_downscale(s):
             """
             Dynamic resolution adjustment for fixed-scale GAN models.
             When using Resolution & Scene Split settings, calculate optimal input resolution
@@ -438,118 +383,12 @@ def build_gan_callbacks(
 
             return s
 
-        def relocate_output(path_str: Optional[str]) -> Optional[str]:
-            if not path_str:
-                return None
-            target_root = settings.get("output_override")
-            if not target_root:
-                return path_str
-            src = Path(path_str)
-            target_root_path = Path(normalize_path(target_root))
-            target_root_path.mkdir(parents=True, exist_ok=True)
-            if src.is_dir():
-                dest = collision_safe_dir(target_root_path / src.name)
-                shutil.copytree(src, dest)
-                return str(dest)
-            else:
-                dest = collision_safe_path(target_root_path / src.name)
-                shutil.copyfile(src, dest)
-                return str(dest)
-
-        def run_single(prepped_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
-            if cancel_event.is_set():
-                return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None), state)
-            header_log = [
-                f"Model: {prepped_settings['model_name']}",
-                f"Backend: {backend_val}",
-                f"Scale: {prepped_settings['scale']}x",
-                f"GPU: {prepped_settings.get('cuda_device') or 'auto/CPU'} (single GPU enforced)",
-                f"Input: {prepped_settings['input_path']}",
-            ]
-            if progress_cb:
-                for line in header_log:
-                    progress_cb(line)
-            # Run backend and collect logs
-            try:
-                if backend_val == "realesrgan":
-                    prepped_settings["model"] = prepped_settings["model_name"].split(".")[0]
-                    prepped_settings["model_path"] = str((base_dir / "Image_Upscale_Models" / prepped_settings.get("model_name")).resolve())
-                    if not Path(prepped_settings["model_path"]).exists() and not _is_realesrgan_builtin(prepped_settings["model_name"]):
-                        return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.ImageSlider.update(value=None), state)
-                    result = run_realesrgan(
-                        prepped_settings,
-                        apply_face=face_apply,
-                        face_strength=face_strength,
-                        cancel_event=cancel_event,
-                        global_output_dir=str(current_output_dir),
-                    )
-                else:
-                    if cancel_event.is_set():
-                        return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None), state)
-                    result = run_gan_upscale(
-                        prepped_settings,
-                        apply_face=face_apply,
-                        face_strength=face_strength,
-                        global_output_dir=str(current_output_dir),
-                        cancel_event=cancel_event,
-                    )
-            except Exception as exc:  # surface ffmpeg or other runtime issues
-                err_msg = f"❌ GAN upscale failed: {exc}"
-                if progress_cb:
-                    progress_cb(err_msg)
-                return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.ImageSlider.update(value=None), state)
-            if cancel_event.is_set():
-                status = "⏹️ Canceled"
-            else:
-                status = "✅ GAN upscale complete" if result.returncode == 0 else f"⚠️ GAN upscale failed"
-            log_body = result.log or ""
-            full_log = "\n".join(header_log + [log_body])
-            if progress_cb:
-                progress_cb(status)
-            relocated = relocate_output(result.output_path)
-            if relocated or result.output_path:
-                try:
-                    outp = Path(relocated or result.output_path)
-                    state["seed_controls"]["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
-                except Exception:
-                    pass
-            run_logger.write_summary(
-                Path(relocated) if relocated else output_dir,
-                {
-                    "input": prepped_settings.get("input_path"),
-                    "output": relocated or result.output_path,
-                    "returncode": result.returncode,
-                    "args": prepped_settings,
-                    "face_apply": face_apply,
-                    "pipeline": "gan",
-                },
-            )
-            cmp_html = ""
-            slider_update = gr.ImageSlider.update(value=None)
-            if relocated or result.output_path:
-                src = prepped_settings.get("input_path")
-                outp = relocated or result.output_path
-                if outp and Path(outp).exists():
-                    if Path(outp).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
-                        use_fallback = cmp_mode == "fallback"
-                        cmp_html = build_video_comparison(
-                            src,
-                            outp,
-                            pin_reference=pin_pref,
-                            start_fullscreen=fs_pref,
-                            use_fallback_assets=use_fallback or cmp_mode == "html_slider",
-                        )
-                    elif Path(outp).is_dir():
-                        cmp_html = f"<p>PNG frames saved to {outp}</p>"
-                    else:
-                        slider_update = gr.ImageSlider.update(value=(src, outp), visible=True)
-                        cmp_html = build_image_comparison(src, outp, pin_reference=pin_pref)
-            return status, full_log, relocated if relocated else (result.output_path if result.output_path else None), cmp_html, slider_update
-
+    def run_action(upload, *args, preview_only: bool = False, state=None):
         # Streaming: run in background thread, stream log lines if available
         progress_q: "queue.Queue[str]" = queue.Queue()
         result_holder: Dict[str, Any] = {}
 
+        # Define worker functions (moved outside try block)
         def worker_single(prepped_settings):
             status, lg, outp, cmp_html, slider_upd = run_single(prepped_settings, progress_cb=progress_q.put)
             result_holder["payload"] = (status, lg, outp, cmp_html, slider_upd)
@@ -572,74 +411,236 @@ def build_gan_callbacks(
                     last_cmp = cmp_html
                 last_slider = slider_upd
                 progress_q.put(f"Processed {len(outputs)}/{len(batch_items)} items")
-            final_out = outputs[-1] if outputs else None
             result_holder["payload"] = (
-                "✅ Batch complete" if outputs else "⚠️ Batch finished with errors",
+                f"✅ Batch complete: {len(outputs)}/{len(batch_items)} processed",
                 "\n\n".join(logs),
-                final_out,
+                outputs[0] if outputs else None,
                 last_cmp,
                 last_slider,
             )
 
-        # Kick off worker thread
-        if settings.get("batch_enable"):
-            folder = Path(settings["input_path"])
-            # Check if this is a frame folder (contains only images, treated as a sequence)
-            image_files = [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp")]
-            video_files = [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi")]
+        try:
+            state = state or {"seed_controls": {}}
+            seed_controls = state.get("seed_controls", {})
+            cancel_event.clear()
+            settings_dict = _gan_dict_from_args(list(args))
+            settings = {**defaults, **settings_dict}
+            settings["output_override"] = settings.get("output_override")
+            settings["cuda_device"] = settings.get("cuda_device", "")
 
-            if image_files and len(image_files) > 1 and not video_files:
-                # Treat as frame folder - process as single unit
-                items = [folder]
+            # Pull latest global paths in case user changed them in Global tab
+            current_output_dir = Path(global_settings.get("output_dir", output_dir))
+            current_temp_dir = Path(global_settings.get("temp_dir", temp_dir))
+
+            inp = normalize_path(upload if upload else settings["input_path"])
+            if settings.get("batch_enable"):
+                if not inp or not Path(inp).exists() or not Path(inp).is_dir():
+                    return ("❌ Batch input folder missing", "", None, "", gr.ImageSlider.update(value=None), state)
             else:
-                # Regular batch processing - individual files
-                items = image_files + video_files
+                if not inp or not Path(inp).exists():
+                    return ("❌ Input missing", "", None, "", gr.ImageSlider.update(value=None), state)
 
-            if not items:
-                return ("❌ No media files or frame folders found in batch folder", "", None, "", gr.ImageSlider.update(value=None), state)
-            t = threading.Thread(target=worker_batch, args=(items,), daemon=True)
-        else:
-            prepped = maybe_downscale(prepare_single(settings["input_path"]))
-            t = threading.Thread(target=worker_single, args=(prepped,), daemon=True)
-        t.start()
+            settings["input_path"] = inp
 
-        last_yield = time.time()
-        while t.is_alive() or not progress_q.empty():
-            try:
-                line = progress_q.get(timeout=0.2)
-                if line:
-                    result_holder.setdefault("live_logs", []).append(line)
-            except queue.Empty:
-                pass
-            now = time.time()
-            if now - last_yield > 0.5:
-                last_yield = now
-                live_logs = result_holder.get("live_logs", [])
-                yield (
-                    gr.Markdown.update(value="⏳ Running GAN upscale..."),
-                    "\n".join(live_logs[-400:]),
+            cuda_warn = _validate_cuda_devices(settings.get("cuda_device", ""))
+            if cuda_warn:
+                return (f"⚠️ {cuda_warn}", "", None, "", state)
+            devices = [d.strip() for d in str(settings.get("cuda_device") or "").split(",") if d.strip()]
+            if len(devices) > 1:
+                return (
+                    "⚠️ GAN backends currently use a single GPU; select one CUDA device.",
+                    "",
                     None,
-                    None,
+                    "",
                     gr.ImageSlider.update(value=None),
                     state
                 )
-            time.sleep(0.1)
-        t.join()
 
-        status, lg, outp, cmp_html, slider_upd = result_holder.get(
-            "payload",
-            ("❌ Failed", "", None, "", gr.ImageSlider.update(value=None), state),
-        )
-        live_logs = result_holder.get("live_logs", [])
-        merged_logs = lg if lg else "\n".join(live_logs)
-        yield (
-            status,
-            merged_logs,
-            outp if outp and str(outp).endswith(".mp4") else outp,
-            cmp_html,
-            slider_upd,
-            state
-        )
+            face_apply = bool(args[-1])
+            face_apply = face_apply or global_settings.get("face_global", False)
+            face_strength = float(global_settings.get("face_strength", 0.5))
+            backend_val = settings.get("backend", "realesrgan")
+            # Pull shared output/comparison preferences
+            if (not settings.get("output_format")) or settings.get("output_format") == "auto":
+                cached_fmt = seed_controls.get("output_format_val")
+                if cached_fmt:
+                    settings["output_format"] = cached_fmt
+            if (not settings.get("fps_override")) or float(settings.get("fps_override") or 0) == 0:
+                cached_fps = seed_controls.get("fps_override_val")
+                if cached_fps:
+                    settings["fps_override"] = cached_fps
+            cmp_mode = seed_controls.get("comparison_mode_val", "native")
+            pin_pref = bool(seed_controls.get("pin_reference_val", False))
+            fs_pref = bool(seed_controls.get("fullscreen_val", False))
+
+            def relocate_output(path_str: Optional[str]) -> Optional[str]:
+                if not path_str:
+                    return None
+                target_root = settings.get("output_override")
+                if not target_root:
+                    return path_str
+                src = Path(path_str)
+                target_root_path = Path(normalize_path(target_root))
+                target_root_path.mkdir(parents=True, exist_ok=True)
+                if src.is_dir():
+                    dest = collision_safe_dir(target_root_path / src.name)
+                    shutil.copytree(src, dest)
+                    return str(dest)
+                else:
+                    dest = collision_safe_path(target_root_path / src.name)
+                    shutil.copyfile(src, dest)
+                    return str(dest)
+
+            # Define run_single function (moved outside try block)
+            def run_single(prepped_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
+                if cancel_event.is_set():
+                    return ("⏹️ Canceled", "\n".join(["Canceled before start"]), None, "", gr.ImageSlider.update(value=None), state)
+                header_log = [
+                    f"Model: {prepped_settings['model_name']}",
+                    f"Backend: {backend_val}",
+                    f"Scale: {prepped_settings['scale']}x",
+                    f"GPU: {prepped_settings.get('cuda_device') or 'auto/CPU'} (single GPU enforced)",
+                    f"Input: {prepped_settings['input_path']}",
+                ]
+                if progress_cb:
+                    for line in header_log:
+                        progress_cb(line)
+                # Run backend and collect logs
+                try:
+                    if backend_val == "realesrgan":
+                        prepped_settings["model"] = prepped_settings["model_name"].split(".")[0]
+                        prepped_settings["model_path"] = str((base_dir / "Image_Upscale_Models" / prepped_settings.get("model_name")).resolve())
+                        if not Path(prepped_settings["model_path"]).exists() and not _is_realesrgan_builtin(prepped_settings["model_name"]):
+                            return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.ImageSlider.update(value=None), state)
+                        result = run_realesrgan(
+                            prepped_settings,
+                            apply_face=face_apply,
+                            face_strength=face_strength,
+                            cancel_event=cancel_event,
+                            global_output_dir=str(current_output_dir),
+                        )
+                    else:
+                        if cancel_event.is_set():
+                            return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None), state)
+                        result = run_gan_upscale(
+                            prepped_settings,
+                            apply_face=face_apply,
+                            face_strength=face_strength,
+                            global_output_dir=str(current_output_dir),
+                            cancel_event=cancel_event,
+                        )
+                except Exception as exc:  # surface ffmpeg or other runtime issues
+                    err_msg = f"❌ GAN upscale failed: {exc}"
+                    if progress_cb:
+                        progress_cb(err_msg)
+                    return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.ImageSlider.update(value=None), state)
+                if cancel_event.is_set():
+                    status = "⏹️ Canceled"
+                else:
+                    status = "✅ GAN upscale complete" if result.returncode == 0 else f"⚠️ GAN upscale failed"
+                log_body = result.log or ""
+                full_log = "\n".join(header_log + [log_body])
+                if progress_cb:
+                    progress_cb(status)
+                relocated = relocate_output(result.output_path)
+                if relocated or result.output_path:
+                    try:
+                        outp = Path(relocated or result.output_path)
+                        state["seed_controls"]["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                    except Exception:
+                        pass
+                run_logger.write_summary(
+                    Path(relocated) if relocated else output_dir,
+                    {
+                        "input": prepped_settings.get("input_path"),
+                        "output": relocated or result.output_path,
+                        "returncode": result.returncode,
+                        "args": prepped_settings,
+                        "face_apply": face_apply,
+                        "pipeline": "gan",
+                    },
+                )
+                cmp_html = ""
+                slider_update = gr.ImageSlider.update(value=None)
+                if relocated or result.output_path:
+                    src = prepped_settings.get("input_path")
+                    outp = relocated or result.output_path
+                    if outp and Path(outp).exists():
+                        if Path(outp).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
+                            use_fallback = cmp_mode == "fallback"
+                            cmp_html = build_video_comparison(
+                                src,
+                                outp,
+                                pin_reference=pin_pref,
+                                start_fullscreen=fs_pref,
+                                use_fallback_assets=use_fallback or cmp_mode == "html_slider",
+                            )
+                        elif Path(outp).is_dir():
+                            cmp_html = f"<p>PNG frames saved to {outp}</p>"
+                        else:
+                            slider_update = gr.ImageSlider.update(value=(src, outp), visible=True)
+                            cmp_html = build_image_comparison(src, outp, pin_reference=pin_pref)
+                return status, full_log, relocated if relocated else (result.output_path if result.output_path else None), cmp_html, slider_update
+
+            # Kick off worker thread
+            if settings.get("batch_enable"):
+                folder = Path(settings["input_path"])
+                # Check if this is a frame folder (contains only images, treated as a sequence)
+                image_files = [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp")]
+                video_files = [p for p in sorted(folder.iterdir()) if p.is_file() and p.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi")]
+
+                if image_files and len(image_files) > 1 and not video_files:
+                    # Treat as frame folder - process as single unit
+                    items = [folder]
+                else:
+                    # Regular batch processing - individual files
+                    items = image_files + video_files
+
+                if not items:
+                    return ("❌ No media files or frame folders found in batch folder", "", None, "", gr.ImageSlider.update(value=None), state)
+                t = threading.Thread(target=worker_batch, args=(items,), daemon=True)
+            else:
+                prepped = maybe_downscale(prepare_single(settings["input_path"]))
+                t = threading.Thread(target=worker_single, args=(prepped,), daemon=True)
+            t.start()
+
+            last_yield = time.time()
+            while t.is_alive() or not progress_q.empty():
+                try:
+                    line = progress_q.get(timeout=0.2)
+                    if line:
+                        result_holder.setdefault("live_logs", []).append(line)
+                except queue.Empty:
+                    pass
+                now = time.time()
+                if now - last_yield > 0.5:
+                    last_yield = now
+                    live_logs = result_holder.get("live_logs", [])
+                    yield (
+                        gr.Markdown.update(value="⏳ Running GAN upscale..."),
+                        "\n".join(live_logs[-400:]),
+                        None,
+                        None,
+                        gr.ImageSlider.update(value=None),
+                        state
+                    )
+                time.sleep(0.1)
+            t.join()
+
+            status, lg, outp, cmp_html, slider_upd = result_holder.get(
+                "payload",
+                ("❌ Failed", "", None, "", gr.ImageSlider.update(value=None), state),
+            )
+            live_logs = result_holder.get("live_logs", [])
+            merged_logs = lg if lg else "\n".join(live_logs)
+            yield (
+                status,
+                merged_logs,
+                outp if outp and str(outp).endswith(".mp4") else outp,
+                cmp_html,
+                slider_upd,
+                state
+            )
         except Exception as e:
             error_msg = f"Critical error in GAN processing: {str(e)}"
             yield (

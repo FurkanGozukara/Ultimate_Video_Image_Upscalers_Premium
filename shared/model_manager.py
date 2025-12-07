@@ -389,6 +389,75 @@ class ModelManager:
             **kwargs
         )
 
+    def get_vram_usage(self) -> Dict[str, Any]:
+        """
+        Get current VRAM usage information.
+        """
+        total_usage = 0
+        model_breakdown = {}
+
+        for model_id, model_info in self.loaded_models.items():
+            if model_info.state == ModelState.LOADED and model_info.memory_usage_mb:
+                total_usage += model_info.memory_usage_mb
+                model_breakdown[model_id] = {
+                    "model_name": model_info.model_name,
+                    "model_type": model_info.model_type.value,
+                    "memory_mb": model_info.memory_usage_mb,
+                    "last_used": model_info.last_used
+                }
+
+        # Try to get actual GPU memory info
+        gpu_info = {}
+        if TORCH_AVAILABLE and torch.cuda.is_available():
+            try:
+                for i in range(torch.cuda.device_count()):
+                    props = torch.cuda.get_device_properties(i)
+                    gpu_info[f"cuda:{i}"] = {
+                        "allocated_mb": torch.cuda.memory_allocated(i) // (1024 * 1024),
+                        "reserved_mb": torch.cuda.memory_reserved(i) // (1024 * 1024),
+                        "total_mb": props.total_memory // (1024 * 1024),
+                        "name": props.name
+                    }
+            except Exception:
+                pass
+
+        return {
+            "total_tracked_usage_mb": total_usage,
+            "model_breakdown": model_breakdown,
+            "gpu_info": gpu_info,
+            "loaded_model_count": len([m for m in self.loaded_models.values() if m.state == ModelState.LOADED])
+        }
+
+    def cleanup_idle_models(self, max_idle_time: float = 600.0):
+        """
+        Unload models that haven't been used for more than max_idle_time seconds.
+        """
+        current_time = time.time()
+        models_to_unload = []
+
+        for model_id, model_info in self.loaded_models.items():
+            if (model_info.state == ModelState.LOADED and
+                model_info.last_used and
+                (current_time - model_info.last_used) > max_idle_time):
+                models_to_unload.append(model_id)
+
+        for model_id in models_to_unload:
+            self.unload_model(model_id)
+
+        return len(models_to_unload)
+
+    def force_vram_cleanup(self):
+        """
+        Force cleanup of GPU memory (PyTorch CUDA cache).
+        """
+        if TORCH_AVAILABLE and torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                return True
+            except Exception:
+                pass
+        return False
+
 
 # Global instance
 model_manager = ModelManager()

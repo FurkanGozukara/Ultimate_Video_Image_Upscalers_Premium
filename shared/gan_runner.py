@@ -183,6 +183,64 @@ class GanResult:
         self.log = log
 
 
+class GanRunner:
+    """
+    Runner class for GAN-based upscaling operations.
+    Provides a clean interface for the runner system.
+    """
+
+    def run_gan_processing(
+        self,
+        input_path: str,
+        model_name: str,
+        output_path: str,
+        settings: Dict[str, Any],
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> GanResult:
+        """
+        Run GAN processing with the given settings.
+        """
+        # Prepare settings for the run_gan_upscale function
+        gan_settings = settings.copy()
+        gan_settings["input_path"] = input_path
+        gan_settings["model"] = model_name
+        gan_settings["output_path"] = output_path
+
+        # Add base_dir if not present
+        if "base_dir" not in gan_settings:
+            gan_settings["base_dir"] = str(Path(__file__).parents[1])
+
+        # Create a progress callback wrapper
+        def progress_callback(msg: str):
+            if on_progress:
+                on_progress(msg)
+
+        # For now, use a simple approach - call the existing run_gan_upscale function
+        # TODO: Integrate with threading and cancellation
+        try:
+            result = run_gan_upscale(
+                settings=gan_settings,
+                apply_face=settings.get("face_restore_global", False),
+                face_strength=settings.get("face_strength", 0.5),
+                global_output_dir=str(Path(output_path).parent) if output_path else None,
+                cancel_event=None,  # TODO: Add cancellation support
+            )
+
+            # Call progress callback if provided
+            if on_progress and result.log:
+                for line in result.log.split('\n'):
+                    if line.strip():
+                        progress_callback(line + '\n')
+
+            return result
+
+        except Exception as e:
+            error_msg = f"GAN processing failed: {str(e)}"
+            if on_progress:
+                progress_callback(f"❌ {error_msg}\n")
+            return GanResult(1, None, error_msg)
+
+
 def _upscale_image(input_path: Path, scale: int, output_format: str = "auto") -> Path:
     img = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
     if img is None:
