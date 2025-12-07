@@ -1,0 +1,106 @@
+"""
+Health Check Tab - Self-contained modular implementation
+"""
+
+import gradio as gr
+from pathlib import Path
+from typing import Dict, Any
+
+from shared.health import collect_health_report
+
+
+def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir: Path, output_dir: Path):
+    """
+    Self-contained Health Check tab.
+    All logic internal to this function.
+    """
+
+    def run_health_check(state):
+        """Run comprehensive health check"""
+        report = collect_health_report(temp_dir=temp_dir, output_dir=output_dir)
+        lines = []
+        warnings = []
+
+        for key, info in report.items():
+            status_icon = {
+                "ok": "✅",
+                "warning": "⚠️",
+                "error": "❌",
+                "skipped": "⏭️"
+            }.get(info.get("status"), "❓")
+
+            line = f"**{status_icon} {key}**: {info.get('status')} - {info.get('detail')}"
+            lines.append(line)
+
+            if info.get("status") not in ("ok", "skipped"):
+                warnings.append(line)
+
+        # Update shared state health banner
+        health_text = "\n".join(warnings) if warnings else "✅ All health checks passed."
+        state["health_banner"]["text"] = health_text
+
+        report_text = "\n".join(lines)
+        return report_text, health_text, state
+
+    # Layout
+    gr.Markdown("### 🏥 System Health Check")
+    gr.Markdown("Verify ffmpeg, CUDA, VS Build Tools, and disk/temp/output writability.")
+
+    with gr.Row():
+        health_btn = gr.Button(
+            "🔍 Run Health Check",
+            variant="primary",
+            size="lg"
+        )
+
+    health_report = gr.Markdown(
+        "Click 'Run Health Check' to verify system components.",
+        show_copy_button=True
+    )
+
+    # Info sections
+    with gr.Accordion("ℹ️ What Each Check Does", open=False):
+        gr.Markdown("""
+        - **ffmpeg**: Checks if FFmpeg is available in PATH (required for video processing)
+        - **CUDA**: Detects NVIDIA GPU availability and driver status
+        - **VS Build Tools**: Windows-only check for Visual Studio Build Tools (needed for torch.compile)
+        - **Disk Space**: Verifies adequate free space in temp and output directories
+        - **Directory Access**: Confirms read/write permissions for temp and output folders
+        """)
+
+    with gr.Accordion("🔧 Troubleshooting Tips", open=False):
+        gr.Markdown("""
+        **FFmpeg Issues:**
+        - Ensure FFmpeg is installed and added to your system PATH
+        - On Windows: Download from https://ffmpeg.org/download.html
+        - On Linux: `sudo apt install ffmpeg` or equivalent
+
+        **CUDA Issues:**
+        - Install NVIDIA drivers and CUDA toolkit
+        - Verify GPU is detected with `nvidia-smi`
+        - Check PyTorch CUDA installation: `python -c "import torch; print(torch.cuda.is_available())"`
+
+        **VS Build Tools Issues (Windows):**
+        - Install Visual Studio Build Tools from Microsoft's website
+        - Include "Desktop development with C++" workload
+        - torch.compile will be disabled if not found
+
+        **Permission Issues:**
+        - Ensure the application has read/write access to temp and output directories
+        - Check antivirus software isn't blocking file operations
+        """)
+
+    # Wire up the health check
+    health_btn.click(
+        fn=run_health_check,
+        inputs=shared_state,
+        outputs=[health_report, shared_state]
+    )
+
+    # Auto-run health check on tab load
+    def load_health_check(state):
+        report_text, health_text, updated_state = run_health_check(state)
+        return report_text, updated_state
+
+    # Note: We can't use gr.Tab().load() here since we're inside a tab
+    # The health check will be run when the button is clicked

@@ -9,21 +9,13 @@ from shared.logging_utils import RunLogger
 from shared.path_utils import get_default_output_dir, get_default_temp_dir
 from shared.preset_manager import PresetManager
 from shared.runner import Runner
-from shared.models.seedvr2_meta import get_seedvr2_model_names
-import shared.services.seedvr2_service as seed_service
-import shared.services.resolution_service as res_service
-import shared.services.output_service as out_service
-import shared.services.face_service as face_service
-import shared.services.rife_service as rife_service
-import shared.services.gan_service as gan_service
-import shared.services.global_service as global_service
-import shared.services.health_service as health_service
-from ui.tab_seedvr2 import build_seedvr2_tab as build_seedvr2_tab_ui
-from ui.tab_resolution import build_resolution_tab as build_resolution_tab_ui
-from ui.tab_output import build_output_tab as build_output_tab_ui
-from ui.tab_face import build_face_tab as build_face_tab_ui
-from ui.tab_rife import build_rife_tab as build_rife_tab_ui
-from ui.tab_gan import build_gan_tab as build_gan_tab_ui
+from ui.seedvr2_tab import seedvr2_tab
+from ui.resolution_tab import resolution_tab
+from ui.output_tab import output_tab
+from ui.face_tab import face_tab
+from ui.rife_tab import rife_tab
+from ui.gan_tab import gan_tab
+from ui.health_tab import health_tab
 
 BASE_DIR = Path(__file__).parent.resolve()
 PRESET_DIR = BASE_DIR / "presets"
@@ -40,14 +32,6 @@ def _get_gan_model_names(base_dir: Path) -> list:
             choices.append(f.name)
     return sorted(choices)
 
-
-def _append_warning(text: str):
-    """Append a warning line to the health banner."""
-    existing = health_banner.get("text", "")
-    if existing:
-        health_banner["text"] = existing + "\n" + text
-    else:
-        health_banner["text"] = text
 
 # --------------------------------------------------------------------- #
 # Global setup
@@ -75,10 +59,15 @@ runner = Runner(
 runner.set_mode(global_settings.get("mode", "subprocess"))
 run_logger = RunLogger(enabled=global_settings.get("telemetry", True))
 
-# Initialize state with health check data
-def initialize_state():
+
+
+# --------------------------------------------------------------------- #
+# UI construction
+# --------------------------------------------------------------------- #
+def main():
+    # Initialize health check data
     try:
-        initial_report = collect_health_report(temp_dir=Path(global_settings["temp_dir"]), output_dir=Path(global_settings["output_dir"]))
+        initial_report = collect_health_report(temp_dir=temp_dir, output_dir=output_dir)
         warnings = []
         for key, info in initial_report.items():
             if info.get("status") not in ("ok", "skipped"):
@@ -92,62 +81,199 @@ def initialize_state():
     except Exception:
         health_text = "Health check failed to initialize. Run Health Check tab for details."
 
-    return {
-        "seed_controls": {
-            "resolution_val": None,
-            "max_resolution_val": None,
-            "current_model": seed_defaults.get("dit_model"),
-            "last_input_path": "",
-            "last_output_dir": "",
-            "resolution_cache": {},
-            "png_padding_val": 5,
-            "png_keep_basename_val": True,
-            "skip_first_frames_val": None,
-            "load_cap_val": None,
-            "fps_override_val": None,
-            "output_format_val": None,
-            "comparison_mode_val": "native",
-            "pin_reference_val": False,
-            "fullscreen_val": False,
-            "face_strength_val": 0.5,
-            "chunk_size_sec": 0,
-            "chunk_overlap_sec": 0,
-            "ratio_downscale": False,
-            "enable_max_target": True,
-            "auto_resolution": True,
-            "per_chunk_cleanup": False,
-        },
-        "health_banner": {"text": health_text},
-        "mode_state": {"locked": runner.get_mode() == "in_app"},
-        "progress_timer": None,
-        "operation_status": "ready"
-    }
-
-
-
-# --------------------------------------------------------------------- #
-# UI construction
-# --------------------------------------------------------------------- #
-def main():
-    seed_defaults = seed_service.seedvr2_defaults()
-    gan_model_names = _get_gan_model_names(BASE_DIR)
-    combined_models = sorted(list({*get_seedvr2_model_names(), *gan_model_names}))
-    last_used_name = preset_manager.get_last_used_name("seedvr2", seed_defaults.get("dit_model"))
-    last_used = preset_manager.load_last_used("seedvr2", seed_defaults.get("dit_model"))
-    if last_used_name and last_used is None:
-        _append_warning(f"Last used SeedVR2 preset '{last_used_name}' not found; loaded defaults.")
-    seed_defaults = preset_manager.merge_config(seed_defaults, last_used or {})
-
-    modern_theme = gr.themes.Soft(primary_hue="indigo", font=["Inter", "Arial", "sans-serif"])
+    # Modern theme with enhanced styling
+    modern_theme = gr.themes.Soft(
+        primary_hue="indigo",
+        font=["Inter", "Arial", "sans-serif"],
+        font_mono=["JetBrains Mono", "Consolas", "monospace"]
+    )
     css_overrides = """
-    .gr-button { padding: 12px 16px; font-size: 16px; }
+    .gr-button { padding: 12px 16px; font-size: 16px; border-radius: 8px; }
+    .gr-button-lg { padding: 16px 24px; font-size: 18px; }
     .gr-markdown, .gr-textbox label, .gr-number label, .gr-dropdown label { font-size: 16px; }
+    .gr-tab { font-size: 16px; font-weight: 500; }
+    .gr-form { gap: 16px; }
+    .health-banner { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px; border-radius: 8px; margin: 8px 0; }
+    .warning-text { color: #ff6b6b; font-weight: 500; }
+    .success-text { color: #51cf66; font-weight: 500; }
+    .info-text { color: #74c0fc; font-weight: 500; }
     """
 
-    # Progress timer for long operations
-    progress_timer = gr.Timer(5.0)  # Update every 5 seconds
-
     with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=css_overrides) as demo:
+        # Shared state for cross-tab communication
+        shared_state = gr.State({
+            "health_banner": {"text": health_text},
+            "seed_controls": {
+                "resolution_val": None,
+                "max_resolution_val": None,
+                "current_model": None,
+                "last_input_path": "",
+                "last_output_dir": "",
+                "resolution_cache": {},
+                "png_padding_val": 5,
+                "png_keep_basename_val": True,
+                "skip_first_frames_val": None,
+                "load_cap_val": None,
+                "fps_override_val": None,
+                "output_format_val": None,
+                "comparison_mode_val": "native",
+                "pin_reference_val": False,
+                "fullscreen_val": False,
+                "face_strength_val": 0.5,
+                "chunk_size_sec": 0,
+                "chunk_overlap_sec": 0,
+                "ratio_downscale": False,
+                "enable_max_target": True,
+                "auto_resolution": True,
+                "per_chunk_cleanup": False,
+            },
+            "operation_status": "ready"
+        })
+
+        # Health banner at the top
+        health_banner = gr.Markdown(f'<div class="health-banner">{health_text}</div>')
+        gr.Markdown(f"# {APP_TITLE}")
+
+        # Global settings tab (simple controls)
+        with gr.Tab("Global Settings"):
+            with gr.Row():
+                output_dir_box = gr.Textbox(
+                    label="Default Outputs Folder",
+                    value=global_settings["output_dir"],
+                    info="Where processed files will be saved"
+                )
+                temp_dir_box = gr.Textbox(
+                    label="Temp Folder",
+                    value=global_settings["temp_dir"],
+                    info="Temporary files during processing"
+                )
+            with gr.Row():
+                telemetry_toggle = gr.Checkbox(
+                    label="Save run metadata (local telemetry)",
+                    value=global_settings.get("telemetry", True),
+                    info="Save processing metadata for troubleshooting"
+                )
+                face_global_toggle = gr.Checkbox(
+                    label="Apply Face Restoration globally",
+                    value=global_settings.get("face_global", False),
+                    info="Enable face restoration for all upscaling operations"
+                )
+            save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
+            global_status = gr.Markdown("")
+
+            # Execution mode controls
+            gr.Markdown("### ⚙️ Execution Mode")
+            mode_radio = gr.Radio(
+                choices=["subprocess", "in_app"],
+                value=runner.get_mode(),
+                label="Processing Mode",
+                info="Subprocess: Clean memory, slower load. In-app: Faster but may leak memory."
+            )
+            mode_confirm = gr.Checkbox(
+                label="⚠️ I understand switching to in-app locks until restart",
+                value=False,
+                visible=runner.get_mode() == "subprocess"
+            )
+            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary")
+
+            # Wire up global settings events
+            def save_global_settings(od, td, tel, face, state):
+                from shared.services.global_service import save_global_settings
+                return save_global_settings(od, td, tel, face, runner, preset_manager, global_settings, run_logger, state)
+
+            def apply_mode_selection(mode_choice, confirm, state):
+                from shared.services.global_service import apply_mode_selection
+                return apply_mode_selection(mode_choice, confirm, runner, preset_manager, global_settings, state)
+
+            save_global.click(
+                fn=save_global_settings,
+                inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, shared_state],
+                outputs=[global_status, shared_state],
+            )
+
+            apply_mode_btn.click(
+                fn=apply_mode_selection,
+                inputs=[mode_radio, mode_confirm, shared_state],
+                outputs=[mode_radio, mode_confirm, shared_state],
+            )
+
+        # Self-contained tabs following SECourses pattern
+        with gr.Tab("🎬 SeedVR2 (Video/Image)"):
+            seedvr2_tab(
+                preset_manager=preset_manager,
+                runner=runner,
+                run_logger=run_logger,
+                global_settings=global_settings,
+                shared_state=shared_state,
+                base_dir=BASE_DIR,
+                temp_dir=temp_dir,
+                output_dir=output_dir
+            )
+
+        with gr.Tab("📐 Resolution & Scene Split"):
+            resolution_tab(
+                preset_manager=preset_manager,
+                shared_state=shared_state,
+                base_dir=BASE_DIR
+            )
+
+        with gr.Tab("🎭 Output & Comparison"):
+            output_tab(
+                preset_manager=preset_manager,
+                shared_state=shared_state,
+                base_dir=BASE_DIR
+            )
+
+        with gr.Tab("👤 Face Restoration"):
+            face_tab(
+                preset_manager=preset_manager,
+                global_settings=global_settings,
+                shared_state=shared_state
+            )
+
+        with gr.Tab("⏱️ RIFE / FPS / Edit Videos"):
+            rife_tab(
+                preset_manager=preset_manager,
+                runner=runner,
+                run_logger=run_logger,
+                global_settings=global_settings,
+                shared_state=shared_state,
+                base_dir=BASE_DIR,
+                temp_dir=temp_dir,
+                output_dir=output_dir
+            )
+
+        with gr.Tab("🖼️ Image-Based (GAN)"):
+            gan_tab(
+                preset_manager=preset_manager,
+                runner=runner,
+                run_logger=run_logger,
+                global_settings=global_settings,
+                shared_state=shared_state,
+                base_dir=BASE_DIR,
+                temp_dir=temp_dir,
+                output_dir=output_dir
+            )
+
+        with gr.Tab("🏥 Health Check"):
+            health_tab(
+                global_settings=global_settings,
+                shared_state=shared_state,
+                temp_dir=temp_dir,
+                output_dir=output_dir
+            )
+
+        # Update health banner on load
+        def update_health_banner(state):
+            return gr.Markdown.update(value=f'<div class="health-banner">{state["health_banner"]["text"]}</div>')
+
+        demo.load(fn=update_health_banner, inputs=shared_state, outputs=health_banner)
+
+    demo.launch()
+
+
+if __name__ == "__main__":
+    main()
         # Initialize shared state
         initial_state = initialize_state()
         shared_state = gr.State(initial_state)
