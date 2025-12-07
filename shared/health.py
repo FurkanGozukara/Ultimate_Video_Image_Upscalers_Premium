@@ -42,16 +42,40 @@ def _check_cuda() -> Dict[str, Optional[str]]:
 def _check_vs_build_tools() -> Dict[str, Optional[str]]:
     if platform.system() != "Windows":
         return {"status": "skipped", "detail": "VS Build Tools not required on this platform"}
+
+    # Extended list of candidate paths for different VS versions
     candidates = [
+        # VS 2022 Build Tools
         Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"),
         Path("C:/Program Files/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"),
+        # VS 2022 Community/Professional/Enterprise
         Path("C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvarsall.bat"),
         Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files/Microsoft Visual Studio/2022/Professional/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/Professional/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvarsall.bat"),
+        # VS 2019 Build Tools (fallback)
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files/Microsoft Visual Studio/2019/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"),
+        # VS 2019 Community/Professional/Enterprise
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files/Microsoft Visual Studio/2019/Professional/VC/Auxiliary/Build/vcvarsall.bat"),
+        Path("C:/Program Files/Microsoft Visual Studio/2019/Enterprise/VC/Auxiliary/Build/vcvarsall.bat"),
     ]
+
     found = next((p for p in candidates if p.exists()), None)
     if found:
-        return {"status": "ok", "detail": f"Found vcvarsall at {found}"}
-    return {"status": "warning", "detail": "VS Build Tools not detected at common paths; compile may be disabled"}
+        # Test if the vcvarsall.bat file is actually executable
+        try:
+            # Quick test by checking if we can read the file
+            with open(found, 'r') as f:
+                if 'vcvarsall.bat' in f.read(200):
+                    return {"status": "ok", "detail": f"Found vcvarsall at {found}"}
+        except Exception:
+            pass
+
+    return {"status": "warning", "detail": "VS Build Tools not detected; torch.compile will be automatically disabled. Install 'Desktop development with C++' workload in Visual Studio 2022 Build Tools for optimal performance."}
 
 
 def _check_disk(path: Path) -> Dict[str, Optional[str]]:
@@ -61,6 +85,12 @@ def _check_disk(path: Path) -> Dict[str, Optional[str]]:
 
 def _check_writable(path: Path) -> Dict[str, Optional[str]]:
     return {"status": "ok" if is_writable(path) else "error", "detail": f"Writability: {path}"}
+
+
+def is_vs_build_tools_available() -> bool:
+    """Check if VS Build Tools are available for torch.compile."""
+    result = _check_vs_build_tools()
+    return result.get("status") == "ok"
 
 
 def collect_health_report(temp_dir: Path, output_dir: Path) -> Dict[str, Dict[str, Optional[str]]]:

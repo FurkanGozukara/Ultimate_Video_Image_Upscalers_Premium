@@ -36,16 +36,29 @@ def gan_tab(
     defaults = service["defaults"]
     last_used_name = preset_manager.get_last_used_name("gan", defaults.get("model", "default"))
     last_used = preset_manager.load_last_used("gan", defaults.get("model", "default"))
-    if last_used_name and last_used is None:
-        def update_warning(state):
-            existing = state["health_banner"]["text"]
-            warning = f"Last used GAN preset '{last_used_name}' not found; loaded defaults."
-            if existing:
-                state["health_banner"]["text"] = existing + "\n" + warning
-            else:
-                state["health_banner"]["text"] = warning
-            return state
-        shared_state.value = update_warning(shared_state.value)
+
+    # Handle last used preset loading with better error reporting
+    if last_used_name:
+        if last_used is None:
+            def update_warning(state):
+                existing = state["health_banner"]["text"]
+                warning = f"⚠️ Last used GAN preset '{last_used_name}' not found or corrupted; loaded defaults."
+                if existing:
+                    state["health_banner"]["text"] = existing + "\n" + warning
+                else:
+                    state["health_banner"]["text"] = warning
+                return state
+            shared_state.value = update_warning(shared_state.value)
+        else:
+            def update_success(state):
+                existing = state["health_banner"]["text"]
+                success_msg = f"✅ Loaded last used GAN preset: '{last_used_name}'"
+                if existing:
+                    state["health_banner"]["text"] = existing + "\n" + success_msg
+                else:
+                    state["health_banner"]["text"] = success_msg
+                return state
+            shared_state.value = update_success(shared_state.value)
 
     merged_defaults = preset_manager.merge_config(defaults, last_used or {})
     values = [merged_defaults[k] for k in GAN_ORDER]
@@ -107,8 +120,25 @@ def gan_tab(
                 def update_model_info(model_name):
                     if not model_name:
                         return "Select a model to see details..."
-                    # This would be populated with actual model metadata
-                    return f"**{model_name}**\n\nScale factor and details would be shown here."
+
+                    try:
+                        from shared.gan_runner import get_gan_model_metadata
+                        base_dir = base_dir  # Use the passed base_dir
+                        metadata = get_gan_model_metadata(model_name, base_dir)
+
+                        info_lines = [f"**{model_name}**"]
+                        info_lines.append(f"- **Scale**: {metadata.scale}x")
+                        info_lines.append(f"- **Architecture**: {metadata.architecture}")
+                        if metadata.description and metadata.description != f"{model_name}":
+                            info_lines.append(f"- **Description**: {metadata.description}")
+                        if metadata.author and metadata.author != "unknown":
+                            info_lines.append(f"- **Author**: {metadata.author}")
+                        if metadata.tags:
+                            info_lines.append(f"- **Tags**: {', '.join(metadata.tags)}")
+
+                        return "\n".join(info_lines)
+                    except Exception as e:
+                        return f"**{model_name}**\n\nUnable to load metadata: {str(e)}"
 
                 gan_model.change(
                     fn=update_model_info,
@@ -152,6 +182,13 @@ def gan_tab(
                     value=values[9],
                     precision=0,
                     info="Overlap between tiles for seamless results"
+                )
+
+                batch_size = gr.Slider(
+                    label="Batch Size (Frames per Iteration)",
+                    minimum=1, maximum=16, step=1,
+                    value=values[15],
+                    info="Number of frames to process simultaneously (affects VRAM usage)"
                 )
 
         # Quality & Performance

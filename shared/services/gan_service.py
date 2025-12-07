@@ -175,6 +175,7 @@ def gan_defaults(base_dir: Path) -> Dict[str, Any]:
         "fps_override": 0,
         "frames_per_batch": 1,  # Default to 1 frame per batch for safety
         "base_dir": str(base_dir),  # Pass base directory for metadata lookup
+        "batch_size": 1,  # Number of frames to process simultaneously
     }
 
 
@@ -193,6 +194,7 @@ GAN_ORDER: List[str] = [
     "fps_override",
     "frames_per_batch",
     "base_dir",
+    "batch_size",
 ]
 
 
@@ -251,26 +253,39 @@ def build_gan_callbacks(
         return gr.Dropdown.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
-        if not preset_name:
+        if not preset_name.strip():
             return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
-        payload = _gan_dict_from_args(list(args))
-        model_name = payload["model"]
-        preset_manager.save_preset("gan", model_name, preset_name, payload)
-        dropdown = refresh_presets(model_name, select_name=preset_name)
-        current_map = dict(zip(GAN_ORDER, list(args)))
-        loaded_vals = _apply_gan_preset(payload, defaults, preset_manager, current=current_map)
-        return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+
+        try:
+            payload = _gan_dict_from_args(list(args))
+            model_name = payload["model"]
+            preset_manager.save_preset_safe("gan", model_name, preset_name.strip(), payload)
+            dropdown = refresh_presets(model_name, select_name=preset_name.strip())
+
+            current_map = dict(zip(GAN_ORDER, list(args)))
+            loaded_vals = _apply_gan_preset(payload, defaults, preset_manager, current=current_map)
+
+            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+        except Exception as e:
+            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
-        model_name = model_name or defaults["model"]
-        preset = preset_manager.load_preset("gan", model_name, preset_name)
-        if preset:
-            preset_manager.set_last_used("gan", model_name, preset_name)
-        defaults_with_model = defaults.copy()
-        defaults_with_model["model"] = model_name
-        current_map = dict(zip(GAN_ORDER, current_values))
-        values = _apply_gan_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
-        return values
+        try:
+            model_name = model_name or defaults["model"]
+            preset = preset_manager.load_preset_safe("gan", model_name, preset_name)
+            if preset:
+                preset_manager.set_last_used("gan", model_name, preset_name)
+                # Apply validation constraints
+                preset = preset_manager.validate_preset_constraints(preset, "gan", model_name)
+
+            defaults_with_model = defaults.copy()
+            defaults_with_model["model"] = model_name
+            current_map = dict(zip(GAN_ORDER, current_values))
+            values = _apply_gan_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
+            return values
+        except Exception as e:
+            print(f"Error loading preset {preset_name}: {e}")
+            return current_values
 
     def safe_defaults():
         return [defaults[k] for k in GAN_ORDER]

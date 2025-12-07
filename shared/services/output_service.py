@@ -65,25 +65,37 @@ def build_output_callbacks(
         return gr.Dropdown.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
-        if not preset_name:
+        if not preset_name.strip():
             return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
-        payload = _output_dict_from_args(list(args))
-        model_name = payload["model"]
-        preset_manager.save_preset("output", model_name, preset_name, payload)
-        dropdown = refresh_presets(model_name, select_name=preset_name)
-        current_map = dict(zip(OUTPUT_ORDER, list(args)))
-        loaded_vals = _apply_output_preset(payload, defaults, preset_manager, current=current_map)
-        return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+
+        try:
+            payload = _output_dict_from_args(list(args))
+            model_name = payload["model"]
+            preset_manager.save_preset_safe("output", model_name, preset_name.strip(), payload)
+            dropdown = refresh_presets(model_name, select_name=preset_name.strip())
+
+            current_map = dict(zip(OUTPUT_ORDER, list(args)))
+            loaded_vals = _apply_output_preset(payload, defaults, preset_manager, current=current_map)
+
+            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+        except Exception as e:
+            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
-        model_name = model_name or defaults["model"]
-        preset = preset_manager.load_preset("output", model_name, preset_name)
-        if preset:
-            preset_manager.set_last_used("output", model_name, preset_name)
-        defaults_with_model = defaults.copy()
-        defaults_with_model["model"] = model_name
-        current_map = dict(zip(OUTPUT_ORDER, current_values))
-        values = _apply_output_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
+        try:
+            model_name = model_name or defaults["model"]
+            preset = preset_manager.load_preset_safe("output", model_name, preset_name)
+            if preset:
+                preset_manager.set_last_used("output", model_name, preset_name)
+
+            defaults_with_model = defaults.copy()
+            defaults_with_model["model"] = model_name
+            current_map = dict(zip(OUTPUT_ORDER, current_values))
+            values = _apply_output_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
+            return values
+        except Exception as e:
+            print(f"Error loading preset {preset_name}: {e}")
+            return current_values
         return values
 
     def safe_defaults():

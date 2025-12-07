@@ -174,11 +174,11 @@ class Runner:
 
         # Compile guardrail: if compile requested on Windows but vcvars is missing, disable compile flags with a warning.
         if platform.system() == "Windows" and (settings.get("compile_dit") or settings.get("compile_vae")):
-            vcvars_path = self._find_vcvars()
-            if not vcvars_path:
-                warn_msg = "⚠️ VS Build Tools not found; disabling compile_dit/compile_vae to avoid failures."
+            from .health import is_vs_build_tools_available
+            if not is_vs_build_tools_available():
+                warn_msg = "⚠️ VS Build Tools not found; torch.compile requires Visual Studio Build Tools. Install 'Desktop development with C++' workload."
                 if on_progress:
-                    on_progress(warn_msg + "\n")
+                    on_progress(f"{warn_msg}\n")
                 settings["compile_dit"] = False
                 settings["compile_vae"] = False
                 cmd = [c for c in cmd if c not in ("--compile_dit", "--compile_vae")]
@@ -423,9 +423,25 @@ class Runner:
             Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"),
             Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"),
         ]
+        # Check environment variable first
+        vs_install_dir = os.environ.get("VSINSTALLDIR")
+        if vs_install_dir:
+            env_candidate = Path(vs_install_dir) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
+            if env_candidate.exists():
+                return env_candidate
+
+        # Check candidates
         for candidate in candidates:
             if candidate.exists():
-                return candidate
+                # Quick validation that it's actually a vcvarsall.bat file
+                try:
+                    with open(candidate, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read(200)
+                        if 'vcvarsall.bat' in content or '@echo off' in content:
+                            return candidate
+                except Exception:
+                    continue
+
         return None
 
     def _build_seedvr2_cmd(
@@ -547,9 +563,23 @@ class Runner:
 
         vcvars_path = self._find_vcvars()
         if not vcvars_path:
-            # add note for downstream log
-            self._log_lines.append("⚠️ VS Build Tools not found; compile may fail or be disabled.")
-            return cmd  # fall back silently; health check will warn elsewhere
+            # Disable compile flags if VS Build Tools are not available
+            self._log_lines.append("⚠️ VS Build Tools not found; disabling torch.compile for compatibility.")
+            # Remove compile-related flags from command
+            filtered_cmd = []
+            skip_next = False
+            for c in cmd:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if c in ("--compile_dit", "--compile_vae", "--compile_backend", "--compile_mode",
+                        "--compile_fullgraph", "--compile_dynamic"):
+                    skip_next = True  # Skip the next argument too
+                    continue
+                if c.startswith("--compile_dynamo_cache_size_limit=") or c.startswith("--compile_dynamo_recompile_limit="):
+                    continue
+                filtered_cmd.append(c)
+            return filtered_cmd
 
         # Build cmd /c call "vcvarsall.bat" x64 && original command
         quoted_cmd = " ".join(f'"{c}"' if " " in c else c for c in cmd)

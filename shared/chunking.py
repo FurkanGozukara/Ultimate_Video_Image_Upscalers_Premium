@@ -333,9 +333,7 @@ def chunk_and_process(
                 return 1, "Canceled before processing current chunk", "", len(chunk_paths)
         except Exception:
             pass
-        on_progress(f"Processing chunk {idx}/{len(chunk_paths)}: {chunk.name}\n")
-        if progress_tracker:
-            progress_tracker((idx - 1) / len(chunk_paths), desc=f"Processing chunk {idx}/{len(chunk_paths)}")
+        # Only update progress when chunk completes (not during processing to avoid UI spam)
         chunk_settings = settings.copy()
         chunk_settings["input_path"] = str(chunk)
         # Direct chunk outputs to temp; choose dir for PNG exports
@@ -344,6 +342,10 @@ def chunk_and_process(
         else:
             chunk_settings["output_override"] = str(work / f"{chunk.stem}_out.mp4")
         res = runner.run_seedvr2(chunk_settings, on_progress=None, preview_only=False)
+
+        # Update progress only after chunk completion
+        if progress_tracker:
+            progress_tracker(idx / len(chunk_paths), desc=f"Completed chunk {idx}/{len(chunk_paths)}")
         if res.returncode != 0 or getattr(runner, "is_canceled", lambda: False)():
             on_progress(f"Chunk {idx} failed with code {res.returncode}\n")
             if allow_partial and output_chunks:

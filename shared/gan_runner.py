@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -327,6 +327,205 @@ def _process_frame_folder(
     return output_dir
 
 
+def _process_video_frames(
+    video_path: Path,
+    settings: Dict[str, Any],
+    cancel_event=None,
+    log_lines: List[str] = None
+) -> Path:
+    """
+    Process video by extracting frames, upscaling each frame in batches, then reassembling.
+    """
+    if log_lines is None:
+        log_lines = []
+
+    import tempfile
+    import shutil
+    from pathlib import Path
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="gan_video_"))
+    try:
+        # Extract frames from video
+        frames_dir = temp_dir / "frames"
+        frames_dir.mkdir()
+
+        log_lines.append(f"Extracting frames from video: {video_path.name}")
+        extract_result = subprocess.run([
+            "ffmpeg", "-i", str(video_path),
+            "-q:v", "2",  # High quality
+            str(frames_dir / "frame_%08d.png")
+        ], capture_output=True, text=True)
+
+        if extract_result.returncode != 0:
+            raise Exception(f"Frame extraction failed: {extract_result.stderr}")
+
+        # Get frame count
+        frame_files = sorted(frames_dir.glob("frame_*.png"))
+        if not frame_files:
+            raise Exception("No frames extracted from video")
+
+        log_lines.append(f"Extracted {len(frame_files)} frames")
+
+        # Get original video FPS for reassembly
+        fps_result = subprocess.run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1",
+            str(video_path)
+        ], capture_output=True, text=True)
+
+        original_fps = 30.0  # Default
+        if fps_result.returncode == 0 and fps_result.stdout.strip():
+            rate_str = fps_result.stdout.strip()
+            if "/" in rate_str:
+                num, den = rate_str.split("/")
+                try:
+                    original_fps = float(num) / float(den)
+                except:
+                    pass
+
+        # Process frames in batches
+        batch_size = settings.get("batch_size", 1)
+        upscaled_frames_dir = temp_dir / "upscaled_frames"
+        upscaled_frames_dir.mkdir()
+
+        log_lines.append(f"Processing frames in batches of {batch_size}")
+
+        for i in range(0, len(frame_files), batch_size):
+            if cancel_event and cancel_event.is_set():
+                raise Exception("Processing cancelled")
+
+            batch_files = frame_files[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(frame_files) + batch_size - 1) // batch_size
+
+            log_lines.append(f"Processing batch {batch_num}/{total_batches} ({len(batch_files)} frames)")
+
+            # Create a temporary frame folder for this batch
+            batch_dir = temp_dir / f"batch_{batch_num}"
+            batch_dir.mkdir()
+
+            # Copy batch files to temporary directory
+            for frame_file in batch_files:
+                shutil.copy2(frame_file, batch_dir / frame_file.name)
+
+            # Process this batch as a frame folder
+            batch_result = _process_frame_folder(
+                Path(batch_dir),
+                model_scale,
+                "png",  # Force PNG for frames
+                cancel_event,
+                []
+            )
+
+            if batch_result:
+                # Move upscaled frames to final directory
+                for upscaled_file in batch_result.glob("*.png"):
+                    # Extract frame number and rename
+                    frame_match = re.search(r'frame_(\d+)\.png', upscaled_file.name)
+                    if frame_match:
+                        frame_num = frame_match.group(1)
+                        final_name = f"frame_{frame_num}.png"
+                        shutil.move(str(upscaled_file), str(upscaled_frames_dir / final_name))
+
+            # Clean up batch directory
+            shutil.rmtree(batch_dir, ignore_errors=True)
+
+        # Reassemble video from upscaled frames
+        log_lines.append("Reassembling video from upscaled frames")
+
+        output_video_path = _reassemble_video_from_frames(
+            upscaled_frames_dir,
+            video_path,
+            original_fps,
+            settings
+        )
+
+        log_lines.append(f"Video processing complete: {output_video_path}")
+        return output_video_path
+
+    finally:
+        # Clean up temporary directory
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except:
+            pass
+
+
+def _reassemble_video_from_frames(
+    frames_dir: Path,
+    original_video: Path,
+    fps: float,
+    settings: Dict[str, Any]
+) -> Path:
+    """Reassemble video from upscaled frames."""
+    from .path_utils import collision_safe_path
+
+    # Determine output path
+    output_dir = Path(settings.get("global_output_dir", original_video.parent))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    base_name = original_video.stem
+    output_path = collision_safe_path(output_dir / f"{base_name}_gan_upscaled.mp4")
+
+    # Use ffmpeg to reassemble video
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-framerate", str(fps),
+        "-i", str(frames_dir / "frame_%08d.png"),
+        "-c:v", "libx264",
+        "-preset", "slow",
+        "-crf", "18",  # High quality
+        "-pix_fmt", "yuv420p",
+        "-y",  # Overwrite
+        str(output_path)
+    ]
+
+    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Exception(f"Video reassembly failed: {result.stderr}")
+
+    return output_path
+
+
+def _preprocess_input_resolution(input_path: Path, target_resolution: int, temp_dir: Path) -> Path:
+    """Preprocess input by downscaling to optimal resolution for GAN upscaling."""
+    import cv2
+
+    # Create temp file for preprocessed input
+    suffix = input_path.suffix
+    temp_input = temp_dir / f"preprocessed_input_{input_path.stem}{suffix}"
+    temp_input.parent.mkdir(parents=True, exist_ok=True)
+
+    # For images
+    if suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.webp']:
+        img = cv2.imread(str(input_path), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return input_path
+
+        h, w = img.shape[:2]
+        short_side = min(w, h)
+
+        if short_side <= target_resolution:
+            return input_path  # No downscaling needed
+
+        # Calculate new dimensions maintaining aspect ratio
+        if w <= h:
+            new_w = target_resolution
+            new_h = int(target_resolution * (h / w))
+        else:
+            new_h = target_resolution
+            new_w = int(target_resolution * (w / h))
+
+        # Downscale
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+        cv2.imwrite(str(temp_input), resized)
+        return temp_input
+
+    # For videos, we'd need ffmpeg downscaling, but for now return original
+    # Video downscaling is more complex and might be handled elsewhere
+    return input_path
+
+
 def run_gan_upscale(
     settings: Dict[str, Any],
     apply_face: bool = False,
@@ -352,14 +551,27 @@ def run_gan_upscale(
         try:
             output_path = _process_frame_folder(
                 input_path,
-                model_scale,
-                settings.get("output_format", "auto"),
+                settings,
                 cancel_event,
                 log_lines
             )
             return GanResult(0, str(output_path), "\n".join(log_lines))
         except Exception as e:
             return GanResult(1, None, f"Frame folder processing failed: {e}")
+
+    # Handle video files - extract frames, process, reassemble
+    if input_type == "video":
+        log_lines = []
+        try:
+            output_path = _process_video_frames(
+                input_path,
+                settings,
+                cancel_event,
+                log_lines
+            )
+            return GanResult(0, str(output_path), "\n".join(log_lines))
+        except Exception as e:
+            return GanResult(1, None, f"Video processing failed: {e}")
 
     # Get model metadata for accurate scale information
     model_name = settings.get("model", "")
@@ -384,7 +596,33 @@ def run_gan_upscale(
         if input_dims and auto_resolution:
             w, h = input_dims
             short_side = min(w, h)
-            computed_res = min(short_side, target_res or short_side)
+
+            # For fixed-scale GAN models, calculate optimal input resolution
+            if model_scale > 1:
+                # Calculate what input resolution would give us target output after scaling
+                optimal_input = target_res // model_scale
+
+                # Apply max resolution constraint
+                if enable_max_target and max_target_res > 0:
+                    max_input = max_target_res // model_scale
+                    optimal_input = min(optimal_input, max_input)
+
+                # Don't exceed original resolution
+                optimal_input = min(optimal_input, short_side)
+
+                # For ratio-based scaling, we may need to downscale first
+                downscale_first = settings.get("downscale_first", True)
+                if downscale_first and optimal_input < short_side:
+                    # Mark for preprocessing downscale
+                    settings["needs_input_downscale"] = True
+                    settings["target_input_resolution"] = optimal_input
+                    computed_res = optimal_input
+                else:
+                    # Use optimal input size for direct scaling
+                    computed_res = optimal_input
+            else:
+                # For scale=1 models or when not using ratio logic
+                computed_res = min(short_side, target_res or short_side)
 
             if enable_max_target and max_target_res and max_target_res > 0:
                 computed_res = min(computed_res, max_target_res)
@@ -420,17 +658,26 @@ def run_gan_upscale(
         # Predict target path using shared resolver for consistency
         fmt = "png" if output_format == "png" else "mp4"
         predicted = resolve_output_location(
-            input_path=str(input_path),
+            input_path=str(processed_input_path),
             output_format=fmt,
             global_output_dir=global_output_dir,
             batch_mode=False,
         )
         predicted_path = Path(predicted)
 
+        # Apply input preprocessing if needed for ratio-based scaling
+        processed_input_path = input_path
+        if settings.get("needs_input_downscale"):
+            target_input_res = settings.get("target_input_resolution", computed_res)
+            log_lines.append(f"Preprocessing input: downscaling to {target_input_res}px for optimal {scale}x upscaling")
+            processed_input_path = _preprocess_input_resolution(input_path, target_input_res, Path(tempfile.gettempdir()))
+            if processed_input_path != input_path:
+                log_lines.append("Input preprocessing complete")
+
         frames_per_batch = int(settings.get("frames_per_batch") or 0)
-        if input_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
+        if processed_input_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
             out = _upscale_video(
-                input_path,
+                processed_input_path,
                 scale,
                 output_format=output_format,
                 fps_override=fps_override,
@@ -439,7 +686,7 @@ def run_gan_upscale(
                 log_lines=log_lines,
             )
         else:
-            out = _upscale_image(input_path, scale, output_format=output_format)
+            out = _upscale_image(processed_input_path, scale, output_format=output_format)
 
         if cancel_event and cancel_event.is_set():
             return GanResult(1, str(out) if out else None, "Canceled")

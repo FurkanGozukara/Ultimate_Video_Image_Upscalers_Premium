@@ -262,22 +262,41 @@ def build_seedvr2_callbacks(
         return gr.Dropdown.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, model_name: str, *args):
-        if not preset_name:
+        if not preset_name.strip():
             return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
-        payload = _seedvr2_dict_from_args(list(args))
-        preset_manager.save_preset("seedvr2", model_name, preset_name, payload)
-        dropdown = refresh_presets(model_name, select_name=preset_name)
-        current_map = dict(zip(SEEDVR2_ORDER, list(args)))
-        loaded_vals = _apply_preset_to_values(payload, defaults, preset_manager, current=current_map)
-        return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+
+        try:
+            payload = _seedvr2_dict_from_args(list(args))
+            # Validate the payload before saving
+            validated_payload = _enforce_seedvr2_guardrails(payload, defaults)
+
+            preset_manager.save_preset_safe("seedvr2", model_name, preset_name.strip(), validated_payload)
+            dropdown = refresh_presets(model_name, select_name=preset_name.strip())
+
+            # Reload the validated values to ensure UI consistency
+            current_map = dict(zip(SEEDVR2_ORDER, list(args)))
+            loaded_vals = _apply_preset_to_values(validated_payload, defaults, preset_manager, current=current_map)
+
+            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+        except Exception as e:
+            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
-        preset = preset_manager.load_preset("seedvr2", model_name, preset_name)
-        if preset:
-            preset_manager.set_last_used("seedvr2", model_name, preset_name)
-        current_map = dict(zip(SEEDVR2_ORDER, current_values))
-        values = _apply_preset_to_values(preset or {}, defaults, preset_manager, current=current_map)
-        return values
+        try:
+            preset = preset_manager.load_preset_safe("seedvr2", model_name, preset_name)
+            if preset:
+                preset_manager.set_last_used("seedvr2", model_name, preset_name)
+                # Apply comprehensive validation to loaded preset
+                preset = preset_manager.validate_preset_constraints(preset, "seedvr2", model_name)
+                preset = _enforce_seedvr2_guardrails(preset, defaults)
+
+            current_map = dict(zip(SEEDVR2_ORDER, current_values))
+            values = _apply_preset_to_values(preset or {}, defaults, preset_manager, current=current_map)
+            return values
+        except Exception as e:
+            # On error, return current values unchanged
+            print(f"Error loading preset {preset_name}: {e}")
+            return current_values
 
     def safe_defaults():
         return [defaults[key] for key in SEEDVR2_ORDER]
@@ -597,20 +616,28 @@ def build_seedvr2_callbacks(
             )
 
             if should_chunk:
+                # Create a progress callback that only updates on chunk completion
+                completed_chunks = 0
+                def chunk_progress_callback(progress_val, desc=""):
+                    nonlocal completed_chunks
+                    if "Completed chunk" in desc:
+                        completed_chunks += 1
+                        on_progress(f"Completed {completed_chunks} chunks\n")
+
                 rc, clog, final_out, chunk_count = chunk_and_process(
                     runner,
                     single_settings,
                     scene_threshold=single_settings.get("scene_threshold", 27.0),
                     min_scene_len=single_settings.get("scene_min_len", 2.0),
                     temp_dir=Path(global_settings["temp_dir"]),
-                    on_progress=on_progress,
+                    on_progress=lambda msg: None,  # Suppress individual chunk messages
                     chunk_seconds=float(single_settings.get("chunk_size_sec") or 0),
                     chunk_overlap=float(single_settings.get("chunk_overlap_sec") or 0),
                     per_chunk_cleanup=bool(single_settings.get("per_chunk_cleanup")),
                     resume_from_partial=bool(single_settings.get("resume_chunking", False)),
                     allow_partial=True,
                     global_output_dir=str(runner.output_dir) if hasattr(runner, "output_dir") else None,
-                    progress_tracker=progress,
+                    progress_tracker=chunk_progress_callback,
                 )
                 status = "✅ Chunked upscale complete" if rc == 0 else f"⚠️ Chunked upscale ended early ({rc})"
                 output_path = final_out if final_out else None

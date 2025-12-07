@@ -32,17 +32,31 @@ def seedvr2_tab(
     defaults = seedvr2_defaults()
     last_used_name = preset_manager.get_last_used_name("seedvr2", defaults.get("dit_model"))
     last_used = preset_manager.load_last_used("seedvr2", defaults.get("dit_model"))
-    if last_used_name and last_used is None:
-        # Update health banner with warning
-        def update_warning(state):
-            existing = state["health_banner"]["text"]
-            warning = f"Last used SeedVR2 preset '{last_used_name}' not found; loaded defaults."
-            if existing:
-                state["health_banner"]["text"] = existing + "\n" + warning
-            else:
-                state["health_banner"]["text"] = warning
-            return state
-        shared_state.value = update_warning(shared_state.value)
+
+    # Handle last used preset loading with better error reporting
+    if last_used_name:
+        if last_used is None:
+            # Update health banner with warning
+            def update_warning(state):
+                existing = state["health_banner"]["text"]
+                warning = f"⚠️ Last used SeedVR2 preset '{last_used_name}' not found or corrupted; loaded defaults."
+                if existing:
+                    state["health_banner"]["text"] = existing + "\n" + warning
+                else:
+                    state["health_banner"]["text"] = warning
+                return state
+            shared_state.value = update_warning(shared_state.value)
+        else:
+            # Successfully loaded last used preset
+            def update_success(state):
+                existing = state["health_banner"]["text"]
+                success_msg = f"✅ Loaded last used SeedVR2 preset: '{last_used_name}'"
+                if existing:
+                    state["health_banner"]["text"] = existing + "\n" + success_msg
+                else:
+                    state["health_banner"]["text"] = success_msg
+                return state
+            shared_state.value = update_success(shared_state.value)
 
     merged_defaults = preset_manager.merge_config(defaults, last_used or {})
     values = [merged_defaults[k] for k in SEEDVR2_ORDER]
@@ -53,11 +67,17 @@ def seedvr2_tab(
         shared_state, output_dir, temp_dir
     )
 
-    # GPU hint
+    # GPU hint and macOS detection
+    import platform
+    is_macos = platform.system() == "Darwin"
+
     try:
         import torch
         cuda_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        gpu_hint = f"Detected CUDA GPUs: {cuda_count}" if cuda_count else "CUDA not available"
+        if is_macos:
+            gpu_hint = "macOS detected - CUDA device selection disabled (not supported by SeedVR2 CLI)"
+        else:
+            gpu_hint = f"Detected CUDA GPUs: {cuda_count}" if cuda_count else "CUDA not available"
     except Exception:
         gpu_hint = "CUDA detection failed"
 
@@ -229,8 +249,9 @@ def seedvr2_tab(
             gr.Markdown("#### 💻 Device & Offload")
             cuda_device = gr.Textbox(
                 label="CUDA Devices (e.g., 0 or 0,1,2)",
-                value=values[23],
-                info=gpu_hint
+                value=values[23] if not is_macos else "",
+                info=gpu_hint,
+                visible=not is_macos
             )
             dit_offload_device = gr.Textbox(
                 label="DiT Offload Device",
@@ -397,6 +418,10 @@ def seedvr2_tab(
             # Warnings and info
             alpha_warn = gr.Markdown(
                 '<span class="warning-text">⚠️ PNG inputs with alpha are preserved; MP4 output drops alpha. Choose PNG output to retain alpha.</span>',
+                visible=False
+            )
+            fps_warn = gr.Markdown(
+                '<span class="warning-text">⚠️ Input video has no FPS metadata. Output will use 30 FPS default. Override FPS if needed.</span>',
                 visible=False
             )
             comparison_note = gr.HTML("")
@@ -611,6 +636,57 @@ def seedvr2_tab(
         fn=update_health_display,
         inputs=shared_state,
         outputs=health_display
+    )
+
+    # Output format change handler for alpha warnings
+    def update_alpha_warning(format_choice, input_path):
+        if format_choice == "mp4":
+            # Check if input might have alpha (PNG files or certain video formats)
+            has_potential_alpha = False
+            if input_path and input_path.strip():
+                path_lower = input_path.lower()
+                has_potential_alpha = (path_lower.endswith('.png') or
+                                     path_lower.endswith('.tiff') or
+                                     path_lower.endswith('.tif') or
+                                     'png' in path_lower or
+                                     'alpha' in path_lower)
+            return gr.Markdown.update(visible=True)
+        return gr.Markdown.update(visible=False)
+
+    output_format.change(
+        fn=update_alpha_warning,
+        inputs=[output_format, input_path],
+        outputs=alpha_warn
+    )
+
+    # Input path change should also trigger alpha warning update
+    input_path.change(
+        fn=lambda path, fmt: update_alpha_warning(fmt, path),
+        inputs=[input_path, output_format],
+        outputs=alpha_warn
+    )
+
+    # FPS metadata checking
+    def check_fps_metadata(input_path_val):
+        if not input_path_val or not input_path_val.strip():
+            return gr.Markdown.update(visible=False)
+
+        from shared.path_utils import get_media_fps, detect_input_type
+        try:
+            input_type = detect_input_type(input_path_val)
+            if input_type == "video":
+                fps = get_media_fps(input_path_val)
+                if fps is None or fps <= 0:
+                    return gr.Markdown.update(visible=True)
+        except Exception:
+            return gr.Markdown.update(visible=True)
+
+        return gr.Markdown.update(visible=False)
+
+    input_path.change(
+        fn=check_fps_metadata,
+        inputs=[input_path],
+        outputs=fps_warn
     )
 
     # Initialize comparison slider and model status

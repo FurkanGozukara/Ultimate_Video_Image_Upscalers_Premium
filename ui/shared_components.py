@@ -39,7 +39,7 @@ def preset_section(
         save_preset_btn = gr.Button("Save Preset")
         load_preset_btn = gr.Button("Load Preset")
     preset_status = gr.Markdown("")
-    safe_defaults_btn = gr.Button(f"{safe_defaults_label}")
+    safe_defaults_btn = gr.Button(f"🔄 {safe_defaults_label}", variant="secondary", size="sm")
     return (
         preset_dropdown,
         preset_name,
