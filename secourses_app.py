@@ -4,6 +4,7 @@ from typing import Any, Dict
 
 import gradio as gr
 
+from shared.models import scan_gan_models
 from shared.health import collect_health_report
 from shared.logging_utils import RunLogger
 from shared.path_utils import get_default_output_dir, get_default_temp_dir
@@ -20,17 +21,6 @@ from ui.health_tab import health_tab
 BASE_DIR = Path(__file__).parent.resolve()
 PRESET_DIR = BASE_DIR / "presets"
 APP_TITLE = "SECourses Ultimate Video and Image Upscaler Pro V1.0 – https://www.patreon.com/posts/134405610"
-
-
-def _get_gan_model_names(base_dir: Path) -> list:
-    models_dir = base_dir / "Image_Upscale_Models"
-    if not models_dir.exists():
-        return []
-    choices = []
-    for f in models_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in (".pth", ".safetensors"):
-            choices.append(f.name)
-    return sorted(choices)
 
 
 # --------------------------------------------------------------------- #

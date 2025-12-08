@@ -10,18 +10,7 @@ from shared.services.resolution_service import (
     build_resolution_callbacks, RESOLUTION_ORDER
 )
 from shared.models.seedvr2_meta import get_seedvr2_model_names
-
-
-def _get_gan_model_names(base_dir: Path) -> list:
-    """Get GAN model names from Image_Upscale_Models folder"""
-    models_dir = base_dir / "Image_Upscale_Models"
-    if not models_dir.exists():
-        return []
-    choices = []
-    for f in models_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in (".pth", ".safetensors"):
-            choices.append(f.name)
-    return sorted(choices)
+from shared.models import scan_gan_models
 
 
 def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
@@ -32,7 +21,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
 
     # Get available models from both SeedVR2 and GAN
     seedvr2_models = get_seedvr2_model_names()
-    gan_models = _get_gan_model_names(base_dir)
+    gan_models = scan_gan_models(base_dir)
     combined_models = sorted(list({*seedvr2_models, *gan_models}))
 
     # Build service callbacks
@@ -129,27 +118,27 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     label="Content Threshold",
                     minimum=1, maximum=100, step=1,
                     value=values[8],
-                    info="Sensitivity for scene change detection (higher = fewer scenes)"
+                    info="Sensitivity for scene detection. Lower (10-20) = more sensitive, detects subtle changes. Higher (30-50) = only major scene changes. Default 27 balanced."
                 )
 
                 min_scene_length = gr.Slider(
                     label="Minimum Scene Length (seconds)",
                     minimum=0.5, maximum=30.0, step=0.5,
                     value=values[9],
-                    info="Minimum duration for a valid scene"
+                    info="Shortest allowed scene duration. Prevents excessive splitting on fast-cut content. 1-3s for action, 3-10s for slower content."
                 )
 
                 scene_overlap = gr.Slider(
                     label="Scene Overlap (seconds)",
                     minimum=0.0, maximum=5.0, step=0.1,
                     value=values[10],
-                    info="Overlap between consecutive scenes to avoid artifacts"
+                    info="Overlap frames between scenes for smooth transitions. 0.5-2s recommended. Higher values smoother blending but more processing time."
                 )
 
                 fade_detection = gr.Checkbox(
                     label="Enable Fade Detection",
                     value=values[11],
-                    info="Detect and handle fade transitions"
+                    info="Detect fade-in/fade-out transitions and treat as scene boundaries. Useful for professional video editing but may over-split home videos."
                 )
 
         # Advanced Settings Tab
@@ -161,32 +150,32 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     label="Preferred Chunk Size Strategy",
                     choices=["auto", "fixed_duration", "fixed_scenes", "memory_based"],
                     value=values[12],
-                    info="How to determine optimal chunk sizes"
+                    info="'auto' uses scene detection if available. 'fixed_duration' splits by time. 'fixed_scenes' by scene count. 'memory_based' by estimated VRAM needs."
                 )
 
                 max_chunk_duration = gr.Slider(
                     label="Maximum Chunk Duration (seconds)",
                     minimum=10, maximum=600, step=10,
                     value=values[13],
-                    info="Longest allowed chunk duration"
+                    info="Cap for chunk length. Prevents single chunks from being too long. 60s = 1 minute max per chunk. 300s = 5 min. Lower if running out of VRAM."
                 )
 
                 memory_aware_chunking = gr.Checkbox(
                     label="Memory-Aware Chunking",
                     value=values[14],
-                    info="Adjust chunk sizes based on available VRAM"
+                    info="Dynamically adjust chunk sizes based on available VRAM. Recommended ON for systems with limited memory. Queries GPU memory before each chunk."
                 )
 
                 parallel_processing = gr.Checkbox(
                     label="Enable Parallel Chunk Processing",
                     value=values[15],
-                    info="Process multiple chunks simultaneously (uses more resources)"
+                    info="Process multiple chunks at once on multi-GPU systems. EXPERIMENTAL. Requires multi-GPU setup and model support. May cause memory issues."
                 )
 
                 per_chunk_cleanup = gr.Checkbox(
                     label="Clean Temp Files Per Chunk",
                     value=values[16],
-                    info="Delete intermediate files immediately after each chunk (saves disk space)"
+                    info="Delete temporary files after each chunk completes. Saves disk space during long processing. Disable to keep intermediates for debugging."
                 )
 
     # Estimation and preview
@@ -291,3 +280,39 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         return gr.Markdown.update(value=result, visible=bool(result))
 
     estimation_result.update(update_estimation_visibility)
+
+    # Wire up auto-resolution calculation events
+    auto_calc_inputs = [target_width, target_height, max_resolution, enable_max_target, auto_resolution]
+    auto_calc_outputs = [estimation_result]
+
+    def auto_calculate_on_change(*vals):
+        """Auto-calculate resolution when settings change"""
+        try:
+            target_w, target_h, max_res, enable_max, auto_res = vals
+            
+            if not auto_res:
+                return gr.Markdown.update(value="ℹ️ Auto-resolution disabled", visible=True)
+            
+            # Basic calculation
+            msg_parts = []
+            if target_w and target_h:
+                msg_parts.append(f"Target: {int(target_w)}x{int(target_h)}")
+            
+            if enable_max and max_res:
+                msg_parts.append(f"Max cap: {int(max_res)}px")
+            
+            if msg_parts:
+                result = "🎯 " + " | ".join(msg_parts)
+                return gr.Markdown.update(value=result, visible=True)
+            else:
+                return gr.Markdown.update(value="ℹ️ Set target dimensions", visible=True)
+        except Exception as e:
+            return gr.Markdown.update(value=f"⚠️ Error: {str(e)}", visible=True)
+
+    # Wire change events for auto-calculation
+    for input_comp in auto_calc_inputs:
+        input_comp.change(
+            fn=auto_calculate_on_change,
+            inputs=auto_calc_inputs,
+            outputs=auto_calc_outputs
+        )

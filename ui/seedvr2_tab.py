@@ -128,22 +128,25 @@ def seedvr2_tab(
             with gr.Accordion("🎬 Scene Split (PySceneDetect)", open=False):
                 chunk_enable = gr.Checkbox(
                     label="Enable scene-based chunking",
-                    value=values[8]
+                    value=values[8],
+                    info="Split video into scenes and process separately. Prevents VRAM overflow on long videos. Automatically detects scene changes."
                 )
                 scene_threshold = gr.Slider(
                     label="Content Threshold",
                     minimum=5, maximum=50, step=1,
-                    value=values[9]
+                    value=values[9],
+                    info="Sensitivity for scene detection. Lower = more cuts (more sensitive). Higher = fewer cuts. Default 27 works well for most content."
                 )
                 scene_min_len = gr.Slider(
                     label="Min Scene Length (sec)",
                     minimum=1, maximum=20, step=1,
-                    value=values[10]
+                    value=values[10],
+                    info="Minimum duration for a scene. Prevents too many short chunks. 2-5 seconds recommended for smooth processing."
                 )
                 resume_chunking = gr.Checkbox(
                     label="Resume from partial chunks",
                     value=values[48],
-                    info="Resume interrupted chunking from existing partial outputs"
+                    info="Resume interrupted chunking from existing partial outputs. Useful for recovering from crashes or cancellations."
                 )
                 check_resume_btn = gr.Button("🔍 Check Resume Status", size="sm")
 
@@ -151,23 +154,27 @@ def seedvr2_tab(
             output_override = gr.Textbox(
                 label="Output Override (single run)",
                 value=values[1],
-                placeholder="Leave empty for auto naming"
+                placeholder="Leave empty for auto naming",
+                info="Specify custom output path. Auto-naming creates '_upscaled' files in output folder. Supports both file paths and directories."
             )
             output_format = gr.Dropdown(
                 label="Output Format",
                 choices=["auto", "mp4", "png"],
-                value=values[2]
+                value=values[2],
+                info="'auto' chooses based on input type. 'mp4' for video output. 'png' exports frame sequence. Note: MP4 drops alpha channels."
             )
 
             # Model selection
             model_dir = gr.Textbox(
                 label="Model Directory (optional)",
-                value=values[3]
+                value=values[3],
+                info="Override default model directory. Leave empty to use default ./SeedVR2/models location."
             )
             dit_model = gr.Dropdown(
                 label="SeedVR2 Model",
                 choices=get_seedvr2_model_names(),
-                value=values[4]
+                value=values[4],
+                info="3B models are faster, 7B models higher quality. 'sharp' variants enhance edges. fp16 recommended for best speed/quality balance."
             )
             model_cache_msg = gr.Markdown("", visible=False)
 
@@ -179,28 +186,33 @@ def seedvr2_tab(
                 resolution = gr.Slider(
                     label="Target Resolution (short side)",
                     minimum=256, maximum=4096, step=16,
-                    value=values[11]
+                    value=values[11],
+                    info="Target resolution for shortest side. 1080 = 1080p, 2160 = 4K. Higher = better quality but slower. Must be multiple of 16."
                 )
                 max_resolution = gr.Slider(
                     label="Max Resolution (0 = no cap)",
                     minimum=0, maximum=8192, step=16,
-                    value=values[12]
+                    value=values[12],
+                    info="Maximum resolution cap for safety. Prevents accidental 8K+ upscaling. 0 = unlimited. Set to 4096 for 4K max, 2160 for 1080p max."
                 )
 
             # Core processing parameters
             batch_size = gr.Slider(
-                label="Batch Size (4n+1)",
-                minimum=1, maximum=201, step=4,
-                value=values[13]
+                label="Batch Size (must be 4n+1: 5, 9, 13, 17...)",
+                minimum=5, maximum=201, step=4,
+                value=values[13],
+                info="SeedVR2 requires batch size to follow 4n+1 formula (5, 9, 13, 17, 21...)"
             )
             uniform_batch_size = gr.Checkbox(
                 label="Uniform Batch Size",
-                value=values[14]
+                value=values[14],
+                info="Force all batches to same size by padding. Improves compilation efficiency but may use more memory. Recommended ON with torch.compile."
             )
             seed = gr.Number(
                 label="Seed",
                 value=values[15],
-                precision=0
+                precision=0,
+                info="Random seed for reproducible results. Same seed + settings = identical output. -1 or 0 = random. Try 42 for consistent testing."
             )
 
             # Frame controls
@@ -208,41 +220,48 @@ def seedvr2_tab(
                 skip_first_frames = gr.Number(
                     label="Skip First Frames",
                     value=values[16],
-                    precision=0
+                    precision=0,
+                    info="Skip N frames from start of video. Useful to skip intros/logos. 0 = process from beginning."
                 )
                 load_cap = gr.Number(
                     label="Load Cap (0 = all)",
                     value=values[17],
-                    precision=0
+                    precision=0,
+                    info="Process only first N frames. Useful for quick tests. 0 = process entire video. Combine with skip for specific range."
                 )
                 prepend_frames = gr.Number(
                     label="Prepend Frames",
                     value=values[18],
-                    precision=0
+                    precision=0,
+                    info="Prepend N copies of first frame for temporal stability. Helps reduce artifacts at video start. Try 2-4."
                 )
                 temporal_overlap = gr.Number(
                     label="Temporal Overlap",
                     value=values[19],
-                    precision=0
+                    precision=0,
+                    info="Overlap frames between processing batches. Improves temporal consistency. Higher = smoother but slower. Try 1-3."
                 )
 
             # Color correction
             color_correction = gr.Dropdown(
                 label="Color Correction",
                 choices=["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"],
-                value=values[20]
+                value=values[20],
+                info="Method for maintaining color accuracy. 'lab' is default and robust. 'wavelet' preserves details better. 'none' for creative control."
             )
 
             # Noise controls
             input_noise_scale = gr.Slider(
                 label="Input Noise Scale",
                 minimum=0.0, maximum=1.0, step=0.01,
-                value=values[21]
+                value=values[21],
+                info="Add noise to input before encoding. Can help with smooth gradients but may reduce sharpness. 0.0 = no noise. Try 0.0-0.1."
             )
             latent_noise_scale = gr.Slider(
                 label="Latent Noise Scale",
                 minimum=0.0, maximum=1.0, step=0.01,
-                value=values[22]
+                value=values[22],
+                info="Add noise in latent space during diffusion. Can improve detail generation. 0.0 = no noise. Typical: 0.0-0.05."
             )
 
             # Device configuration
@@ -256,17 +275,20 @@ def seedvr2_tab(
             dit_offload_device = gr.Textbox(
                 label="DiT Offload Device",
                 value=values[24],
-                placeholder="none / cpu / GPU id"
+                placeholder="none / cpu / GPU id",
+                info="Where to offload DiT model when not in use. 'cpu' saves VRAM, 'none' keeps on GPU. Required for BlockSwap."
             )
             vae_offload_device = gr.Textbox(
                 label="VAE Offload Device",
                 value=values[25],
-                placeholder="none / cpu / GPU id"
+                placeholder="none / cpu / GPU id",
+                info="Where to offload VAE model when not in use. 'cpu' saves VRAM, 'none' keeps on GPU for faster processing."
             )
             tensor_offload_device = gr.Textbox(
                 label="Tensor Offload Device",
                 value=values[26],
-                placeholder="cpu / none / GPU id"
+                placeholder="cpu / none / GPU id",
+                info="Where to offload intermediate tensors. 'cpu' is recommended for memory management between processing phases."
             )
 
             # BlockSwap configuration
@@ -274,47 +296,56 @@ def seedvr2_tab(
             blocks_to_swap = gr.Slider(
                 label="Blocks to Swap",
                 minimum=0, maximum=36, step=1,
-                value=values[27]
+                value=values[27],
+                info="Number of DiT blocks to swap to CPU. Higher values save more VRAM but slow processing. Try 20-30 for 8GB GPUs."
             )
             swap_io_components = gr.Checkbox(
                 label="Swap I/O Components",
-                value=values[28]
+                value=values[28],
+                info="Swap input/output layers to CPU. Enable for maximum VRAM savings on limited GPUs. Requires DiT offload to CPU."
             )
 
             # VAE Tiling
             gr.Markdown("#### 🧩 VAE Tiling")
             vae_encode_tiled = gr.Checkbox(
                 label="VAE Encode Tiled",
-                value=values[29]
+                value=values[29],
+                info="Process VAE encoding in tiles to reduce VRAM usage. Essential for 4K+ resolutions on GPUs with <16GB VRAM."
             )
             vae_encode_tile_size = gr.Number(
                 label="Encode Tile Size",
                 value=values[30],
-                precision=0
+                precision=0,
+                info="Size of each tile during encoding. Larger = faster but more VRAM. Try 512-1024 for 8-12GB GPUs."
             )
             vae_encode_tile_overlap = gr.Number(
                 label="Encode Tile Overlap",
                 value=values[31],
-                precision=0
+                precision=0,
+                info="Overlap between tiles to avoid seam artifacts. Must be less than tile size. Try 64-256."
             )
             vae_decode_tiled = gr.Checkbox(
                 label="VAE Decode Tiled",
-                value=values[32]
+                value=values[32],
+                info="Process VAE decoding in tiles. Recommended for high resolutions. Can use larger tiles than encoding."
             )
             vae_decode_tile_size = gr.Number(
                 label="Decode Tile Size",
                 value=values[33],
-                precision=0
+                precision=0,
+                info="Size of each tile during decoding. Can be larger than encode tiles. Try 1024-2048."
             )
             vae_decode_tile_overlap = gr.Number(
                 label="Decode Tile Overlap",
                 value=values[34],
-                precision=0
+                precision=0,
+                info="Overlap during decoding. Higher overlap = smoother seams but slower. Must be < tile size."
             )
             tile_debug = gr.Dropdown(
                 label="Tile Debug",
                 choices=["false", "encode", "decode"],
-                value=values[35]
+                value=values[35],
+                info="Debug tiling process. 'false' = normal operation. Use 'encode'/'decode' to save intermediate tiles for troubleshooting."
             )
 
             # Performance & Compile
@@ -322,55 +353,67 @@ def seedvr2_tab(
             attention_mode = gr.Dropdown(
                 label="Attention Backend",
                 choices=["sdpa", "flash_attn"],
-                value=values[36]
+                value=values[36],
+                info="flash_attn is faster but requires installation. Auto-falls back to sdpa if unavailable. sdpa is more compatible."
             )
             compile_dit = gr.Checkbox(
                 label="Compile DiT",
-                value=values[37]
+                value=values[37],
+                info="Use torch.compile for DiT model. 2-3x faster after warmup. Requires VS Build Tools on Windows. First run is slow."
             )
             compile_vae = gr.Checkbox(
                 label="Compile VAE",
-                value=values[38]
+                value=values[38],
+                info="Use torch.compile for VAE model. Significant speedup for decoding. Requires VS Build Tools on Windows."
             )
             compile_backend = gr.Dropdown(
                 label="Compile Backend",
                 choices=["inductor", "cudagraphs"],
-                value=values[39]
+                value=values[39],
+                info="'inductor' is default and most compatible. 'cudagraphs' may be faster but less flexible. Use inductor unless you know what you're doing."
             )
             compile_mode = gr.Dropdown(
                 label="Compile Mode",
                 choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
-                value=values[40]
+                value=values[40],
+                info="'default' balanced. 'reduce-overhead' faster warmup. 'max-autotune' best performance but slow compilation. Start with default."
             )
             compile_fullgraph = gr.Checkbox(
                 label="Compile Fullgraph",
-                value=values[41]
+                value=values[41],
+                info="Compile entire model graph at once. May fail on complex models. Leave unchecked unless you need maximum performance."
             )
             compile_dynamic = gr.Checkbox(
                 label="Compile Dynamic Shapes",
-                value=values[42]
+                value=values[42],
+                info="Support varying input shapes with compilation. Slower compilation but more flexible. Enable if processing mixed resolutions."
             )
             compile_dynamo_cache_size_limit = gr.Number(
                 label="Compile Dynamo Cache Size Limit",
                 value=values[43],
-                precision=0
+                precision=0,
+                info="Max cached compiled graphs. Higher = more memory but fewer recompilations. Default 64 is good for most cases."
             )
             compile_dynamo_recompile_limit = gr.Number(
                 label="Compile Dynamo Recompile Limit",
                 value=values[44],
-                precision=0
+                precision=0,
+                info="Max recompilations allowed. Prevents infinite recompile loops. Default 128 is safe. Lower if compilation is slow."
             )
             cache_dit = gr.Checkbox(
                 label="Cache DiT (single GPU only)",
-                value=values[45]
+                value=values[45],
+                info="Keep DiT model in CUDA graphs cache for maximum speed. Only works with single GPU. Significant speedup for repeated processing."
             )
             cache_vae = gr.Checkbox(
                 label="Cache VAE (single GPU only)",
-                value=values[46]
+                value=values[46],
+                info="Keep VAE model in CUDA graphs cache. Single GPU only. Faster encoding/decoding at cost of higher baseline VRAM usage."
             )
             debug = gr.Checkbox(
                 label="Debug Logging",
-                value=values[47]
+                value=values[47],
+                info="Enable detailed debug output. Useful for troubleshooting but creates verbose logs. Enable if encountering errors."
             )
 
         # Right Column: Output & Actions
@@ -380,7 +423,13 @@ def seedvr2_tab(
             # Status and progress
             health_display = gr.Markdown(value="", visible=False)
             status_box = gr.Markdown(value="Ready.")
-            progress_indicator = gr.Markdown(value="", visible=False)
+            
+            # Enhanced progress bar with ETA
+            with gr.Group():
+                progress_bar = gr.Progress()
+                progress_indicator = gr.Markdown(value="", visible=True)
+                eta_display = gr.Markdown(value="", visible=True)
+            
             log_box = gr.Textbox(
                 label="📋 Run Log",
                 value="",
@@ -412,8 +461,8 @@ def seedvr2_tab(
 
             # Last processed chunk info
             chunk_info = gr.Markdown("Last processed chunk will appear here.")
-            resume_status = gr.Markdown("", visible=False)
-            chunk_progress = gr.Markdown("", visible=False)
+            resume_status = gr.Markdown("", visible=True)
+            chunk_progress = gr.Markdown("", visible=True)
 
             # Warnings and info
             alpha_warn = gr.Markdown(
@@ -441,13 +490,11 @@ def seedvr2_tab(
                 )
                 cancel_confirm = gr.Checkbox(
                     label="Confirm cancel",
-                    value=False,
-                    visible=False
+                    value=False
                 )
                 cancel_btn = gr.Button(
                     "⏹️ Cancel",
-                    variant="stop",
-                    visible=False
+                    variant="stop"
                 )
                 preview_btn = gr.Button(
                     "👁️ First-frame Preview",

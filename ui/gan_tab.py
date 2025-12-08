@@ -112,7 +112,7 @@ def gan_tab(
                     label="GAN Model",
                     choices=service["model_scanner"](),
                     value=values[4],
-                    info="Available pre-trained GAN models"
+                    info="Pre-trained GAN models with fixed scale factors (2x, 4x, etc.). Models auto-detected from Image_Upscale_Models folder."
                 )
 
                 model_info = gr.Markdown("Select a model to see details...")
@@ -161,34 +161,34 @@ def gan_tab(
                 downscale_first = gr.Checkbox(
                     label="Downscale First if Needed",
                     value=values[6],
-                    info="For fixed-scale models, downscale input to reach target via upscale chain"
+                    info="GAN models have fixed scales (2x/4x). Enable to downscale input first, then upscale to reach arbitrary target resolutions. E.g., 4x model → 3x effective by downscaling 133% first."
                 )
 
                 auto_calculate_input = gr.Checkbox(
                     label="Auto-Calculate Input Resolution",
                     value=values[7],
-                    info="Automatically determine best input size for target resolution"
+                    info="Automatically calculate optimal input resolution based on target output and model scale. Recommended ON for best results with Resolution & Scene Split tab."
                 )
 
                 tile_size = gr.Number(
                     label="Tile Size",
                     value=values[8],
                     precision=0,
-                    info="Process image in tiles to reduce memory usage (0 = no tiling)"
+                    info="Process image in tiles to reduce VRAM usage. 0 = process whole image. Try 512 for 8GB GPUs, 1024 for 12GB+. May cause subtle seams."
                 )
 
                 overlap = gr.Number(
                     label="Tile Overlap",
                     value=values[9],
                     precision=0,
-                    info="Overlap between tiles for seamless results"
+                    info="Pixels of overlap between tiles to prevent seam artifacts. Higher = smoother but slower. Try 32-128. Must be less than tile size."
                 )
 
                 batch_size = gr.Slider(
                     label="Batch Size (Frames per Iteration)",
                     minimum=1, maximum=16, step=1,
                     value=values[15],
-                    info="Number of frames to process simultaneously (affects VRAM usage)"
+                    info="Frames processed simultaneously for videos. Higher = faster but more VRAM. 1 = safest, 4-8 = balanced, 16 = max speed if VRAM allows."
                 )
 
         # Quality & Performance
@@ -200,33 +200,33 @@ def gan_tab(
                     label="Denoising Strength",
                     minimum=0.0, maximum=1.0, step=0.05,
                     value=values[10],
-                    info="Noise reduction applied during upscaling"
+                    info="Reduce noise/compression artifacts. 0 = no denoising, 1 = maximum. Try 0.3-0.7 for compressed videos. May reduce fine detail at high values."
                 )
 
                 sharpening = gr.Slider(
                     label="Output Sharpening",
                     minimum=0.0, maximum=2.0, step=0.1,
                     value=values[11],
-                    info="Sharpening applied to final result"
+                    info="Post-process sharpening. 0 = none, 1 = moderate, 2 = strong. Over-sharpening causes halos. Try 0.5-1.0 for balanced results."
                 )
 
                 color_correction = gr.Checkbox(
                     label="Color Correction",
                     value=values[12],
-                    info="Maintain color accuracy during upscaling"
+                    info="Maintain color accuracy by matching output colors to input. Prevents color shifts. Recommended ON for most content."
                 )
 
                 gpu_acceleration = gr.Checkbox(
                     label="GPU Acceleration",
                     value=values[13],
-                    info="Use GPU for faster processing"
+                    info="Use GPU for processing. HIGHLY RECOMMENDED for speed. CPU fallback is 10-100x slower. Disable only if no compatible GPU."
                 )
 
                 gpu_device = gr.Textbox(
                     label="GPU Device",
                     value=values[14],
                     placeholder="0 or 0,1",
-                    info="Specific GPU device(s) to use"
+                    info="GPU device ID(s) to use. Single ID (0) for one GPU. Multi-GPU support model-dependent. Check CUDA availability in Health tab."
                 )
 
         # Output Settings

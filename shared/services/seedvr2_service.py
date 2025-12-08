@@ -27,6 +27,15 @@ from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
 from shared.video_comparison import create_comparison_selector
 from shared.model_manager import get_model_manager, ModelType
+from shared.error_handling import (
+    validate_input_path,
+    validate_cuda_device as validate_cuda_spec,
+    validate_batch_size,
+    check_ffmpeg_available,
+    check_disk_space,
+    safe_execute,
+    logger as error_logger,
+)
 
 # Constants --------------------------------------------------------------------
 SEEDVR2_VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
@@ -34,6 +43,15 @@ SEEDVR2_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 
 
 # Defaults and ordering --------------------------------------------------------
+def _get_default_attention_mode() -> str:
+    """Get default attention mode with automatic fallback from flash_attn to sdpa."""
+    try:
+        import flash_attn  # noqa: F401
+        return "flash_attn"
+    except ImportError:
+        return "sdpa"
+
+
 def seedvr2_defaults() -> Dict[str, Any]:
     """Get default SeedVR2 settings aligned with CLI defaults."""
     try:
@@ -79,7 +97,7 @@ def seedvr2_defaults() -> Dict[str, Any]:
         "vae_decode_tile_size": 1024,
         "vae_decode_tile_overlap": 128,
         "tile_debug": "false",
-        "attention_mode": "flash_attn",
+        "attention_mode": _get_default_attention_mode(),
         "compile_dit": False,
         "compile_vae": False,
         "compile_backend": "inductor",
@@ -153,10 +171,12 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) -
     """Apply SeedVR2-specific validation rules."""
     cfg = cfg.copy()
 
-    # Batch size must be 4n+1
+    # Batch size must be 4n+1 using centralized validation
     bs = int(cfg.get("batch_size", defaults["batch_size"]))
-    if bs % 4 != 1:
-        cfg["batch_size"] = max(1, (bs // 4) * 4 + 1)
+    is_valid, error_msg = validate_batch_size(bs, must_be_4n_plus_1=True)
+    if not is_valid:
+        error_logger.warning(f"Invalid batch size {bs}, correcting: {error_msg}")
+        cfg["batch_size"] = max(5, (bs // 4) * 4 + 1)
 
     # VAE tiling constraints
     if cfg.get("vae_encode_tiled"):
@@ -189,23 +209,9 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) -
 
 # Helper functions -------------------------------------------------------------
 def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
-    """Validate CUDA device specification."""
-    try:
-        import torch
-        
-        if not cuda_spec:
-            return None
-        if not torch.cuda.is_available():
-            return "CUDA is not available on this system, but CUDA devices were specified."
-        
-        devices = [d.strip() for d in str(cuda_spec).split(",") if d.strip() != ""]
-        count = torch.cuda.device_count()
-        invalid = [d for d in devices if (not d.isdigit()) or int(d) >= count]
-        if invalid:
-            return f"Invalid CUDA device id(s): {', '.join(invalid)}. Available: 0-{count-1}"
-    except Exception as exc:
-        return f"CUDA validation failed: {exc}"
-    return None
+    """Validate CUDA device specification using centralized error handling."""
+    is_valid, error_msg = validate_cuda_spec(cuda_spec)
+    return error_msg if not is_valid else None
 
 
 def _expand_cuda_spec(cuda_spec: str) -> str:
@@ -221,17 +227,23 @@ def _expand_cuda_spec(cuda_spec: str) -> str:
 
 
 def _ffmpeg_available() -> bool:
-    """Check if ffmpeg is available in PATH."""
-    return shutil.which("ffmpeg") is not None
+    """Check if ffmpeg is available in PATH using centralized error handling."""
+    is_available, _ = check_ffmpeg_available()
+    return is_available
 
 
 def _resolve_input_path(file_upload: Optional[str], manual_path: str, batch_enable: bool, batch_input: str) -> str:
-    """Resolve the input path from various sources."""
-    if batch_enable and batch_input:
-        return batch_input
-    if file_upload:
-        return str(file_upload)
-    return manual_path
+    """
+    Resolve the input path from various sources with priority order:
+    1. Batch input (if batch enabled)
+    2. File upload (highest priority for single files)
+    3. Manual path entry (fallback)
+    """
+    if batch_enable and batch_input and batch_input.strip():
+        return batch_input.strip()
+    if file_upload and str(file_upload).strip():
+        return str(file_upload).strip()
+    return manual_path.strip() if manual_path else ""
 
 
 def _list_media_files(folder: str, video_exts: set, image_exts: set) -> List[str]:
@@ -737,6 +749,34 @@ def build_seedvr2_callbacks(
                     state
                 )
                 return
+
+            # Check disk space (require at least 5GB free)
+            output_path = Path(global_settings.get("output_dir", output_dir))
+            has_space, space_warning = check_disk_space(output_path, required_mb=5000)
+            if not has_space:
+                yield (
+                    space_warning or "❌ Insufficient disk space",
+                    f"Free up disk space before processing. Recommended: 5GB+ free",
+                    None,
+                    None,
+                    "No chunks",
+                    gr.HTML.update(value="No comparison"),
+                    gr.ImageSlider.update(value=None),
+                    state
+                )
+                return
+            elif space_warning:
+                # Low space but might work - show warning
+                yield (
+                    f"⚠️ {space_warning}",
+                    "Low disk space detected. Processing may fail if output is large.",
+                    None,
+                    None,
+                    "Disk space warning",
+                    gr.HTML.update(value=""),
+                    gr.ImageSlider.update(value=None),
+                    state
+                )
 
             # Setup processing parameters
             face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))

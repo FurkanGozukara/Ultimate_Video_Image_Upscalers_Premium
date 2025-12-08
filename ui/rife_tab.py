@@ -79,42 +79,58 @@ def rife_tab(
                 rife_enabled = gr.Checkbox(
                     label="Enable Frame Interpolation",
                     value=values[1],
-                    info="Use RIFE to generate intermediate frames"
+                    info="Use RIFE AI model to generate smooth intermediate frames. Creates slow-motion or higher FPS videos. Essential for fluid motion."
                 )
 
+                def _discover_rife_models():
+                    """Dynamically discover available RIFE models."""
+                    # Default fallback models
+                    default_models = ["rife-v4.6", "rife-v4.13", "rife-v4.14", "rife-v4.15", "rife-v4.16", "rife-v4.17", "rife-anime"]
+                    
+                    # Try to scan train_log for actual models
+                    rife_dir = base_dir / "RIFE" / "train_log"
+                    discovered_models = []
+                    if rife_dir.exists():
+                        for item in rife_dir.iterdir():
+                            if item.is_dir() and not item.name.startswith("_"):
+                                discovered_models.append(item.name)
+                    
+                    # Return discovered models if found, else default list
+                    return discovered_models if discovered_models else default_models
+                
                 rife_model = gr.Dropdown(
                     label="RIFE Model",
-                    choices=["rife-v4.6", "rife-v4.13", "rife-v4.14", "rife-v4.15", "rife-v4.16", "rife-anime"],
+                    choices=_discover_rife_models(),
                     value=values[5],
-                    info="Newer models are slower but higher quality"
+                    info="RIFE model version. v4.6 = fastest. v4.15+ = best quality. 'anime' optimized for animation. Newer versions slower but smoother."
                 )
 
                 target_fps = gr.Number(
                     label="Target FPS",
                     value=values[7],
                     precision=1,
-                    info="Desired output frame rate (0 = auto)"
+                    info="Desired output frame rate. 0 = use multiplier instead. 60 = smooth 60fps. 120 = ultra-smooth. Higher FPS = larger file size."
                 )
 
                 fps_multiplier = gr.Dropdown(
                     label="FPS Multiplier",
                     choices=["x1", "x2", "x4", "x8"],
                     value=values[6],
-                    info="How many times to multiply original FPS"
+                    info="Multiply original FPS. x2 = double smoothness (30→60fps). x4 = 4x smoother. x8 = extreme slow-mo. Higher = more processing time."
                 )
 
                 rife_precision = gr.Dropdown(
                     label="Precision",
                     choices=["fp16", "fp32"],
                     value=values[10],
-                    info="fp16 is faster, fp32 is more accurate"
+                    info="fp16 = half precision, 2x faster, uses less VRAM, minimal quality loss. fp32 = full precision, slower, more accurate. Use fp16 unless quality-critical."
                 )
 
                 rife_gpu = gr.Textbox(
                     label="GPU Device",
                     value=values[24],
                     placeholder="0 or 0,1",
-                    info="GPU(s) to use for RIFE processing"
+                    info="GPU to use for RIFE interpolation. Single GPU recommended. Multi-GPU support limited. Leave empty for default GPU (0)."
                 )
 
         # Video Editing
