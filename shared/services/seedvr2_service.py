@@ -167,9 +167,24 @@ SEEDVR2_ORDER: List[str] = [
 
 
 # Guardrails -------------------------------------------------------------------
-def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply SeedVR2-specific validation rules."""
+def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Apply SeedVR2-specific validation rules and apply resolution tab settings if available."""
     cfg = cfg.copy()
+
+    # Apply resolution tab settings from shared state if available
+    if state:
+        seed_controls = state.get("seed_controls", {})
+        
+        # Only apply if values are set in resolution tab
+        if "resolution_val" in seed_controls and seed_controls["resolution_val"]:
+            cfg["resolution"] = int(seed_controls["resolution_val"])
+        if "max_resolution_val" in seed_controls and seed_controls["max_resolution_val"]:
+            cfg["max_resolution"] = int(seed_controls["max_resolution_val"])
+        if "chunk_size_sec" in seed_controls and seed_controls["chunk_size_sec"] > 0:
+            cfg["chunk_enable"] = True
+            cfg["scene_threshold"] = 27.0  # Use scene detection if chunking enabled
+        if "chunk_overlap_sec" in seed_controls:
+            cfg["chunk_overlap"] = float(seed_controls["chunk_overlap_sec"])
 
     # Batch size must be 4n+1 using centralized validation
     bs = int(cfg.get("batch_size", defaults["batch_size"]))
@@ -281,7 +296,7 @@ def _apply_preset_to_values(
     if current:
         base.update(current)
     merged = preset_manager.merge_config(base, preset)
-    merged = _enforce_seedvr2_guardrails(merged, defaults)
+    merged = _enforce_seedvr2_guardrails(merged, defaults, state=None)  # No state during preset load
     return [merged[key] for key in SEEDVR2_ORDER]
 
 
@@ -468,7 +483,7 @@ def build_seedvr2_callbacks(
 
         try:
             payload = _seedvr2_dict_from_args(list(args))
-            validated_payload = _enforce_seedvr2_guardrails(payload, defaults)
+            validated_payload = _enforce_seedvr2_guardrails(payload, defaults, state=None)
 
             preset_manager.save_preset_safe("seedvr2", model_name, preset_name.strip(), validated_payload)
             dropdown = refresh_presets(model_name, select_name=preset_name.strip())
@@ -488,7 +503,7 @@ def build_seedvr2_callbacks(
             if preset:
                 preset_manager.set_last_used("seedvr2", model_name, preset_name)
                 preset = preset_manager.validate_preset_constraints(preset, "seedvr2", model_name)
-                preset = _enforce_seedvr2_guardrails(preset, defaults)
+                preset = _enforce_seedvr2_guardrails(preset, defaults, state=None)
 
             current_map = dict(zip(SEEDVR2_ORDER, current_values))
             values = _apply_preset_to_values(preset or {}, defaults, preset_manager, current=current_map)
@@ -687,8 +702,8 @@ def build_seedvr2_callbacks(
             state
         )
 
-    def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False, state: Dict[str, Any] = None):
-        """Main processing action with streaming support."""
+    def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False, state: Dict[str, Any] = None, progress=None):
+        """Main processing action with streaming support and gr.Progress integration."""
         try:
             state = state or {"seed_controls": {}, "operation_status": "ready"}
             state["operation_status"] = "running"
@@ -696,7 +711,7 @@ def build_seedvr2_callbacks(
 
             # Parse settings
             settings = dict(zip(SEEDVR2_ORDER, list(args)))
-            settings = _enforce_seedvr2_guardrails(settings, defaults)
+            settings = _enforce_seedvr2_guardrails(settings, defaults, state=state)  # Pass state for resolution tab integration
 
             # Validate inputs
             input_path = _resolve_input_path(
@@ -717,6 +732,7 @@ def build_seedvr2_callbacks(
                     "No chunks",
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
+                    gr.Gallery.update(visible=False),
                     state
                 )
                 return
@@ -953,22 +969,33 @@ def build_seedvr2_callbacks(
                     progress_callback=batch_progress_callback
                 )
 
-                # Summarize results
+                # Summarize results and collect output paths for gallery
                 completed = sum(1 for r in results if r.status == "completed")
                 failed = sum(1 for r in results if r.status == "failed")
+                
+                # Collect successful outputs for gallery
+                batch_outputs = []
+                for job in jobs:
+                    if job.status == "completed" and job.output_path and Path(job.output_path).exists():
+                        batch_outputs.append(str(job.output_path))
 
                 summary_msg = f"Batch complete: {completed}/{len(jobs)} succeeded"
                 if failed > 0:
                     summary_msg += f", {failed} failed"
 
+                # Update gr.Progress to 100%
+                if progress:
+                    progress(1.0, desc="Batch complete!")
+
                 yield (
                     f"✅ {summary_msg}",
-                    f"Batch processing finished. Check output folder for results.",
+                    f"Batch processing finished. {len(batch_outputs)} files saved to output folder.",
                     None,
                     None,
                     f"Batch: {completed} completed, {failed} failed",
-                    gr.HTML.update(value="Batch processing complete. Files saved to output directory."),
+                    gr.HTML.update(value=f"Batch processing complete. {len(batch_outputs)} files saved."),
                     gr.ImageSlider.update(value=None),
+                    gr.Gallery.update(value=batch_outputs[:50], visible=True) if batch_outputs else gr.Gallery.update(visible=False),  # Show first 50
                     state
                 )
                 return
@@ -1032,11 +1059,28 @@ def build_seedvr2_callbacks(
             proc_thread = threading.Thread(target=processing_thread, daemon=True)
             proc_thread.start()
 
-            # Stream progress updates
+            # Stream progress updates with gr.Progress integration
+            chunk_count = 0
+            total_chunks_estimate = 1
+            
             while proc_thread.is_alive() or not progress_queue.empty():
                 try:
                     update_type, data = progress_queue.get(timeout=0.1)
                     if update_type == "progress":
+                        # Update gr.Progress if available
+                        if progress and "chunk" in data.lower():
+                            # Try to extract chunk progress
+                            import re
+                            match = re.search(r'chunk[s]?\s+(\d+)/(\d+)', data, re.IGNORECASE)
+                            if match:
+                                chunk_count = int(match.group(1))
+                                total_chunks_estimate = int(match.group(2))
+                                progress(chunk_count / total_chunks_estimate, desc=f"Processing chunk {chunk_count}/{total_chunks_estimate}")
+                            else:
+                                progress(0, desc=data[:100])  # Update with message
+                        elif progress:
+                            progress(0, desc=data[:100] if data else "Processing...")
+                        
                         yield (
                             f"⚙️ Processing: {data}",
                             f"Progress: {data}",
@@ -1079,13 +1123,30 @@ def build_seedvr2_callbacks(
                 )
                 return
 
-            # Create comparison
-            comparison_mode = seed_controls.get("comparison_mode_val", "slider")
-            comparison_html, image_slider_update = create_comparison_selector(
-                input_path=settings.get("input_path"),
-                output_path=output_video or output_image,
-                comparison_mode=comparison_mode
-            )
+            # Create comparison based on mode from Output tab
+            comparison_mode = seed_controls.get("comparison_mode_val", "native")
+            
+            if comparison_mode == "native":
+                # Use gradio's native ImageSlider for images
+                if output_image and Path(output_image).exists():
+                    comparison_html = ""
+                    image_slider_update = gr.ImageSlider.update(
+                        value=(settings.get("input_path"), output_image),
+                        visible=True
+                    )
+                else:
+                    comparison_html, image_slider_update = create_comparison_selector(
+                        input_path=settings.get("input_path"),
+                        output_path=output_video or output_image,
+                        comparison_mode="slider"
+                    )
+            else:
+                # Use custom HTML comparisons for other modes
+                comparison_html, image_slider_update = create_comparison_selector(
+                    input_path=settings.get("input_path"),
+                    output_path=output_video or output_image,
+                    comparison_mode=comparison_mode
+                )
 
             # If no HTML comparison, use ImageSlider for images
             if not comparison_html and output_image and not output_video:
@@ -1105,6 +1166,7 @@ def build_seedvr2_callbacks(
                 chunk_info,
                 comparison_html,
                 image_slider_update,
+                gr.Gallery.update(visible=False),  # Hide gallery for single file
                 state
             )
 

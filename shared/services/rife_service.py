@@ -23,7 +23,7 @@ from shared.logging_utils import RunLogger
 
 # Defaults and ordering --------------------------------------------------------
 def rife_defaults() -> Dict[str, Any]:
-    """Get default RIFE settings."""
+    """Get default RIFE settings aligned with RIFE CLI."""
     try:
         import torch
         cuda_default = "0" if torch.cuda.is_available() else ""
@@ -32,16 +32,16 @@ def rife_defaults() -> Dict[str, Any]:
     
     return {
         "input_path": "",
-        "rife_enabled": False,
+        "rife_enabled": True,
         "output_override": "",
-        "output_format": "auto",
+        "output_format": "mp4",
         "model_dir": "",
-        "model": "rife",
-        "fps_multiplier": 2.0,
-        "fps_override": 0.0,
+        "rife_model": "rife-v4.6",
+        "target_fps": 0,
+        "fps_multiplier": "x2",
         "scale": 1.0,
         "uhd_mode": False,
-        "fp16_mode": False,
+        "rife_precision": "fp16",
         "png_output": False,
         "no_audio": False,
         "show_ffmpeg": False,
@@ -55,7 +55,7 @@ def rife_defaults() -> Dict[str, Any]:
         "batch_output_path": "",
         "skip_first_frames": 0,
         "load_cap": 0,
-        "cuda_device": cuda_default,
+        "gpu_device": cuda_default,
         # Video editing parameters
         "edit_mode": "none",
         "start_time": "",
@@ -64,6 +64,8 @@ def rife_defaults() -> Dict[str, Any]:
         "video_codec": "libx264",
         "output_quality": 23,
         "concat_videos": "",
+        "reverse": False,
+        "loop_count": 1,
     }
 
 

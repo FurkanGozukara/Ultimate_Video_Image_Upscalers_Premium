@@ -178,8 +178,11 @@ def seedvr2_tab(
             )
             model_cache_msg = gr.Markdown("", visible=False)
 
-            # Model loading status
+            # Model loading status with periodic updates
             model_status = gr.Markdown("### 🔧 Model Status\nNo models loaded", elem_classes="model-status")
+            
+            # Timer for periodic model status updates
+            model_status_timer = gr.Timer(value=2.0, active=False)  # Update every 2 seconds when active
 
             # Resolution controls with auto-resolution
             with gr.Row():
@@ -424,11 +427,9 @@ def seedvr2_tab(
             health_display = gr.Markdown(value="", visible=False)
             status_box = gr.Markdown(value="Ready.")
             
-            # Enhanced progress bar with ETA
-            with gr.Group():
-                progress_bar = gr.Progress()
-                progress_indicator = gr.Markdown(value="", visible=True)
-                eta_display = gr.Markdown(value="", visible=True)
+            # Progress tracking
+            progress_indicator = gr.Markdown(value="", visible=True)
+            eta_display = gr.Markdown(value="", visible=True)
             
             log_box = gr.Textbox(
                 label="📋 Run Log",
@@ -446,6 +447,17 @@ def seedvr2_tab(
             output_image = gr.Image(
                 label="🖼️ Upscaled Image / Preview",
                 interactive=False,
+                show_download_button=True
+            )
+            
+            # Gallery for batch results
+            batch_gallery = gr.Gallery(
+                label="📦 Batch Results",
+                visible=False,
+                columns=3,
+                rows=2,
+                height="auto",
+                object_fit="contain",
                 show_download_button=True
             )
 
@@ -605,8 +617,24 @@ def seedvr2_tab(
             return gr.Markdown.update(value="### 🔧 Model Status\nStatus unavailable")
 
     # Add a refresh button for model status
-    refresh_model_status_btn = gr.Button("🔄 Refresh Model Status", size="sm", variant="secondary")
+    with gr.Row():
+        refresh_model_status_btn = gr.Button("🔄 Refresh Model Status", size="sm", variant="secondary")
+        toggle_auto_refresh = gr.Checkbox(label="Auto-refresh (2s)", value=False, scale=0)
+    
     refresh_model_status_btn.click(
+        fn=update_model_status,
+        outputs=model_status
+    )
+    
+    # Toggle timer on/off
+    toggle_auto_refresh.change(
+        fn=lambda enabled: gr.Timer(value=2.0, active=enabled),
+        inputs=toggle_auto_refresh,
+        outputs=model_status_timer
+    )
+    
+    # Timer tick updates model status
+    model_status_timer.tick(
         fn=update_model_status,
         outputs=model_status
     )
@@ -618,22 +646,22 @@ def seedvr2_tab(
         outputs=resume_status
     )
 
-    # Main action buttons
+    # Main action buttons with gr.Progress
     upscale_btn.click(
-        fn=lambda *args: service["run_action"](*args[:-1], preview_only=False, state=args[-1]),
+        fn=lambda *args, progress=gr.Progress(): service["run_action"](*args[:-1], preview_only=False, state=args[-1], progress=progress),
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
-            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, shared_state
+            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, batch_gallery, shared_state
         ]
     )
 
     preview_btn.click(
-        fn=lambda *args: service["run_action"](*args[:-1], preview_only=True, state=args[-1]),
+        fn=lambda *args, progress=gr.Progress(): service["run_action"](*args[:-1], preview_only=True, state=args[-1], progress=progress),
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
-            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, shared_state
+            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, batch_gallery, shared_state
         ]
     )
 

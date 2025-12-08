@@ -14,37 +14,127 @@ from .path_utils import (
     emit_metadata,
 )
 
+# Try to import PySceneDetect (optional dependency)
+try:
+    import scenedetect
+    PYSCENEDETECT_AVAILABLE = True
+except ImportError:
+    PYSCENEDETECT_AVAILABLE = False
+
 
 def _has_scenedetect() -> bool:
+    """Check if PySceneDetect is installed"""
     try:
         import scenedetect  # noqa: F401
         return True
+    except ImportError:
+        return False
     except Exception:
         return False
 
 
-def detect_scenes(video_path: str, threshold: float = 27.0, min_scene_len: float = 2.0) -> List[Tuple[float, float]]:
+def detect_scenes(
+    video_path: str, 
+    threshold: float = 27.0, 
+    min_scene_len: float = 2.0,
+    fade_detection: bool = False,
+    on_progress: Optional[Callable[[str], None]] = None
+) -> List[Tuple[float, float]]:
     """
-    Detect scenes using PySceneDetect ContentDetector.
-    Returns list of (start_sec, end_sec).
+    Detect scenes using PySceneDetect with proper API usage.
+    
+    Args:
+        video_path: Path to video file
+        threshold: Content threshold for scene detection (lower = more sensitive)
+        min_scene_len: Minimum scene length in seconds
+        fade_detection: Enable fade in/out detection
+        on_progress: Optional callback for progress updates
+        
+    Returns:
+        List of (start_seconds, end_seconds) tuples for each scene
     """
     if not _has_scenedetect():
+        if on_progress:
+            on_progress("⚠️ PySceneDetect not installed, using fallback chunking\n")
         return []
 
-    from scenedetect import open_video
-    from scenedetect.detectors import ContentDetector
+    try:
+        from scenedetect import VideoManager, SceneManager
+        from scenedetect.detectors import ContentDetector, ThresholdDetector
+        from scenedetect.video_splitter import split_video_ffmpeg
+        
+        if on_progress:
+            on_progress(f"Detecting scenes: threshold={threshold}, min_len={min_scene_len}s\n")
 
-    video = open_video(video_path)
-    scenes = video.detect_scenes(ContentDetector(threshold=threshold, min_scene_len=int(min_scene_len * video.base_fps)))
-    ranges = []
-    for start, end in scenes:
-        ranges.append((start.get_seconds(), end.get_seconds()))
-    return ranges
+        # Create video manager
+        video_manager = VideoManager([video_path])
+        scene_manager = SceneManager()
+        
+        # Add content detector with proper threshold
+        scene_manager.add_detector(
+            ContentDetector(
+                threshold=threshold,
+                min_scene_len=int(min_scene_len * video_manager.get_framerate())
+            )
+        )
+        
+        # Optionally add fade detector
+        if fade_detection:
+            scene_manager.add_detector(
+                ThresholdDetector(
+                    threshold=12,  # Default fade threshold
+                    min_scene_len=int(min_scene_len * video_manager.get_framerate()),
+                    fade_bias=0.0
+                )
+            )
+        
+        # Start video manager
+        video_manager.set_downscale_factor()
+        video_manager.start()
+        
+        # Detect scenes
+        scene_manager.detect_scenes(frame_source=video_manager, show_progress=False)
+        
+        # Get scene list
+        scene_list = scene_manager.get_scene_list()
+        
+        # Release video manager
+        video_manager.release()
+        
+        # Convert to (start_sec, end_sec) tuples
+        ranges = []
+        for scene in scene_list:
+            start_frame, end_frame = scene
+            start_sec = start_frame.get_seconds()
+            end_sec = end_frame.get_seconds()
+            ranges.append((start_sec, end_sec))
+        
+        if on_progress:
+            on_progress(f"✅ Detected {len(ranges)} scenes\n")
+        
+        return ranges
+        
+    except ImportError as e:
+        if on_progress:
+            on_progress(f"⚠️ PySceneDetect import error: {e}, using fallback\n")
+        return []
+    except Exception as e:
+        if on_progress:
+            on_progress(f"⚠️ Scene detection error: {e}, using fallback\n")
+        return []
 
 
 def fallback_scenes(video_path: str, chunk_seconds: float = 60.0, overlap_seconds: float = 0.0) -> List[Tuple[float, float]]:
     """
     Fallback to fixed-length segments using ffprobe duration with optional overlap.
+    
+    Args:
+        video_path: Path to video file
+        chunk_seconds: Length of each chunk in seconds
+        overlap_seconds: Overlap between chunks in seconds
+        
+    Returns:
+        List of (start_sec, end_sec) tuples
     """
     try:
         proc = subprocess.run(
@@ -55,16 +145,32 @@ def fallback_scenes(video_path: str, chunk_seconds: float = 60.0, overlap_second
         )
         duration = float(proc.stdout.strip())
     except Exception:
-        duration = chunk_seconds
+        # If ffprobe fails, use default chunk size
+        duration = chunk_seconds * 2  # At least 2 chunks as fallback
+    
     scenes = []
     start = 0.0
+    
+    # Calculate step size (accounting for overlap)
     step = max(1.0, chunk_seconds - overlap_seconds) if chunk_seconds > 0 else chunk_seconds
-    if step <= 0:
+    if step <= 0 or overlap_seconds >= chunk_seconds:
+        # Invalid overlap, use no overlap
         step = chunk_seconds
+        overlap_seconds = 0.0
+    
     while start < duration:
         end = min(start + chunk_seconds, duration)
         scenes.append((start, end))
-        start = end - overlap_seconds if overlap_seconds > 0 else end
+        
+        # Move start forward by step (chunk_size - overlap)
+        start += step
+        
+        # Avoid tiny last chunk
+        if start < duration and (duration - start) < (chunk_seconds * 0.3):
+            # If remaining duration is less than 30% of chunk size, extend last chunk
+            scenes[-1] = (scenes[-1][0], duration)
+            break
+    
     return scenes
 
 

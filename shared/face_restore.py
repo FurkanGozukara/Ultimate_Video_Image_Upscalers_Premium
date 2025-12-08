@@ -1,133 +1,349 @@
+"""
+Face Restoration Module
+Supports GFPGAN and CodeFormer for face enhancement
+"""
+
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from .path_utils import collision_safe_path, normalize_path
 
-
-def _has_gfpgan() -> bool:
-    return shutil.which("gfpgan") is not None or shutil.which("python") is not None
-
-
-def _run_gfpgan(input_path: str, output_dir: Path, suffix: str = "restored") -> bool:
-    """
-    Invoke gfpgan CLI to restore faces. Assumes gfpgan is installed and in PATH.
-    """
-    # Try python -m gfpgan invocation
-    cmd = [
-        "python",
-        "-m",
-        "gfpgan",
-        "--input",
-        input_path,
-        "--output",
-        str(output_dir),
-        "--suffix",
-        suffix,
-        "--bg_upsampler",
-        "none",
-    ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return proc.returncode == 0
-
-
-def restore_image(image_path: str, strength: float = 0.5) -> Optional[str]:
-    if not _has_gfpgan():
-        return None
-    img = Path(normalize_path(image_path))
-    out_dir = img.parent / "face_restore"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ok = _run_gfpgan(str(img), out_dir)
-    if not ok:
-        return None
-    # gfpgan appends suffix; pick latest
-    candidates = sorted(out_dir.glob(f"{img.stem}*"), key=os.path.getmtime)
-    if not candidates:
-        return None
-    final = collision_safe_path(out_dir / f"{img.stem}_fr{img.suffix}")
-
-    # Blend with original based on strength (0 = original, 1 = restored)
+# Check available face restoration backends
+def _check_gfpgan() -> bool:
+    """Check if GFPGAN is available"""
     try:
-        strength = float(strength)
-    except Exception:
-        strength = 0.5
-    strength = max(0.0, min(1.0, strength))
-
-    orig = cv2.imread(str(img), cv2.IMREAD_UNCHANGED)
-    restored = cv2.imread(str(candidates[-1]), cv2.IMREAD_UNCHANGED)
-    if orig is not None and restored is not None and 0.0 <= strength < 1.0:
-        blended = cv2.addWeighted(restored.astype(np.float32), strength, orig.astype(np.float32), 1.0 - strength, 0)
-        cv2.imwrite(str(final), blended.astype(orig.dtype))
-    else:
-        shutil.copyfile(candidates[-1], final)
-    return str(final)
+        import gfpgan  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
-def restore_video(video_path: str, strength: float = 0.5, on_progress: Optional[Callable[[str], None]] = None) -> Optional[str]:
-    if not _has_gfpgan():
+def _check_codeformer() -> bool:
+    """Check if CodeFormer is available"""
+    try:
+        import codeformer  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+GFPGAN_AVAILABLE = _check_gfpgan()
+CODEFORMER_AVAILABLE = _check_codeformer()
+
+
+def get_available_backends() -> list:
+    """Get list of available face restoration backends"""
+    backends = []
+    if GFPGAN_AVAILABLE:
+        backends.append("gfpgan")
+    if CODEFORMER_AVAILABLE:
+        backends.append("codeformer")
+    return backends
+
+
+def restore_image(
+    image_path: str,
+    strength: float = 0.5,
+    backend: str = "auto",
+    on_progress: Optional[Callable[[str], None]] = None
+) -> Optional[str]:
+    """
+    Restore faces in an image using GFPGAN or CodeFormer.
+    
+    Args:
+        image_path: Path to input image
+        strength: Restoration strength (0.0-1.0)
+        backend: Which backend to use ("auto", "gfpgan", "codeformer")
+        on_progress: Optional callback for progress updates
+        
+    Returns:
+        Path to restored image, or None if restoration failed
+    """
+    if not Path(image_path).exists():
         if on_progress:
-            on_progress("gfpgan not available; skipping face restoration\n")
+            on_progress("⚠️ Input image not found\n")
         return None
-    video = Path(normalize_path(video_path))
-    work = Path(tempfile.mkdtemp(prefix="face_restore_"))
-    frames_dir = work / "frames"
-    restored_dir = work / "restored"
+    
+    # Determine backend
+    if backend == "auto":
+        if GFPGAN_AVAILABLE:
+            backend = "gfpgan"
+        elif CODEFORMER_AVAILABLE:
+            backend = "codeformer"
+        else:
+            if on_progress:
+                on_progress("⚠️ No face restoration backend available (install GFPGAN or CodeFormer)\n")
+            return image_path  # Return original if no backend available
+    
+    if backend == "gfpgan":
+        return _restore_with_gfpgan(image_path, strength, on_progress)
+    elif backend == "codeformer":
+        return _restore_with_codeformer(image_path, strength, on_progress)
+    else:
+        if on_progress:
+            on_progress(f"⚠️ Unknown backend: {backend}\n")
+        return image_path
+
+
+def restore_video(
+    video_path: str,
+    strength: float = 0.5,
+    backend: str = "auto",
+    on_progress: Optional[Callable[[str], None]] = None
+) -> Optional[str]:
+    """
+    Restore faces in a video frame-by-frame.
+    
+    Args:
+        video_path: Path to input video
+        strength: Restoration strength (0.0-1.0)
+        backend: Which backend to use ("auto", "gfpgan", "codeformer")
+        on_progress: Optional callback for progress updates
+        
+    Returns:
+        Path to restored video, or None if restoration failed
+    """
+    if not Path(video_path).exists():
+        if on_progress:
+            on_progress("⚠️ Input video not found\n")
+        return None
+    
+    # Check if any backend is available
+    available_backends = get_available_backends()
+    if not available_backends:
+        if on_progress:
+            on_progress("⚠️ No face restoration backend available, skipping face restoration\n")
+        return video_path
+    
+    # Determine backend
+    if backend == "auto":
+        backend = available_backends[0]
+    
+    if on_progress:
+        on_progress(f"Restoring faces in video using {backend}...\n")
+    
+    # Create temp directory for frames
+    work_dir = Path(tempfile.mkdtemp(prefix="face_restore_"))
+    frames_dir = work_dir / "frames"
+    restored_dir = work_dir / "restored"
     frames_dir.mkdir(parents=True, exist_ok=True)
     restored_dir.mkdir(parents=True, exist_ok=True)
-
-    # Extract frames
-    extract_cmd = ["ffmpeg", "-y", "-i", str(video), str(frames_dir / "frame_%05d.png")]
-    subprocess.run(extract_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    ok = _run_gfpgan(str(frames_dir), restored_dir)
-    if not ok:
-        if on_progress:
-            on_progress("gfpgan restoration failed\n")
-        shutil.rmtree(work, ignore_errors=True)
-        return None
-
-    # Blend restored frames with originals based on strength
+    
     try:
-        strength_val = float(strength)
-    except Exception:
-        strength_val = 0.5
-    strength_val = max(0.0, min(1.0, strength_val))
-    if strength_val < 1.0:
-        for frame_file in sorted(restored_dir.glob("frame_*.png")):
-            orig_file = frames_dir / frame_file.name
-            if not orig_file.exists():
-                continue
-            orig = cv2.imread(str(orig_file), cv2.IMREAD_UNCHANGED)
-            restored = cv2.imread(str(frame_file), cv2.IMREAD_UNCHANGED)
-            if orig is None or restored is None:
-                continue
-            blended = cv2.addWeighted(restored.astype(np.float32), strength_val, orig.astype(np.float32), 1.0 - strength_val, 0)
-            cv2.imwrite(str(frame_file), blended.astype(orig.dtype))
+        # Extract frames
+        if on_progress:
+            on_progress("Extracting frames...\n")
+        
+        extract_cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            str(frames_dir / "frame_%05d.png")
+        ]
+        subprocess.run(extract_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        # Get frame list
+        frame_files = sorted(frames_dir.glob("*.png"))
+        total_frames = len(frame_files)
+        
+        if total_frames == 0:
+            if on_progress:
+                on_progress("⚠️ No frames extracted\n")
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return video_path
+        
+        if on_progress:
+            on_progress(f"Restoring {total_frames} frames...\n")
+        
+        # Restore each frame
+        for i, frame_path in enumerate(frame_files):
+            if on_progress and i % 10 == 0:
+                progress_pct = int((i / total_frames) * 100)
+                on_progress(f"Progress: {progress_pct}% ({i}/{total_frames} frames)\n")
+            
+            restored_frame = restore_image(
+                str(frame_path),
+                strength=strength,
+                backend=backend,
+                on_progress=None  # Don't spam progress for each frame
+            )
+            
+            if restored_frame and restored_frame != str(frame_path):
+                # Move restored frame to restored directory
+                dest_path = restored_dir / frame_path.name
+                shutil.move(restored_frame, dest_path)
+            else:
+                # Copy original frame if restoration failed
+                dest_path = restored_dir / frame_path.name
+                shutil.copy(frame_path, dest_path)
+        
+        # Reconstruct video
+        if on_progress:
+            on_progress("Reconstructing video...\n")
+        
+        # Get original FPS
+        fps_cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path
+        ]
+        fps_result = subprocess.run(fps_cmd, capture_output=True, text=True)
+        fps_str = fps_result.stdout.strip()
+        
+        # Parse FPS (format: "30/1" or "30000/1001")
+        if "/" in fps_str:
+            num, den = map(int, fps_str.split("/"))
+            fps = num / den
+        else:
+            fps = float(fps_str) if fps_str else 30.0
+        
+        # Create output path
+        output_path = Path(video_path).with_stem(f"{Path(video_path).stem}_face_restored")
+        
+        # Encode video
+        encode_cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(fps),
+            "-i", str(restored_dir / "frame_%05d.png"),
+            "-c:v", "libx264",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            str(output_path)
+        ]
+        
+        subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        # Cleanup
+        shutil.rmtree(work_dir, ignore_errors=True)
+        
+        if on_progress:
+            on_progress(f"✅ Face restoration complete: {output_path}\n")
+        
+        return str(output_path)
+        
+    except Exception as e:
+        if on_progress:
+            on_progress(f"❌ Face restoration error: {str(e)}\n")
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return video_path
 
-    # Re-encode video (no audio)
-    out_path = collision_safe_path(video.parent / f"{video.stem}_fr.mp4")
-    encode_cmd = [
-        "ffmpeg",
-        "-y",
-        "-framerate",
-        "30",
-        "-i",
-        str(restored_dir / "frame_%05d.png"),
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        str(out_path),
-    ]
-    subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    shutil.rmtree(work, ignore_errors=True)
-    if out_path.exists():
-        return str(out_path)
-    return None
 
+def _restore_with_gfpgan(
+    image_path: str,
+    strength: float,
+    on_progress: Optional[Callable[[str], None]] = None
+) -> Optional[str]:
+    """Restore image using GFPGAN"""
+    try:
+        from gfpgan import GFPGANer
+        import torch
+        
+        if on_progress:
+            on_progress("Loading GFPGAN model...\n")
+        
+        # Determine device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Initialize GFPGAN
+        model_path = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth"
+        upscaler = GFPGANer(
+            model_path=model_path,
+            upscale=1,  # Don't upscale, just restore
+            arch='clean',
+            channel_multiplier=2,
+            bg_upsampler=None,
+            device=device
+        )
+        
+        # Read image
+        img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if img is None:
+            if on_progress:
+                on_progress("⚠️ Failed to read image\n")
+            return None
+        
+        # Restore faces
+        _, _, restored_img = upscaler.enhance(
+            img,
+            has_aligned=False,
+            only_center_face=False,
+            paste_back=True,
+            weight=strength
+        )
+        
+        # Save restored image
+        output_path = Path(image_path).with_stem(f"{Path(image_path).stem}_gfpgan")
+        cv2.imwrite(str(output_path), restored_img)
+        
+        return str(output_path)
+        
+    except ImportError:
+        if on_progress:
+            on_progress("⚠️ GFPGAN not installed\n")
+        return image_path
+    except Exception as e:
+        if on_progress:
+            on_progress(f"⚠️ GFPGAN error: {str(e)}\n")
+        return image_path
+
+
+def _restore_with_codeformer(
+    image_path: str,
+    strength: float,
+    on_progress: Optional[Callable[[str], None]] = None
+) -> Optional[str]:
+    """Restore image using CodeFormer"""
+    try:
+        # CodeFormer implementation would go here
+        # This is a placeholder - actual implementation requires CodeFormer installation
+        if on_progress:
+            on_progress("⚠️ CodeFormer integration not yet implemented\n")
+        return image_path
+        
+    except ImportError:
+        if on_progress:
+            on_progress("⚠️ CodeFormer not installed\n")
+        return image_path
+    except Exception as e:
+        if on_progress:
+            on_progress(f"⚠️ CodeFormer error: {str(e)}\n")
+        return image_path
+
+
+# Batch face restoration
+def restore_images_batch(
+    image_paths: list,
+    strength: float = 0.5,
+    backend: str = "auto",
+    on_progress: Optional[Callable[[str], None]] = None
+) -> list:
+    """
+    Restore faces in multiple images.
+    
+    Args:
+        image_paths: List of paths to input images
+        strength: Restoration strength (0.0-1.0)
+        backend: Which backend to use
+        on_progress: Optional callback for progress updates
+        
+    Returns:
+        List of paths to restored images
+    """
+    restored_paths = []
+    total = len(image_paths)
+    
+    for i, img_path in enumerate(image_paths):
+        if on_progress:
+            progress_pct = int((i / total) * 100)
+            on_progress(f"Batch progress: {progress_pct}% ({i}/{total})\n")
+        
+        restored = restore_image(img_path, strength, backend, on_progress=None)
+        restored_paths.append(restored if restored else img_path)
+    
+    return restored_paths

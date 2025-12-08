@@ -141,6 +141,11 @@ def _scan_gan_models(base_dir: Path) -> List[str]:
     for f in models_dir.iterdir():
         if f.is_file() and f.suffix.lower() in GAN_MODEL_EXTS:
             models.append(f.name)
+    
+    # Trigger cache reload for metadata
+    from shared.gan_runner import reload_gan_models_cache
+    reload_gan_models_cache(base_dir)
+    
     return sorted(models)
 
 
@@ -148,53 +153,51 @@ def gan_defaults(base_dir: Path) -> Dict[str, Any]:
     models = _scan_gan_models(base_dir)
     default_model = models[0] if models else ""
 
-    # Use comprehensive metadata system for scale detection
-    if default_model:
-        try:
-            from shared.gan_runner import get_gan_model_metadata
-            meta = get_gan_model_metadata(default_model, base_dir)
-            detected_scale = meta.scale
-        except Exception:
-            # Fallback to parsing from filename
-            detected_scale = _parse_scale_from_name(default_model)
-    else:
-        detected_scale = 4
-
     return {
-        "model": default_model,
-        "scale": detected_scale,  # Dynamically detected from model
-        "backend": "realesrgan",
         "input_path": "",
-        "cuda_device": "0",
         "batch_enable": False,
         "batch_input_path": "",
         "batch_output_path": "",
+        "model": default_model,
+        "target_resolution": 1920,
+        "downscale_first": True,
+        "auto_calculate_input": True,
+        "tile_size": 0,
+        "overlap": 32,
+        "denoising_strength": 0.0,
+        "sharpening": 0.0,
+        "color_correction": True,
+        "gpu_acceleration": True,
+        "gpu_device": "0",
+        "batch_size": 1,
         "output_format": "auto",
-        "output_override": "",
-        "use_resolution_tab": True,
-        "fps_override": 0,
-        "frames_per_batch": 1,  # Default to 1 frame per batch for safety
-        "base_dir": str(base_dir),  # Pass base directory for metadata lookup
-        "batch_size": 1,  # Number of frames to process simultaneously
+        "output_quality": 95,
+        "save_metadata": True,
+        "create_subfolders": False,
     }
 
 
 GAN_ORDER: List[str] = [
-    "model",
-    "scale",
-    "backend",
     "input_path",
-    "cuda_device",
     "batch_enable",
     "batch_input_path",
     "batch_output_path",
-    "output_format",
-    "output_override",
-    "use_resolution_tab",
-    "fps_override",
-    "frames_per_batch",
-    "base_dir",
+    "model",
+    "target_resolution",
+    "downscale_first",
+    "auto_calculate_input",
+    "tile_size",
+    "overlap",
+    "denoising_strength",
+    "sharpening",
+    "color_correction",
+    "gpu_acceleration",
+    "gpu_device",
     "batch_size",
+    "output_format",
+    "output_quality",
+    "save_metadata",
+    "create_subfolders",
 ]
 
 
@@ -394,25 +397,66 @@ def build_gan_callbacks(
             result_holder["payload"] = (status, lg, outp, cmp_html, slider_upd)
 
         def worker_batch(batch_items):
+            """Process batch using BatchProcessor - no duplicate code"""
+            from shared.batch_processor import BatchProcessor, BatchJob
+            
             outputs = []
             logs = []
             last_cmp = ""
             last_slider = gr.ImageSlider.update(value=None)
+            
+            # Create batch jobs
+            jobs = []
             for item in batch_items:
+                job = BatchJob(
+                    input_path=str(item),
+                    metadata={"settings": settings.copy()}
+                )
+                jobs.append(job)
+            
+            # Define processor function that reuses run_single
+            def process_job(job: BatchJob) -> bool:
                 if cancel_event.is_set():
-                    logs.append("Canceled batch processing.")
-                    break
-                ps = maybe_downscale(prepare_single(str(item)))
-                status, lg, outp, cmp_html, slider_upd = run_single(ps, progress_cb=progress_q.put)
-                logs.append(lg)
-                if outp:
-                    outputs.append(outp)
-                if cmp_html:
-                    last_cmp = cmp_html
-                last_slider = slider_upd
-                progress_q.put(f"Processed {len(outputs)}/{len(batch_items)} items")
+                    return False
+                
+                try:
+                    ps = maybe_downscale(prepare_single(job.input_path))
+                    status, lg, outp, cmp_html, slider_upd = run_single(ps, progress_cb=progress_q.put)
+                    
+                    # Store results in job
+                    job.output_path = outp
+                    job.metadata["log"] = lg
+                    job.metadata["comparison"] = cmp_html
+                    job.metadata["slider"] = slider_upd
+                    job.status = "completed" if outp else "failed"
+                    
+                    return bool(outp)
+                except Exception as e:
+                    job.status = "failed"
+                    job.error_message = str(e)
+                    return False
+            
+            # Use BatchProcessor for controlled execution
+            batch_processor = BatchProcessor(max_workers=1)  # Sequential for GPU
+            batch_result = batch_processor.process_batch(
+                jobs=jobs,
+                processor_func=process_job,
+                max_concurrent=1
+            )
+            
+            # Collect results from jobs
+            for job in jobs:
+                if job.status == "completed" and job.output_path:
+                    outputs.append(job.output_path)
+                if "log" in job.metadata:
+                    logs.append(job.metadata["log"])
+                if "comparison" in job.metadata and job.metadata["comparison"]:
+                    last_cmp = job.metadata["comparison"]
+                if "slider" in job.metadata:
+                    last_slider = job.metadata["slider"]
+            
             result_holder["payload"] = (
-                f"✅ Batch complete: {len(outputs)}/{len(batch_items)} processed",
+                f"✅ Batch complete: {len(outputs)}/{len(batch_items)} processed ({batch_result.failed_files} failed)",
                 "\n\n".join(logs),
                 outputs[0] if outputs else None,
                 last_cmp,
@@ -507,28 +551,25 @@ def build_gan_callbacks(
                         progress_cb(line)
                 # Run backend and collect logs
                 try:
-                    if backend_val == "realesrgan":
-                        prepped_settings["model"] = prepped_settings["model_name"].split(".")[0]
-                        prepped_settings["model_path"] = str((base_dir / "Image_Upscale_Models" / prepped_settings.get("model_name")).resolve())
-                        if not Path(prepped_settings["model_path"]).exists() and not _is_realesrgan_builtin(prepped_settings["model_name"]):
-                            return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.ImageSlider.update(value=None), state)
-                        result = run_realesrgan(
-                            prepped_settings,
-                            apply_face=face_apply,
-                            face_strength=face_strength,
-                            cancel_event=cancel_event,
-                            global_output_dir=str(current_output_dir),
-                        )
-                    else:
-                        if cancel_event.is_set():
-                            return ("⏹️ Canceled", "\n".join(header_log + ["Canceled before start"]), None, "", gr.ImageSlider.update(value=None), state)
-                        result = run_gan_upscale(
-                            prepped_settings,
-                            apply_face=face_apply,
-                            face_strength=face_strength,
-                            global_output_dir=str(current_output_dir),
-                            cancel_event=cancel_event,
-                        )
+                    # Use new unified GAN runner
+                    model_path_check = base_dir / "Image_Upscale_Models" / prepped_settings["model_name"]
+                    if not model_path_check.exists() and not _is_realesrgan_builtin(prepped_settings["model_name"]):
+                        return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.ImageSlider.update(value=None), state)
+                    
+                    # Add face restoration settings
+                    prepped_settings["face_restore"] = face_apply
+                    prepped_settings["face_strength"] = face_strength
+                    
+                    result = run_gan_upscale(
+                        input_path=prepped_settings["input_path"],
+                        model_name=prepped_settings["model_name"],
+                        settings=prepped_settings,
+                        base_dir=base_dir,
+                        temp_dir=current_temp_dir,
+                        output_dir=current_output_dir,
+                        on_progress=progress_cb if progress_cb else None,
+                        cancel_event=cancel_event
+                    )
                 except Exception as exc:  # surface ffmpeg or other runtime issues
                     err_msg = f"❌ GAN upscale failed: {exc}"
                     if progress_cb:

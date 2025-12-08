@@ -62,13 +62,17 @@ class BatchProcessor:
 
     def __init__(
         self,
-        max_workers: int = 2,
+        max_workers: int = 1,  # Default to 1 for GPU-bound operations
         progress_callback: Optional[Callable[[BatchProgress], None]] = None,
-        logger: Optional[RunLogger] = None
+        logger: Optional[RunLogger] = None,
+        output_dir: Optional[str] = None,
+        telemetry_enabled: bool = True
     ):
         self.max_workers = max_workers
         self.progress_callback = progress_callback
-        self.logger = logger or RunLogger()
+        self.logger = logger or RunLogger(enabled=telemetry_enabled)
+        self.output_dir = output_dir
+        self.telemetry_enabled = telemetry_enabled
         self._lock = threading.Lock()
         self._cancel_event = threading.Event()
 
@@ -125,10 +129,14 @@ class BatchProcessor:
     ) -> BatchProgress:
         """
         Process a batch of jobs with progress tracking.
+        
+        Uses single processing pipeline - processor_func should handle ONE job
+        and reuse the main processing function (no duplicate code).
 
         Args:
             jobs: List of BatchJob objects to process
             processor_func: Function that takes a BatchJob and returns success bool
+                           This function should call the single-file processor
             max_concurrent: Maximum number of concurrent jobs (usually 1 for GPU-bound tasks)
         """
         progress = BatchProgress(
@@ -140,52 +148,56 @@ class BatchProcessor:
         if self.progress_callback:
             self.progress_callback(progress)
 
-        # Use ThreadPoolExecutor for controlled concurrency
-        with ThreadPoolExecutor(max_workers=min(max_concurrent, self.max_workers)) as executor:
-            # Submit all jobs
-            future_to_job = {}
-            for job in jobs:
-                if self._cancel_event.is_set():
-                    break
+        # Sequential processing (GPU-bound operations can't truly parallelize anyway)
+        for idx, job in enumerate(jobs):
+            if self._cancel_event.is_set():
+                # Mark remaining jobs as skipped
+                for remaining_job in jobs[idx:]:
+                    if remaining_job.status == "pending":
+                        remaining_job.status = "skipped"
+                        progress.skipped_files += 1
+                break
 
-                future = executor.submit(self._process_single_job, job, processor_func)
-                future_to_job[future] = job
+            try:
+                job.status = "processing"
+                job.start_time = time.time()
+                progress.current_file = job.input_path
 
-            # Process completed jobs
-            for future in as_completed(future_to_job):
-                if self._cancel_event.is_set():
-                    # Cancel remaining futures
-                    for f in future_to_job:
-                        f.cancel()
-                    break
+                # Call the processor function
+                success = processor_func(job)
 
-                job = future_to_job[future]
-                try:
-                    success = future.result()
-                    with self._lock:
-                        if success:
-                            progress.completed_files += 1
-                        else:
-                            progress.failed_files += 1
-
-                        progress.overall_progress = (progress.completed_files + progress.failed_files) / progress.total_files
-                        progress.current_file = job.input_path
-
-                        # Calculate ETA
-                        elapsed = time.time() - (progress.start_time or time.time())
-                        if progress.completed_files > 0:
-                            avg_time_per_file = elapsed / progress.completed_files
-                            remaining_files = progress.total_files - progress.completed_files - progress.failed_files
-                            progress.estimated_time_remaining = avg_time_per_file * remaining_files
-
-                except Exception as e:
-                    with self._lock:
-                        progress.failed_files += 1
+                job.end_time = time.time()
+                
+                with self._lock:
+                    if success:
+                        job.status = "completed"
+                        progress.completed_files += 1
+                    else:
                         job.status = "failed"
-                        job.error_message = str(e)
+                        progress.failed_files += 1
 
-                if self.progress_callback:
-                    self.progress_callback(progress)
+                    progress.overall_progress = (progress.completed_files + progress.failed_files) / progress.total_files
+
+                    # Calculate ETA
+                    elapsed = time.time() - (progress.start_time or time.time())
+                    if progress.completed_files > 0:
+                        avg_time_per_file = elapsed / progress.completed_files
+                        remaining_files = progress.total_files - progress.completed_files - progress.failed_files
+                        progress.estimated_time_remaining = avg_time_per_file * remaining_files
+
+            except Exception as e:
+                with self._lock:
+                    progress.failed_files += 1
+                    job.status = "failed"
+                    job.error_message = str(e)
+                    job.end_time = time.time()
+                
+                if self.logger:
+                    self.logger.log_error(f"Batch job failed: {job.input_path}", str(e))
+
+            # Callback after each job
+            if self.progress_callback:
+                self.progress_callback(progress)
 
         # Mark final status
         progress.current_file = None

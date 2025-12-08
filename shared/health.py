@@ -32,8 +32,16 @@ def _check_cuda() -> Dict[str, Optional[str]]:
 
         if torch.cuda.is_available():
             count = torch.cuda.device_count()
-            names = [torch.cuda.get_device_name(i) for i in range(count)]
-            return {"status": "ok", "detail": f"{count} CUDA device(s): {', '.join(names)}"}
+            device_info = []
+            for i in range(count):
+                name = torch.cuda.get_device_name(i)
+                # Get VRAM info
+                total_mem = torch.cuda.get_device_properties(i).total_memory / (1024**3)  # Convert to GB
+                allocated = torch.cuda.memory_allocated(i) / (1024**3)
+                reserved = torch.cuda.memory_reserved(i) / (1024**3)
+                free = total_mem - allocated
+                device_info.append(f"GPU{i}: {name} ({free:.1f}GB free / {total_mem:.1f}GB total)")
+            return {"status": "ok", "detail": "\n".join(device_info)}
         return {"status": "missing", "detail": "CUDA not available"}
     except Exception as exc:
         return {"status": "error", "detail": f"CUDA check failed: {exc}"}
@@ -79,8 +87,23 @@ def _check_vs_build_tools() -> Dict[str, Optional[str]]:
 
 
 def _check_disk(path: Path) -> Dict[str, Optional[str]]:
-    free_gb = get_disk_free_gb(path)
-    return {"status": "ok", "detail": f"Free space: {free_gb} GB at {path}"}
+    try:
+        free_gb = get_disk_free_gb(path)
+        
+        # Determine status based on free space
+        if free_gb < 1.0:
+            status = "error"
+            detail = f"⚠️ CRITICAL: Only {free_gb:.2f} GB free at {path}. Need at least 1GB."
+        elif free_gb < 5.0:
+            status = "warning"
+            detail = f"⚠️ LOW: {free_gb:.1f} GB free at {path}. Recommended: 5GB+ for processing."
+        else:
+            status = "ok"
+            detail = f"✅ {free_gb:.1f} GB free at {path}"
+        
+        return {"status": status, "detail": detail}
+    except Exception as e:
+        return {"status": "error", "detail": f"Failed to check disk space: {str(e)}"}
 
 
 def _check_writable(path: Path) -> Dict[str, Optional[str]]:
@@ -104,5 +127,55 @@ def collect_health_report(temp_dir: Path, output_dir: Path) -> Dict[str, Dict[st
         "disk_output": _check_disk(output_dir),
     }
     return report
+
+
+def check_prerequisites_before_run(
+    estimated_output_size_gb: float = 0,
+    temp_dir: Optional[Path] = None,
+    output_dir: Optional[Path] = None,
+    require_cuda: bool = True
+) -> tuple[bool, str]:
+    """
+    Check if system meets prerequisites before starting a long operation.
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    errors = []
+    warnings = []
+    
+    # Check CUDA if required
+    if require_cuda:
+        cuda_check = _check_cuda()
+        if cuda_check["status"] != "ok":
+            errors.append(f"CUDA: {cuda_check['detail']}")
+    
+    # Check ffmpeg
+    ffmpeg_check = _check_ffmpeg()
+    if ffmpeg_check["status"] != "ok":
+        errors.append(f"ffmpeg: {ffmpeg_check['detail']}")
+    
+    # Check disk space
+    if temp_dir and estimated_output_size_gb > 0:
+        free_gb = get_disk_free_gb(temp_dir)
+        required_gb = estimated_output_size_gb * 2  # 2x for temp files
+        if free_gb < required_gb:
+            errors.append(f"Insufficient temp disk space: {free_gb:.1f}GB available, need ~{required_gb:.1f}GB")
+        elif free_gb < required_gb * 1.5:
+            warnings.append(f"Low temp disk space: {free_gb:.1f}GB available, recommended {required_gb * 1.5:.1f}GB")
+    
+    if output_dir and estimated_output_size_gb > 0:
+        free_gb = get_disk_free_gb(output_dir)
+        if free_gb < estimated_output_size_gb:
+            errors.append(f"Insufficient output disk space: {free_gb:.1f}GB available, need ~{estimated_output_size_gb:.1f}GB")
+        elif free_gb < estimated_output_size_gb * 1.2:
+            warnings.append(f"Low output disk space: {free_gb:.1f}GB available")
+    
+    if errors:
+        return False, "ERRORS:\n" + "\n".join(f"❌ {e}" for e in errors)
+    elif warnings:
+        return True, "WARNINGS:\n" + "\n".join(f"⚠️ {w}" for w in warnings)
+    else:
+        return True, "✅ All prerequisites met"
 
 

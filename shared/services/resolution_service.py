@@ -116,11 +116,37 @@ def build_resolution_callbacks(
     def safe_defaults():
         return [defaults[k] for k in RESOLUTION_ORDER]
 
-    def apply_to_seed(target_resolution: int, max_target_resolution: int):
-        return (
-            gr.Slider.update(value=target_resolution),
-            gr.Slider.update(value=max_target_resolution),
-        )
+    def apply_to_seed(*args):
+        """Apply resolution settings to SeedVR2 pipeline via shared state"""
+        state = args[-1]
+        values = list(args[:-1])
+        
+        # Extract resolution settings from inputs
+        settings_dict = _res_dict_from_args(values)
+        
+        # Update shared state with resolution settings for SeedVR2
+        seed_controls = state.get("seed_controls", {})
+        
+        # Cache resolution values for SeedVR2 to use
+        seed_controls["resolution_val"] = settings_dict.get("target_resolution", 1080)
+        seed_controls["max_resolution_val"] = settings_dict.get("max_target_resolution", 0)
+        seed_controls["enable_max_target"] = settings_dict.get("enable_max_target", True)
+        seed_controls["auto_resolution"] = settings_dict.get("auto_resolution", True)
+        seed_controls["chunk_size_sec"] = settings_dict.get("chunk_size", 0)
+        seed_controls["chunk_overlap_sec"] = settings_dict.get("chunk_overlap", 0)
+        seed_controls["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", False)
+        seed_controls["per_chunk_cleanup"] = settings_dict.get("per_chunk_cleanup", False)
+        
+        state["seed_controls"] = seed_controls
+        
+        status_msg = f"✅ Applied resolution settings to pipeline:\n"
+        status_msg += f"- Target Resolution: {seed_controls['resolution_val']}px\n"
+        status_msg += f"- Max Resolution: {seed_controls['max_resolution_val']}px\n"
+        status_msg += f"- Auto-Resolution: {seed_controls['auto_resolution']}\n"
+        if seed_controls['chunk_size_sec'] > 0:
+            status_msg += f"- Chunking: {seed_controls['chunk_size_sec']}s (overlap: {seed_controls['chunk_overlap_sec']}s)\n"
+        
+        return gr.Markdown.update(value=status_msg), state
 
     def estimate_from_input(size, ov):
         path = seed_controls_cache.get("last_input_path")

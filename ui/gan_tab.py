@@ -396,22 +396,33 @@ def gan_tab(
         outputs=[input_cache_msg, shared_state]
     )
 
-    # Main processing
+    # Batch results gallery
+    batch_gallery = gr.Gallery(
+        label="📦 Batch Results",
+        visible=False,
+        columns=4,
+        rows=2,
+        height="auto",
+        object_fit="contain",
+        show_download_button=True
+    )
+
+    # Main processing with gr.Progress
     upscale_btn.click(
-        fn=lambda *args: service["run_action"](*args[:-1], preview_only=False, state=args[-1]),
+        fn=lambda *args, progress=gr.Progress(): service["run_action"](*args[:-1], preview_only=False, state=args[-1], progress=progress),
         inputs=inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,
-            last_processed, image_slider, shared_state
+            last_processed, image_slider, batch_gallery, shared_state
         ]
     )
 
     preview_btn.click(
-        fn=lambda *args: service["run_action"](*args[:-1], preview_only=True, state=args[-1]),
+        fn=lambda *args, progress=gr.Progress(): service["run_action"](*args[:-1], preview_only=True, state=args[-1], progress=progress),
         inputs=inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,
-            last_processed, image_slider, shared_state
+            last_processed, image_slider, batch_gallery, shared_state
         ]
     )
 

@@ -94,8 +94,17 @@ class PresetManager:
             return None
         try:
             with preset_path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
+                preset_data = json.load(f)
+            
+            # Validate and clean loaded preset
+            cleaned = self.validate_and_clean_preset(preset_data, tab, model)
+            
+            # Apply tab-specific constraints
+            validated = self.validate_preset_constraints(cleaned, tab, model)
+            
+            return validated
+        except Exception as e:
+            print(f"Error loading preset {preset_name} for {tab}/{model}: {e}")
             return None
 
     def delete_preset(self, tab: str, model: Optional[str], preset_name: str) -> bool:
