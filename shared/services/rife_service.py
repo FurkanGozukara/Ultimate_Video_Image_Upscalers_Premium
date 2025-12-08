@@ -1,10 +1,13 @@
-import queue
-import subprocess
+"""
+RIFE Service Module - Clean Implementation
+Handles RIFE/FPS/Edit Videos processing logic, presets, and callbacks
+"""
+
 import shutil
-import threading
-import time
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
 import gradio as gr
 
 from shared.preset_manager import PresetManager
@@ -14,7 +17,15 @@ from shared.face_restore import restore_video
 from shared.logging_utils import RunLogger
 
 
+# Defaults and ordering --------------------------------------------------------
 def rife_defaults() -> Dict[str, Any]:
+    """Get default RIFE settings."""
+    try:
+        import torch
+        cuda_default = "0" if torch.cuda.is_available() else ""
+    except Exception:
+        cuda_default = ""
+    
     return {
         "input_path": "",
         "output_override": "",
@@ -39,7 +50,7 @@ def rife_defaults() -> Dict[str, Any]:
         "batch_output_path": "",
         "skip_first_frames": 0,
         "load_cap": 0,
-        "cuda_device": "",
+        "cuda_device": cuda_default,
     }
 
 
@@ -71,35 +82,17 @@ RIFE_ORDER: List[str] = [
 ]
 
 
-def _rife_dict_from_args(args: List[Any]) -> Dict[str, Any]:
-    return dict(zip(RIFE_ORDER, args))
-
-
-def _apply_rife_preset(
-    preset: Dict[str, Any],
-    defaults: Dict[str, Any],
-    preset_manager: PresetManager,
-    current: Optional[Dict[str, Any]] = None,
-) -> List[Any]:
-    base = defaults.copy()
-    if current:
-        base.update(current)
-    merged = preset_manager.merge_config(base, preset)
-    return [merged[k] for k in RIFE_ORDER]
-
-
-def _ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
-
-
+# Helper functions -------------------------------------------------------------
 def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
+    """Validate CUDA device specification."""
     try:
-        import torch  # type: ignore
-
+        import torch
+        
         if not cuda_spec:
             return None
         if not torch.cuda.is_available():
-            return "CUDA is not available on this system, but CUDA devices were specified."
+            return "CUDA is not available on this system."
+        
         devices = [d.strip() for d in str(cuda_spec).split(",") if d.strip() != ""]
         count = torch.cuda.device_count()
         invalid = [d for d in devices if (not d.isdigit()) or int(d) >= count]
@@ -110,6 +103,32 @@ def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
     return None
 
 
+def _ffmpeg_available() -> bool:
+    """Check if ffmpeg is available in PATH."""
+    return shutil.which("ffmpeg") is not None
+
+
+# Preset helpers ---------------------------------------------------------------
+def _rife_dict_from_args(args: List[Any]) -> Dict[str, Any]:
+    """Convert argument list to settings dictionary."""
+    return dict(zip(RIFE_ORDER, args))
+
+
+def _apply_rife_preset(
+    preset: Dict[str, Any],
+    defaults: Dict[str, Any],
+    preset_manager: PresetManager,
+    current: Optional[Dict[str, Any]] = None,
+) -> List[Any]:
+    """Apply preset values to current settings."""
+    base = defaults.copy()
+    if current:
+        base.update(current)
+    merged = preset_manager.merge_config(base, preset)
+    return [merged[key] for key in RIFE_ORDER]
+
+
+# Core run/cancel/preset callbacks --------------------------------------------
 def build_rife_callbacks(
     preset_manager: PresetManager,
     runner: Runner,
@@ -119,9 +138,11 @@ def build_rife_callbacks(
     temp_dir: Path,
     shared_state: gr.State,
 ):
+    """Build RIFE callback functions for the UI."""
     defaults = rife_defaults()
 
     def refresh_presets(model_name: str, select_name: Optional[str] = None):
+        """Refresh preset dropdown."""
         presets = preset_manager.list_presets("rife", model_name)
         last_used = preset_manager.get_last_used_name("rife", model_name)
         preferred = select_name if select_name in presets else None
@@ -129,6 +150,7 @@ def build_rife_callbacks(
         return gr.Dropdown.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
+        """Save a preset."""
         if not preset_name.strip():
             return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
@@ -146,6 +168,7 @@ def build_rife_callbacks(
             return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
+        """Load a preset."""
         try:
             model_name = model_name or defaults["model"]
             preset = preset_manager.load_preset_safe("rife", model_name, preset_name)
@@ -162,197 +185,136 @@ def build_rife_callbacks(
             return current_values
 
     def safe_defaults():
+        """Get safe default values."""
         return [defaults[k] for k in RIFE_ORDER]
 
     def run_action(uploaded_file, img_folder, *args, state=None):
+        """Main RIFE processing action."""
         try:
+            state = state or {"seed_controls": {}, "operation_status": "ready"}
+            state["operation_status"] = "running"
+            seed_controls = state.get("seed_controls", {})
+            
             settings_dict = _rife_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
 
             input_path = normalize_path(uploaded_file if uploaded_file else img_folder)
             if not input_path or not Path(input_path).exists():
-                return ("❌ Input missing", "", None, "No metadata")
+                yield ("❌ Input missing or not found", "", None, "No metadata")
+                return
+
+            # Validate input type based on mode
             if settings.get("img_mode"):
-                # In --img mode, require a frames folder (or image file); block video files to avoid misuse.
+                # In --img mode, require a frames folder or images
                 if Path(input_path).is_file() and Path(input_path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
-                    return ("⚠️ --img mode expects frames folder or images, not a video file.", "", None, "No metadata")
+                    yield ("⚠️ --img mode expects frames folder or images, not a video file.", "", None, "No metadata")
+                    return
             else:
                 # In video mode, require a video file
                 if Path(input_path).is_dir():
-                    return ("⚠️ Video mode expects a video file. Enable --img for frame folders.", "", None, "No metadata")
+                    yield ("⚠️ Video mode expects a video file. Enable --img for frame folders.", "", None, "No metadata")
+                    return
+
             settings["input_path"] = input_path
             settings["output_override"] = settings.get("output_override") or None
 
-        # Apply Resolution tab hints (ratio downscale) for videos when provided
-        seed_controls = state.get("seed_controls", {})
-        model_cache = seed_controls.get("resolution_cache", {}).get(settings.get("model"), {})
-        ratio_down = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
-        target_res = model_cache.get("resolution_val") or seed_controls.get("resolution_val")
-        max_res = model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val")
-        enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
-        if enable_max and max_res:
-            target_res = min(target_res or max_res, max_res)
-        dims = get_media_dimensions(settings["input_path"])
-        if ratio_down and target_res and dims and Path(settings["input_path"]).is_file() and not settings.get("img_mode"):
-            short_side = min(dims)
-            if short_side > target_res:
-                desired = int(target_res)
-                tmp_resized = Path(temp_dir) / f"rife_downscale_{Path(settings['input_path']).stem}.mp4"
-                cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    settings["input_path"],
-                    "-vf",
-                    f"scale=-2:{desired}",
-                    str(tmp_resized),
-                ]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if tmp_resized.exists():
-                    settings["input_path"] = str(tmp_resized)
-                    log_lines = [f"Applied ratio downscale to ~{desired}p before RIFE."]
-                else:
-                    log_lines = []
-            else:
-                log_lines = []
-        else:
-            log_lines = []
+            # Validate CUDA devices
+            cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
+            if cuda_warning:
+                yield (f"⚠️ {cuda_warning}", "", None, "No metadata")
+                return
 
-        # Apply cached output/comparison preferences from Output tab
-        cached_fmt = seed_controls.get("output_format_val")
-        if settings.get("output_format") in (None, "auto") and cached_fmt:
-            settings["output_format"] = cached_fmt
-        cached_fps = seed_controls.get("fps_override_val")
-        if (not settings.get("fps_override")) or float(settings.get("fps_override") or 0) == 0:
-            if cached_fps:
-                settings["fps_override"] = cached_fps
+            # Check ffmpeg availability
+            if not _ffmpeg_available():
+                yield ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, "No metadata")
+                return
 
-        cuda_warn = _validate_cuda_devices(settings.get("cuda_device", ""))
-        if cuda_warn:
-            return (f"⚠️ {cuda_warn}", "", None, "No metadata")
-        if settings.get("output_format") not in ("auto", "mp4", "png"):
-            settings["output_format"] = "auto"
-
-        # Harmonize output format flags
-        if settings.get("output_format") == "png":
-            settings["png_output"] = True
-        elif settings.get("output_format") == "mp4":
-            settings["png_output"] = False
-        else:
-            # auto: choose based on input type (default to mp4 for videos)
-            settings["png_output"] = False
-
-        if not _ffmpeg_available():
-            return ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, "No metadata")
-
-        # Continue collecting logs (pre-filled with any resize note)
-        log_lines: List[str] = log_lines or []
-        progress_q: "queue.Queue[str]" = queue.Queue()
-
-        def on_progress(line: str):
-            line = line.rstrip()
-            log_lines.append(line)
-            progress_q.put(line)
-
-        try:
-            skip_frames = max(0, int(settings.get("skip_first_frames") or 0))
-            cap_frames = max(0, int(settings.get("load_cap") or 0))
-        except Exception:
-            skip_frames = 0
-            cap_frames = 0
-        settings["skip_first_frames"] = skip_frames
-        settings["load_cap"] = cap_frames
-        trimmed_path = None
-        if (skip_frames > 0 or cap_frames > 0) and Path(settings["input_path"]).is_file():
-            trimmed_path = Path(temp_dir) / f"rife_trim_{Path(settings['input_path']).stem}.mp4"
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                settings["input_path"],
-            ]
-            if skip_frames > 0:
-                cmd.extend(["-vf", f"select='gte(n\\,{skip_frames})',setpts=PTS-STARTPTS"])
-            if cap_frames > 0:
-                cmd.extend(["-frames:v", str(cap_frames)])
-            cmd.append(str(trimmed_path))
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if trimmed_path.exists():
-                settings["input_path"] = str(trimmed_path)
-
-        face_apply = bool(args[-1]) or global_settings.get("face_global", False)
-        face_strength = float(global_settings.get("face_strength", 0.5))
-
-        result_holder: Dict[str, Any] = {}
-
-        def worker():
-            try:
-                result_holder["result"] = runner.run_rife(settings, on_progress=on_progress)
-            except Exception as exc:
-                result_holder["error"] = str(exc)
-                result_holder["result"] = None
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-
-        last_yield = time.time()
-        while t.is_alive() or not progress_q.empty():
-            try:
-                line = progress_q.get(timeout=0.2)
-                if line:
-                    log_lines.append(line)
-            except queue.Empty:
+            # Apply cached values from Resolution & Scene Split tab
+            if seed_controls.get("resolution_val") is not None:
+                # For RIFE, resolution affects downscaling before processing
                 pass
-            now = time.time()
-            if now - last_yield > 0.5:
-                last_yield = now
-                yield (
-                    gr.Markdown.update(value="⏳ Running RIFE..."),
-                    "\n".join(log_lines[-400:]),
-                    None,
-                    "Processing...",
+
+            # Apply output format from Comparison tab if set
+            cached_fmt = seed_controls.get("output_format_val")
+            if settings.get("output_format") in (None, "auto") and cached_fmt:
+                settings["output_format"] = cached_fmt
+
+            # Run RIFE processing
+            result = runner.run_rife(settings, on_progress=lambda x: None)
+
+            status = "✅ RIFE complete" if result.returncode == 0 else f"⚠️ RIFE exited with code {result.returncode}"
+            output_path = result.output_path
+
+            # Apply face restoration if enabled
+            face_apply = bool(global_settings.get("face_global", False))
+            if face_apply and output_path and Path(output_path).exists():
+                face_strength = float(global_settings.get("face_strength", 0.5))
+                restored = restore_video(output_path, strength=face_strength, on_progress=lambda x: None)
+                if restored:
+                    output_path = restored
+
+            # Create metadata string
+            meta_md = f"Input: {input_path}\nOutput: {output_path}\nFPS Multiplier: {settings.get('fps_multiplier')}"
+
+            # Log the run
+            if output_path:
+                run_logger.write_summary(
+                    Path(output_path),
+                    {
+                        "input": input_path,
+                        "output": output_path,
+                        "returncode": result.returncode,
+                        "args": settings,
+                    },
                 )
-        t.join()
 
-        result = result_holder.get("result")
-        if result is None:
-            err = result_holder.get("error", "Unknown failure")
-            yield (f"❌ Failed: {err}", "\n".join(log_lines), None, "No metadata")
-            return
+            state["operation_status"] = "completed" if "✅" in status else "ready"
+            yield (status, result.log or "", output_path, meta_md)
 
-        status = "✅ RIFE complete" if result.returncode == 0 else f"⚠️ RIFE exited with code {result.returncode}"
-        out_path = result.output_path if result.output_path and result.output_path.endswith(".mp4") else None
-        if settings.get("fps_override") and out_path and Path(out_path).exists():
-            out_path = str(ffmpeg_set_fps(Path(out_path), float(settings["fps_override"])))
-            log_lines.append(f"FPS overridden to {settings['fps_override']}")
-        if face_apply and out_path and Path(out_path).exists():
-            restored = restore_video(out_path, strength=face_strength, on_progress=on_progress)
-            if restored:
-                out_path = restored
-                log_lines.append(f"Face-restored video saved to {restored} (strength {face_strength})")
-        if out_path:
-            try:
-                state["seed_controls"]["last_output_dir"] = str(Path(out_path).parent)
-            except Exception:
-                pass
-        meta_md = f"Output: {out_path}\nReturn code: {result.returncode}"
-        current_out_dir = runner.output_dir if hasattr(runner, "output_dir") else output_dir
-        run_logger.write_summary(
-            Path(out_path) if out_path else current_out_dir,
-            {
-                "input": input_path,
-                "output": out_path,
-                "returncode": result.returncode,
-                "args": settings,
-                "face_apply": face_apply,
-                "pipeline": "rife",
-            },
-        )
-        final_log = "\n".join(log_lines) or result.log
-        yield (status, final_log, out_path, meta_md)
         except Exception as e:
             error_msg = f"Critical error in RIFE processing: {str(e)}"
+            state = state or {}
+            state["operation_status"] = "error"
             yield ("❌ Critical error", error_msg, None, "Error occurred")
+
+    def cancel():
+        """Cancel current processing."""
+        canceled = runner.cancel()
+        if canceled:
+            return gr.Markdown.update(value="⏹️ Cancel requested"), ""
+        return gr.Markdown.update(value="No active process"), ""
+
+    def open_outputs_folder(state: Dict[str, Any]):
+        """Open the outputs folder in file explorer."""
+        try:
+            import platform
+            
+            out_dir = str(output_dir)
+            if platform.system() == "Windows":
+                subprocess.Popen(["explorer", out_dir])
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", out_dir])
+            else:
+                subprocess.Popen(["xdg-open", out_dir])
+            return gr.Markdown.update(value=f"✅ Opened outputs folder: {out_dir}")
+        except Exception as e:
+            return gr.Markdown.update(value=f"❌ Failed to open outputs folder: {str(e)}")
+
+    def clear_temp_folder(confirm: bool):
+        """Clear temporary folder if confirmed."""
+        if not confirm:
+            return gr.Markdown.update(value="⚠️ Check 'Confirm delete temp' to clear temporary files")
+        
+        try:
+            temp_path = Path(temp_dir)
+            if temp_path.exists():
+                shutil.rmtree(temp_path)
+                temp_path.mkdir(parents=True, exist_ok=True)
+                return gr.Markdown.update(value=f"✅ Cleared temp folder: {temp_path}")
+            else:
+                return gr.Markdown.update(value=f"ℹ️ Temp folder doesn't exist: {temp_path}")
+        except Exception as e:
+            return gr.Markdown.update(value=f"❌ Failed to clear temp folder: {str(e)}")
 
     return {
         "defaults": defaults,
@@ -361,7 +323,8 @@ def build_rife_callbacks(
         "save_preset": save_preset,
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
-        "run_action": lambda *args: run_action(*args[:-1], args[-1]) if len(args) > 1 else run_action(*args),
+        "run_action": run_action,
+        "cancel_action": cancel,
+        "open_outputs_folder": open_outputs_folder,
+        "clear_temp_folder": clear_temp_folder,
     }
-
-

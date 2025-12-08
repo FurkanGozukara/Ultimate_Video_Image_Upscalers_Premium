@@ -342,19 +342,52 @@ def build_video_comparison(
         return "<p>No comparison available.</p>"
     if use_fallback_assets:
         try:
-            import base64
             from pathlib import Path
 
-            # Serve the bundled slider HTML (assumes Start_Video_Comparison assets are present)
-            slider_html = Path(__file__).parent.parent / "Video_Comparison_Slider" / "index.html"
+            # Serve the bundled slider HTML (assumes Video_Comparison_Slider assets are present)
+            slider_html = Path(__file__).parent.parent / "Video_Comparison_Slider" / "Start_Slider_App.html"
             if slider_html.exists():
                 with slider_html.open("r", encoding="utf-8") as f:
                     html = f.read()
-                html = html.replace("INPUT_PLACEHOLDER", f"file:///{input_video}")
-                html = html.replace("OUTPUT_PLACEHOLDER", f"file:///{output_video}")
+
+                # Inject the video paths into the HTML
+                # This assumes the HTML has placeholders or we inject via script
+                inject_script = f"""
+                <script>
+                // Auto-load videos when page loads
+                document.addEventListener('DOMContentLoaded', function() {{
+                    // Find video input elements and set values
+                    const videoInputs = document.querySelectorAll('input[type="file"], input[type="url"]');
+                    if (videoInputs.length >= 2) {{
+                        // Create data URLs or file paths for local files
+                        const inputPath = "{input_video.replace(chr(92), '/')}";
+                        const outputPath = "{output_video.replace(chr(92), '/')}";
+
+                        // If there are URL inputs, use file:// protocol
+                        const urlInputs = document.querySelectorAll('input[type="url"]');
+                        if (urlInputs.length >= 2) {{
+                            urlInputs[0].value = "file:///" + inputPath;
+                            urlInputs[1].value = "file:///" + outputPath;
+                        }}
+
+                        // Try to auto-submit or trigger comparison
+                        setTimeout(() => {{
+                            const compareBtn = document.querySelector('button[id*="compare"], button:contains("Compare")');
+                            if (compareBtn) {{
+                                compareBtn.click();
+                            }}
+                        }}, 500);
+                    }}
+                }});
+                </script>
+                """
+
+                # Insert the injection script before the closing body tag
+                html = html.replace('</body>', inject_script + '</body>')
                 return html
-        except Exception:
-            pass
+        except Exception as e:
+            # Fallback to basic HTML if the slider file can't be loaded
+            return f"<p>Video comparison slider unavailable: {str(e)}</p>"
 
     pin_js = _pin_js(pin_reference)
     fs_js = _pin_js(start_fullscreen)

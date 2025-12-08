@@ -1,11 +1,15 @@
+"""
+SeedVR2 Service Module - Complete Rewrite
+Handles all SeedVR2 processing logic, presets, and callbacks
+"""
+
+import shutil
 import queue
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Callable
-import shutil
-import platform
-import subprocess
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 import gradio as gr
 
 from shared.preset_manager import PresetManager
@@ -23,25 +27,27 @@ from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
 from shared.video_comparison import create_comparison_selector
 from shared.model_manager import get_model_manager, ModelType
-from shared.batch_processor import BatchProcessor, BatchJob, BatchProgress
 
 # Constants --------------------------------------------------------------------
 SEEDVR2_VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
 SEEDVR2_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 
+
 # Defaults and ordering --------------------------------------------------------
 def seedvr2_defaults() -> Dict[str, Any]:
+    """Get default SeedVR2 settings aligned with CLI defaults."""
     try:
-        import torch  # type: ignore
+        import torch
         cuda_default = "0" if torch.cuda.is_available() else ""
     except Exception:
         cuda_default = ""
+    
     return {
         "input_path": "",
         "output_override": "",
         "output_format": "auto",
         "model_dir": "",
-        "dit_model": get_seedvr2_model_names()[0],
+        "dit_model": get_seedvr2_model_names()[0] if get_seedvr2_model_names() else "seedvr2_ema_3b_fp16.safetensors",
         "batch_enable": False,
         "batch_input_path": "",
         "batch_output_path": "",
@@ -136,64 +142,62 @@ SEEDVR2_ORDER: List[str] = [
     "compile_dynamo_cache_size_limit",
     "compile_dynamo_recompile_limit",
     "cache_dit",
-        "cache_vae",
-        "debug",
-        "resume_chunking",
-    ]
+    "cache_vae",
+    "debug",
+    "resume_chunking",
+]
 
 
 # Guardrails -------------------------------------------------------------------
 def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply SeedVR2-specific validation rules."""
     cfg = cfg.copy()
+
+    # Batch size must be 4n+1
     bs = int(cfg.get("batch_size", defaults["batch_size"]))
     if bs % 4 != 1:
         cfg["batch_size"] = max(1, (bs // 4) * 4 + 1)
+
+    # VAE tiling constraints
     if cfg.get("vae_encode_tiled"):
-        if cfg.get("vae_encode_tile_overlap", 0) >= cfg.get("vae_encode_tile_size", defaults["vae_encode_tile_size"]):
-            cfg["vae_encode_tile_overlap"] = max(0, cfg.get("vae_encode_tile_size", defaults["vae_encode_tile_size"]) - 1)
+        tile_size = cfg.get("vae_encode_tile_size", defaults["vae_encode_tile_size"])
+        overlap = cfg.get("vae_encode_tile_overlap", 0)
+        if overlap >= tile_size:
+            cfg["vae_encode_tile_overlap"] = max(0, tile_size - 1)
+
     if cfg.get("vae_decode_tiled"):
-        if cfg.get("vae_decode_tile_overlap", 0) >= cfg.get("vae_decode_tile_size", defaults["vae_decode_tile_size"]):
-            cfg["vae_decode_tile_overlap"] = max(0, cfg.get("vae_decode_tile_size", defaults["vae_decode_tile_size"]) - 1)
-    blockswap_enabled = cfg.get("blocks_to_swap", 0) > 0 or cfg.get("swap_io_components")
+        tile_size = cfg.get("vae_decode_tile_size", defaults["vae_decode_tile_size"])
+        overlap = cfg.get("vae_decode_tile_overlap", 0)
+        if overlap >= tile_size:
+            cfg["vae_decode_tile_overlap"] = max(0, tile_size - 1)
+
+    # BlockSwap requires dit_offload_device
+    blockswap_enabled = cfg.get("blocks_to_swap", 0) > 0 or cfg.get("swap_io_components", False)
     if blockswap_enabled and str(cfg.get("dit_offload_device", "none")).lower() in ("none", ""):
         cfg["dit_offload_device"] = "cpu"
+
+    # Multi-GPU constraints
     devices = [d.strip() for d in str(cfg.get("cuda_device", "")).split(",") if d.strip()]
     if len(devices) > 1:
         if cfg.get("cache_dit"):
             cfg["cache_dit"] = False
         if cfg.get("cache_vae"):
             cfg["cache_vae"] = False
+
     return cfg
 
 
-# Preset helpers ---------------------------------------------------------------
-def _seedvr2_dict_from_args(args: List[Any]) -> Dict[str, Any]:
-    return dict(zip(SEEDVR2_ORDER, args))
-
-
-def _apply_preset_to_values(
-    preset: Dict[str, Any],
-    defaults: Dict[str, Any],
-    preset_manager: PresetManager,
-    current: Optional[Dict[str, Any]] = None,
-) -> List[Any]:
-    base = defaults.copy()
-    if current:
-        base.update(current)
-    merged = preset_manager.merge_config(base, preset)
-    merged = _enforce_seedvr2_guardrails(merged, defaults)
-    return [merged[key] for key in SEEDVR2_ORDER]
-
-
-# Validation helpers -----------------------------------------------------------
+# Helper functions -------------------------------------------------------------
 def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
+    """Validate CUDA device specification."""
     try:
-        import torch  # type: ignore
-
+        import torch
+        
         if not cuda_spec:
             return None
         if not torch.cuda.is_available():
             return "CUDA is not available on this system, but CUDA devices were specified."
+        
         devices = [d.strip() for d in str(cuda_spec).split(",") if d.strip() != ""]
         count = torch.cuda.device_count()
         invalid = [d for d in devices if (not d.isdigit()) or int(d) >= count]
@@ -205,9 +209,10 @@ def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
 
 
 def _expand_cuda_spec(cuda_spec: str) -> str:
+    """Expand 'all' to actual device list."""
     try:
-        import torch  # type: ignore
-
+        import torch
+        
         if str(cuda_spec).strip().lower() == "all" and torch.cuda.is_available():
             return ",".join(str(i) for i in range(torch.cuda.device_count()))
     except Exception:
@@ -216,10 +221,21 @@ def _expand_cuda_spec(cuda_spec: str) -> str:
 
 
 def _ffmpeg_available() -> bool:
+    """Check if ffmpeg is available in PATH."""
     return shutil.which("ffmpeg") is not None
 
 
+def _resolve_input_path(file_upload: Optional[str], manual_path: str, batch_enable: bool, batch_input: str) -> str:
+    """Resolve the input path from various sources."""
+    if batch_enable and batch_input:
+        return batch_input
+    if file_upload:
+        return str(file_upload)
+    return manual_path
+
+
 def _list_media_files(folder: str, video_exts: set, image_exts: set) -> List[str]:
+    """List media files in a folder."""
     try:
         p = Path(normalize_path(folder))
         if not p.exists() or not p.is_dir():
@@ -236,8 +252,177 @@ def _list_media_files(folder: str, video_exts: set, image_exts: set) -> List[str
         return []
 
 
+# Preset helpers ---------------------------------------------------------------
+def _seedvr2_dict_from_args(args: List[Any]) -> Dict[str, Any]:
+    """Convert argument list to settings dictionary."""
+    return dict(zip(SEEDVR2_ORDER, args))
+
+
+def _apply_preset_to_values(
+    preset: Dict[str, Any],
+    defaults: Dict[str, Any],
+    preset_manager: PresetManager,
+    current: Optional[Dict[str, Any]] = None,
+) -> List[Any]:
+    """Apply preset values to current settings."""
+    base = defaults.copy()
+    if current:
+        base.update(current)
+    merged = preset_manager.merge_config(base, preset)
+    merged = _enforce_seedvr2_guardrails(merged, defaults)
+    return [merged[key] for key in SEEDVR2_ORDER]
+
+
+# Core processing functions -----------------------------------------------------
+def _process_single_file(
+    runner: Runner,
+    settings: Dict[str, Any],
+    global_settings: Dict[str, Any],
+    seed_controls: Dict[str, Any],
+    face_apply: bool,
+    face_strength: float,
+    run_logger: RunLogger,
+    output_dir: Path,
+    preview_only: bool = False,
+    progress_cb: Optional[Callable[[str], None]] = None
+) -> Tuple[str, str, Optional[str], Optional[str], str, str]:
+    """
+    Process a single file with SeedVR2.
+    Returns: (status, logs, output_video, output_image, chunk_info, chunk_summary)
+    """
+    local_logs = []
+    output_video = None
+    output_image = None
+    chunk_info_msg = "No chunking performed."
+    chunk_summary = "Single pass (no chunking)."
+    status = "⚠️ Processing exited unexpectedly"
+
+    try:
+        # Model loading check
+        model_manager = get_model_manager()
+        dit_model = settings.get("dit_model", "")
+
+        if not model_manager.is_model_loaded(ModelType.SEEDVR2, dit_model, **settings):
+            if progress_cb:
+                progress_cb(f"Loading model: {dit_model}...\n")
+            if not runner.ensure_seedvr2_model_loaded(settings, lambda x: progress_cb(x) if progress_cb else None):
+                return "❌ Model load failed", "", None, None, "Model load failed", "Model load failed"
+            if progress_cb:
+                progress_cb("Model loaded successfully!\n")
+
+        # Determine if chunking should be used
+        should_chunk = (
+            settings.get("chunk_enable", False)
+            and not preview_only
+            and detect_input_type(settings["input_path"]) == "video"
+        )
+
+        if should_chunk:
+            # Process with chunking
+            completed_chunks = 0
+
+            def chunk_progress_callback(progress_val, desc=""):
+                nonlocal completed_chunks
+                if "Completed chunk" in desc:
+                    completed_chunks += 1
+                    if progress_cb:
+                        progress_cb(f"Completed {completed_chunks} chunks\n")
+
+            rc, clog, final_out, chunk_count = chunk_and_process(
+                runner,
+                settings,
+                scene_threshold=settings.get("scene_threshold", 27.0),
+                min_scene_len=settings.get("scene_min_len", 2.0),
+                temp_dir=Path(global_settings["temp_dir"]),
+                on_progress=lambda msg: None,
+                chunk_seconds=float(settings.get("chunk_size_sec") or 0),
+                chunk_overlap=float(settings.get("chunk_overlap_sec") or 0),
+                per_chunk_cleanup=bool(settings.get("per_chunk_cleanup")),
+                resume_from_partial=bool(settings.get("resume_chunking", False)),
+                allow_partial=True,
+                global_output_dir=str(runner.output_dir) if hasattr(runner, "output_dir") else None,
+                progress_tracker=chunk_progress_callback,
+            )
+
+            status = "✅ Chunked upscale complete" if rc == 0 else f"⚠️ Chunked upscale ended early ({rc})"
+            output_path = final_out if final_out else None
+            output_video = output_path if output_path and output_path.lower().endswith(".mp4") else None
+            output_image = None
+            local_logs.append(clog)
+            chunk_summary = f"Processed {chunk_count} chunks. Final: {output_path}"
+            chunk_info_msg = f"Chunks: {chunk_count}\nOutput: {output_path}\n{clog}"
+            result = RunResult(rc, output_path, clog)
+        else:
+            # Process without chunking
+            result = runner.run_seedvr2(
+                settings,
+                on_progress=lambda x: progress_cb(x) if progress_cb else None,
+                preview_only=preview_only
+            )
+            status = "✅ Upscale complete" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
+
+        # Extract output paths
+        if result.output_path:
+            output_video = result.output_path if result.output_path.lower().endswith(".mp4") else None
+            output_image = result.output_path if not result.output_path.lower().endswith(".mp4") else None
+
+            # Update state
+            try:
+                outp = Path(result.output_path)
+                seed_controls["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+            except Exception:
+                pass
+
+            # Log the run
+            run_logger.write_summary(
+                Path(result.output_path) if result.output_path else output_dir,
+                {
+                    "input": settings["input_path"],
+                    "output": result.output_path,
+                    "returncode": result.returncode,
+                    "args": settings,
+                    "face_global": face_apply,
+                    "chunk_summary": chunk_summary,
+                },
+            )
+
+        # Apply face restoration if enabled
+        if face_apply and output_video and Path(output_video).exists():
+            restored = restore_video(
+                output_video,
+                strength=face_strength,
+                on_progress=lambda x: progress_cb(x) if progress_cb else None
+            )
+            if restored:
+                local_logs.append(f"Face-restored video saved to {restored} (strength {face_strength})")
+                output_video = restored
+
+        if face_apply and output_image and Path(output_image).exists():
+            restored_img = restore_image(output_image, strength=face_strength)
+            if restored_img:
+                local_logs.append(f"Face-restored image saved to {restored_img} (strength {face_strength})")
+                output_image = restored_img
+
+        # Apply FPS override if specified
+        fps_val = seed_controls.get("fps_override_val")
+        if fps_val and output_video and Path(output_video).exists():
+            adjusted = ffmpeg_set_fps(Path(output_video), float(fps_val))
+            output_video = str(adjusted)
+            local_logs.append(f"FPS overridden to {fps_val}: {adjusted}")
+
+    except Exception as e:
+        error_msg = f"Processing failed: {str(e)}"
+        local_logs.append(f"❌ {error_msg}")
+        status = "❌ Processing failed"
+        chunk_summary = "Failed"
+        chunk_info_msg = f"Error: {error_msg}"
+
+    return status, "\n".join(local_logs), output_video, output_image, chunk_info_msg, chunk_summary
+
+
 # Comparison fallback ----------------------------------------------------------
 def comparison_html_slider():
+    """Get comparison slider HTML fallback."""
     return gr.HTML.update(
         value="<p>Comparison fallback: use native slider where available; custom HTML slider assets can be loaded if deployed.</p>"
     )
@@ -253,9 +438,11 @@ def build_seedvr2_callbacks(
     output_dir: Path,
     temp_dir: Path,
 ):
+    """Build SeedVR2 callback functions for the UI."""
     defaults = seedvr2_defaults()
 
     def refresh_presets(model_name: str, select_name: Optional[str] = None):
+        """Refresh preset dropdown."""
         presets = preset_manager.list_presets("seedvr2", model_name)
         last_used = preset_manager.get_last_used_name("seedvr2", model_name)
         preferred = select_name if select_name in presets else None
@@ -263,12 +450,12 @@ def build_seedvr2_callbacks(
         return gr.Dropdown.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, model_name: str, *args):
+        """Save a preset."""
         if not preset_name.strip():
             return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
             payload = _seedvr2_dict_from_args(list(args))
-            # Validate the payload before saving
             validated_payload = _enforce_seedvr2_guardrails(payload, defaults)
 
             preset_manager.save_preset_safe("seedvr2", model_name, preset_name.strip(), validated_payload)
@@ -283,11 +470,11 @@ def build_seedvr2_callbacks(
             return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
+        """Load a preset."""
         try:
             preset = preset_manager.load_preset_safe("seedvr2", model_name, preset_name)
             if preset:
                 preset_manager.set_last_used("seedvr2", model_name, preset_name)
-                # Apply comprehensive validation to loaded preset
                 preset = preset_manager.validate_preset_constraints(preset, "seedvr2", model_name)
                 preset = _enforce_seedvr2_guardrails(preset, defaults)
 
@@ -295,53 +482,89 @@ def build_seedvr2_callbacks(
             values = _apply_preset_to_values(preset or {}, defaults, preset_manager, current=current_map)
             return values
         except Exception as e:
-            # On error, return current values unchanged
             print(f"Error loading preset {preset_name}: {e}")
             return current_values
 
     def safe_defaults():
+        """Get safe default values."""
         return [defaults[key] for key in SEEDVR2_ORDER]
 
     def check_resume_status(global_settings, output_format):
-        """Check if chunking resume is available and return status message."""
-        temp_dir = Path(global_settings["temp_dir"])
-        available, message = check_resume_available(temp_dir, output_format or "mp4")
+        """Check chunking resume status."""
+        temp_dir_path = Path(global_settings["temp_dir"])
+        available, message = check_resume_available(temp_dir_path, output_format or "mp4")
         if available:
             return gr.Markdown.update(value=f"✅ {message}", visible=True)
         else:
             return gr.Markdown.update(value=f"ℹ️ {message}", visible=True)
 
     def cancel():
+        """Cancel current processing."""
         canceled = runner.cancel()
         if canceled:
             return gr.Markdown.update(value="⏹️ Cancel requested"), ""
         return gr.Markdown.update(value="No active process"), ""
 
+    def open_outputs_folder(state: Dict[str, Any]):
+        """Open the outputs folder in file explorer."""
+        try:
+            import platform
+            import subprocess
+            
+            out_dir = str(output_dir)
+            if platform.system() == "Windows":
+                subprocess.Popen(["explorer", out_dir])
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", out_dir])
+            else:
+                subprocess.Popen(["xdg-open", out_dir])
+            return gr.Markdown.update(value=f"✅ Opened outputs folder: {out_dir}")
+        except Exception as e:
+            return gr.Markdown.update(value=f"❌ Failed to open outputs folder: {str(e)}")
+
+    def clear_temp_folder(confirm: bool):
+        """Clear temporary folder if confirmed."""
+        if not confirm:
+            return gr.Markdown.update(value="⚠️ Check 'Confirm delete temp' to clear temporary files")
+        
+        try:
+            temp_path = Path(temp_dir)
+            if temp_path.exists():
+                shutil.rmtree(temp_path)
+                temp_path.mkdir(parents=True, exist_ok=True)
+                return gr.Markdown.update(value=f"✅ Cleared temp folder: {temp_path}")
+            else:
+                return gr.Markdown.update(value=f"ℹ️ Temp folder doesn't exist: {temp_path}")
+        except Exception as e:
+            return gr.Markdown.update(value=f"❌ Failed to clear temp folder: {str(e)}")
+
     def get_model_loading_status():
-        """Get current model loading status for UI display"""
-        model_manager = get_model_manager()
-        loaded_models = model_manager.get_loaded_models_info()
-        current_model = model_manager.current_model_id
+        """Get current model loading status for UI display."""
+        try:
+            model_manager = get_model_manager()
+            loaded_models = model_manager.get_loaded_models_info()
+            current_model = model_manager.current_model_id
 
-        if not loaded_models:
-            return "No models loaded"
+            if not loaded_models:
+                return "No models loaded"
 
-        status_lines = []
-        for model_id, info in loaded_models.items():
-            state = info["state"]
-            marker = "✅" if state == "loaded" else "⏳" if state == "loading" else "❌"
-            current_marker = " ← current" if model_id == current_model else ""
-            status_lines.append(f"{marker} {info['model_name']} ({state}){current_marker}")
+            status_lines = []
+            for model_id, info in loaded_models.items():
+                state = info["state"]
+                marker = "✅" if state == "loaded" else "⏳" if state == "loading" else "❌"
+                current_marker = " ← current" if model_id == current_model else ""
+                status_lines.append(f"{marker} {info['model_name']} ({state}){current_marker}")
 
-        return "\n".join(status_lines)
+            return "\n".join(status_lines)
+        except Exception as e:
+            return f"Error getting model status: {str(e)}"
 
     def _auto_res_from_input(input_path: str, state: Dict[str, Any]):
-        """
-        Recalculate target/max resolution and chunk estimate when input changes.
-        """
+        """Auto-calculate resolution and chunk estimates."""
         seed_controls = state.get("seed_controls", {})
         model_name = seed_controls.get("current_model") or defaults.get("dit_model")
         model_cache = seed_controls.get("resolution_cache", {}).get(model_name, {})
+
         if not input_path:
             return (
                 gr.Slider.update(),
@@ -349,6 +572,7 @@ def build_seedvr2_callbacks(
                 gr.Markdown.update(value="Provide an input to auto-calc resolution/chunks."),
                 state
             )
+
         p = Path(normalize_path(input_path))
         if not p.exists():
             return (
@@ -357,17 +581,20 @@ def build_seedvr2_callbacks(
                 gr.Markdown.update(value="Input path not found; keeping current resolution."),
                 state
             )
+
         auto_res = model_cache.get("auto_resolution", seed_controls.get("auto_resolution", True))
         enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
         ratio_down = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
         chunk_size = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
         chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
+
         target_res = int(model_cache.get("resolution_val") or seed_controls.get("resolution_val") or defaults["resolution"])
         max_target_res = int(model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val") or defaults["max_resolution"])
 
         dims = get_media_dimensions(str(p))
         msg_lines = []
         new_res = target_res
+
         if auto_res and dims:
             w, h = dims
             short_side = min(w, h)
@@ -388,7 +615,6 @@ def build_seedvr2_callbacks(
             dur = get_media_duration_seconds(str(p)) if detect_input_type(str(p)) == "video" else None
             if dur:
                 import math
-
                 est_chunks = math.ceil(dur / max(0.001, chunk_size - chunk_overlap))
                 est_msg = f"Chunk estimate: ~{est_chunks} chunks for {dur:.1f}s (size {chunk_size}s, overlap {chunk_overlap}s)."
             else:
@@ -403,362 +629,30 @@ def build_seedvr2_callbacks(
             state
         )
 
-    def _resolve_input_path(file_upload: Optional[str], manual_path: str, batch_enable: bool, batch_input: str) -> str:
-        if batch_enable and batch_input:
-            return batch_input
-        if file_upload:
-            return str(file_upload)
-        return manual_path
-
     def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False, state: Dict[str, Any] = None):
+        """Main processing action with streaming support."""
         try:
             state = state or {"seed_controls": {}, "operation_status": "ready"}
             state["operation_status"] = "running"
             seed_controls = state.get("seed_controls", {})
-            settings_dict = _seedvr2_dict_from_args(list(args))
-            settings = {**defaults, **settings_dict}
-            guardrail_msgs: List[str] = []
-            settings["cuda_device"] = _expand_cuda_spec(settings.get("cuda_device", ""))
-            state["seed_controls"]["current_model"] = settings.get("dit_model", defaults.get("dit_model"))
-            model_cache = seed_controls.get("resolution_cache", {}).get(settings["dit_model"], {})
-            meta = model_meta_map().get(settings.get("dit_model"))
-            if meta:
-                if settings.get("batch_size") == defaults["batch_size"]:
-                    settings["batch_size"] = meta.default_batch_size
-                if meta.max_resolution > 0:
-                    settings["max_resolution"] = min(
-                        meta.max_resolution,
-                        settings.get("max_resolution", meta.max_resolution) or meta.max_resolution,
-                    )
-                if settings.get("attention_mode") == defaults["attention_mode"] and meta.preferred_attention:
-                    settings["attention_mode"] = meta.preferred_attention
-                if not meta.compile_compatible and (settings.get("compile_dit") or settings.get("compile_vae")):
-                    settings["compile_dit"] = False
-                    settings["compile_vae"] = False
-                    guardrail_msgs.append(
-                        f"{settings.get('dit_model')} is not compile-compatible; compile_dit/compile_vae disabled."
-                    )
-            before_guardrails = settings.copy()
+
+            # Parse settings
+            settings = dict(zip(SEEDVR2_ORDER, list(args)))
             settings = _enforce_seedvr2_guardrails(settings, defaults)
 
-            if settings.get("attention_mode") == "flash_attn":
-                try:
-                    import flash_attn  # type: ignore  # noqa: F401
-                except Exception as exc:
-                    settings["attention_mode"] = "sdpa"
-                    guardrail_msgs.append(f"flash_attn unavailable ({exc}); falling back to sdpa.")
-            if settings.get("batch_size") != before_guardrails.get("batch_size"):
-                guardrail_msgs.append(
-                    f"Batch size adjusted to {settings['batch_size']} (must follow 4n+1 rule)."
-                )
-            if settings.get("vae_encode_tiled") and settings.get("vae_encode_tile_overlap") != before_guardrails.get(
-                "vae_encode_tile_overlap"
-            ):
-                guardrail_msgs.append(
-                    f"VAE encode overlap capped to {settings['vae_encode_tile_overlap']} (< tile size)."
-                )
-            if settings.get("vae_decode_tiled") and settings.get("vae_decode_tile_overlap") != before_guardrails.get(
-                "vae_decode_tile_overlap"
-            ):
-                guardrail_msgs.append(
-                    f"VAE decode overlap capped to {settings['vae_decode_tile_overlap']} (< tile size)."
-                )
-            blockswap_enabled = settings.get("blocks_to_swap", 0) > 0 or settings.get("swap_io_components")
-            if blockswap_enabled and before_guardrails.get("dit_offload_device", "").lower() in ("", "none") and str(
-                settings.get("dit_offload_device", "")
-            ).lower() == "cpu":
-                guardrail_msgs.append("BlockSwap enabled without offload; dit_offload_device set to cpu.")
-
-            settings["cuda_device"] = _expand_cuda_spec(settings.get("cuda_device", ""))
-
-            input_path = _resolve_input_path(uploaded_file, settings["input_path"], settings["batch_enable"], settings["batch_input_path"])
+            # Validate inputs
+            input_path = _resolve_input_path(
+                uploaded_file,
+                settings["input_path"],
+                settings["batch_enable"],
+                settings["batch_input_path"]
+            )
             settings["input_path"] = normalize_path(input_path)
             state["seed_controls"]["last_input_path"] = settings["input_path"]
 
             if not settings["input_path"] or not Path(settings["input_path"]).exists():
-                return ("❌ Input path missing or not found", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
-
-            if settings.get("batch_enable") and settings.get("batch_output_path"):
-                settings["output_override"] = settings["batch_output_path"]
-
-            settings["batch_mode"] = bool(settings.get("batch_enable"))
-
-            # Apply global output hints for PNG padding / skip-cap if user set them in Output tab
-            settings["png_padding"] = seed_controls.get("png_padding_val", 5)
-            settings["png_keep_basename"] = seed_controls.get("png_keep_basename_val", True)
-            if settings.get("skip_first_frames", defaults["skip_first_frames"]) == defaults["skip_first_frames"]:
-                if seed_controls.get("skip_first_frames_val") is not None:
-                    settings["skip_first_frames"] = seed_controls.get("skip_first_frames_val")
-            if settings.get("load_cap", defaults["load_cap"]) == defaults["load_cap"]:
-                if seed_controls.get("load_cap_val") is not None:
-                    settings["load_cap"] = seed_controls.get("load_cap_val")
-
-            if settings["output_format"] == "auto":
-                settings["output_format"] = None
-
-            if not _ffmpeg_available():
-                return ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
-
-            face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))
-            face_strength = float(global_settings.get("face_strength", 0.5))
-            settings["face_restore_global"] = face_apply
-
-            # Apply Resolution tab cached values when available
-        if seed_controls.get("resolution_val") is not None:
-            settings["resolution"] = seed_controls["resolution_val"]
-        if seed_controls.get("max_resolution_val") is not None:
-            settings["max_resolution"] = seed_controls["max_resolution_val"]
-        auto_res = model_cache.get("auto_resolution", seed_controls.get("auto_resolution", True))
-        enable_max_target = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
-        chunk_size_sec = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
-        chunk_overlap_sec = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
-        if chunk_size_sec > 0 and chunk_overlap_sec >= chunk_size_sec:
-            chunk_overlap_sec = max(0.0, chunk_size_sec - 1.0)
-        ratio_downscale = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
-        per_chunk_cleanup = model_cache.get("per_chunk_cleanup", seed_controls.get("per_chunk_cleanup", False))
-        target_res = model_cache.get("resolution_val", seed_controls.get("resolution_val", settings["resolution"]))
-        max_target_res = model_cache.get("max_resolution_val", seed_controls.get("max_resolution_val", settings["max_resolution"]))
-
-        media_dims = get_media_dimensions(settings["input_path"])
-        if media_dims and auto_res:
-            w, h = media_dims
-            short_side = min(w, h)
-            computed_res = min(short_side, target_res or short_side)
-            if ratio_downscale:
-                computed_res = min(computed_res, target_res or computed_res)
-            if enable_max_target and max_target_res and max_target_res > 0:
-                computed_res = min(computed_res, max_target_res)
-            settings["resolution"] = int(computed_res // 16 * 16 or computed_res)
-            settings["max_resolution"] = max_target_res or settings["max_resolution"]
-        if seed_controls.get("output_format_val"):
-            if settings.get("output_format") in (None, "auto"):
-                settings["output_format"] = seed_controls["output_format_val"]
-
-        settings["chunk_size_sec"] = chunk_size_sec
-        settings["chunk_overlap_sec"] = chunk_overlap_sec
-        settings["per_chunk_cleanup"] = per_chunk_cleanup
-
-        if settings["batch_size"] % 4 != 1:
-            settings["batch_size"] = max(1, int(settings["batch_size"] // 4) * 4 + 1)
-
-        blockswap_enabled = settings["blocks_to_swap"] > 0 or settings["swap_io_components"]
-        if blockswap_enabled and str(settings.get("dit_offload_device", "")).lower() in ("none", ""):
-            settings["dit_offload_device"] = "cpu"
-
-        if settings["vae_encode_tiled"] and settings["vae_encode_tile_overlap"] >= settings["vae_encode_tile_size"]:
-            settings["vae_encode_tile_overlap"] = max(0, settings["vae_encode_tile_size"] - 1)
-        if settings["vae_decode_tiled"] and settings["vae_decode_tile_overlap"] >= settings["vae_decode_tile_size"]:
-            settings["vae_decode_tile_overlap"] = max(0, settings["vae_decode_tile_size"] - 1)
-
-        cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
-        if cuda_warning:
-            return (f"⚠️ {cuda_warning}", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
-        devices_list = [d.strip() for d in str(settings.get("cuda_device", "")).split(",") if d.strip()]
-        if meta and not meta.supports_multi_gpu and len(devices_list) > 1:
-            return (
-                f"⚠️ {settings.get('dit_model')} supports single GPU only. Select one CUDA device.",
-                "",
-                None,
-                None,
-                "No chunks",
-                gr.HTML.update(value="No comparison"),
-                gr.ImageSlider.update(value=None),
-                state
-            )
-        if len(devices_list) > 1 and (settings.get("cache_dit") or settings.get("cache_vae")):
-            return ("⚠️ Model caching requires a single GPU selection. Disable caching or choose one GPU.", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
-
-        def _process_single(single_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
-            try:
-                local_logs: List[str] = []
-                if guardrail_msgs:
-                    local_logs.extend([f"⚠️ {m}" for m in guardrail_msgs])
-                local_media_dims = get_media_dimensions(single_settings["input_path"]) if auto_res else None
-                if auto_res and local_media_dims:
-                    local_logs.append(
-                        f"Auto-resolution applied: input {local_media_dims[0]}x{local_media_dims[1]}, target {single_settings['resolution']}, max {single_settings['max_resolution']}"
-                    )
-                if single_settings.get("chunk_enable"):
-                    local_logs.append(
-                        f"Chunking enabled: size={single_settings.get('chunk_size_sec', 0)}s overlap={single_settings.get('chunk_overlap_sec', 0)}s cleanup={single_settings.get('per_chunk_cleanup')}"
-                    )
-
-                def on_progress(line: str):
-                    line = line.rstrip()
-                    local_logs.append(line)
-                    if progress_cb:
-                        progress_cb(line)
-
-                result: RunResult
-                output_video: Optional[str] = None
-                output_image: Optional[str] = None
-                chunk_info_msg = "No chunking performed."
-                chunk_summary = "Single pass (no chunking)."
-                status = "⚠️ Upscale exited unexpectedly"
-
-            # Handle model loading for first run
-            model_manager = get_model_manager()
-            dit_model = single_settings.get("dit_model", "")
-
-            # Check if we need to switch/load model
-            if not model_manager.is_model_loaded(ModelType.SEEDVR2, dit_model, **single_settings):
-                on_progress(f"Loading model: {dit_model}...\n")
-
-                # Try to load the model
-                if not runner.ensure_seedvr2_model_loaded(single_settings, on_progress):
-                    error_msg = f"❌ Failed to load model: {dit_model}"
-                    return (error_msg, "", None, None, "Model load failed", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state)
-
-                on_progress("Model loaded successfully!\n")
-
-            # Skip chunking for preview-only runs; process just the first frame instead
-            should_chunk = (
-                single_settings.get("chunk_enable")
-                and not preview_only
-                and detect_input_type(single_settings["input_path"]) == "video"
-            )
-
-            try:
-                if should_chunk:
-                    # Create a progress callback that only updates on chunk completion
-                    completed_chunks = 0
-                    def chunk_progress_callback(progress_val, desc=""):
-                        nonlocal completed_chunks
-                        if "Completed chunk" in desc:
-                            completed_chunks += 1
-                            on_progress(f"Completed {completed_chunks} chunks\n")
-
-                    rc, clog, final_out, chunk_count = chunk_and_process(
-                        runner,
-                        single_settings,
-                        scene_threshold=single_settings.get("scene_threshold", 27.0),
-                        min_scene_len=single_settings.get("scene_min_len", 2.0),
-                        temp_dir=Path(global_settings["temp_dir"]),
-                        on_progress=lambda msg: None,  # Suppress individual chunk messages
-                        chunk_seconds=float(single_settings.get("chunk_size_sec") or 0),
-                        chunk_overlap=float(single_settings.get("chunk_overlap_sec") or 0),
-                        per_chunk_cleanup=bool(single_settings.get("per_chunk_cleanup")),
-                        resume_from_partial=bool(single_settings.get("resume_chunking", False)),
-                        allow_partial=True,
-                        global_output_dir=str(runner.output_dir) if hasattr(runner, "output_dir") else None,
-                        progress_tracker=chunk_progress_callback,
-                    )
-                    status = "✅ Chunked upscale complete" if rc == 0 else f"⚠️ Chunked upscale ended early ({rc})"
-                    output_path = final_out if final_out else None
-                    output_video = output_path if output_path and output_path.lower().endswith(".mp4") else None
-                    output_image = None
-                    local_logs.append(clog)
-                    chunk_summary = f"Processed {chunk_count} chunks. Final: {output_path}"
-                    chunk_info_msg = f"Chunks: {chunk_count}\nOutput: {output_path}\n{clog}"
-                    result = RunResult(rc, output_path, clog)
-                else:
-                    result = runner.run_seedvr2(single_settings, on_progress=on_progress, preview_only=preview_only)
-                    chunk_summary = "Single pass (no chunking)."
-            except Exception as e:
-                error_msg = f"Processing failed: {str(e)}"
-                local_logs.append(f"❌ {error_msg}")
-                on_progress(f"❌ {error_msg}\n")
-                status = "❌ Processing failed"
-                output_path = None
-                output_video = None
-                output_image = None
-                chunk_summary = "Failed"
-                chunk_info_msg = f"Error: {error_msg}"
-                result = RunResult(1, None, "\n".join(local_logs))
-
-            status = "✅ Upscale complete" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
-            except Exception as e:
-                error_msg = f"Unexpected error during processing: {str(e)}"
-                local_logs.append(f"❌ {error_msg}")
-                on_progress(f"❌ {error_msg}\n")
-                status = "❌ Unexpected error"
-                output_path = None
-                output_video = None
-                output_image = None
-                chunk_summary = "Error"
-                chunk_info_msg = f"Error: {error_msg}"
-                result = RunResult(1, None, "\n".join(local_logs))
-            output_video = result.output_path if result.output_path and str(result.output_path).lower().endswith(".mp4") else None
-            output_image = result.output_path if result.output_path and not str(result.output_path).lower().endswith(".mp4") else None
-
-            current_out_dir = runner.output_dir if hasattr(runner, "output_dir") else output_dir
-        if result.output_path:
-            try:
-                outp = Path(result.output_path)
-                state["seed_controls"]["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
-            except Exception:
-                pass
-            run_logger.write_summary(
-                Path(result.output_path) if result.output_path else current_out_dir,
-                {
-                    "input": single_settings["input_path"],
-                    "output": result.output_path,
-                    "returncode": result.returncode,
-                    "args": single_settings,
-                    "face_global": face_apply,
-                    "chunk_summary": chunk_summary,
-                },
-            )
-
-            if face_apply and output_video and Path(output_video).exists():
-                restored = restore_video(output_video, strength=face_strength, on_progress=on_progress)
-                if restored:
-                    local_logs.append(f"Face-restored video saved to {restored} (strength {face_strength})")
-                    output_video = restored
-            if face_apply and output_image and Path(output_image).exists():
-                restored_img = restore_image(output_image, strength=face_strength)
-                if restored_img:
-                    local_logs.append(f"Face-restored image saved to {restored_img} (strength {face_strength})")
-                    output_image = restored_img
-
-            fps_val = seed_controls.get("fps_override_val")
-            if fps_val and output_video and Path(output_video).exists():
-                adjusted = ffmpeg_set_fps(Path(output_video), float(fps_val))
-                output_video = str(adjusted)
-                local_logs.append(f"FPS overridden to {fps_val}: {adjusted}")
-
-            # Enhanced comparison using latest Gradio features
-            comparison_mode = seed_controls.get("comparison_mode_val", "slider")
-            comparison_html, image_slider_update = create_comparison_selector(
-                input_path=single_settings.get("input_path"),
-                output_path=output_video or output_image,
-                comparison_mode=comparison_mode
-            )
-
-            # If no HTML comparison, use ImageSlider for images
-            if not comparison_html and output_image and not output_video:
-                image_slider_update = gr.ImageSlider.update(
-                    value=(single_settings.get("input_path"), output_image),
-                    visible=True,
-                )
-            elif not image_slider_update:
-                image_slider_update = gr.ImageSlider.update(value=None, visible=False)
-
-            return (
-                status,
-                "\n".join(local_logs),
-                output_video,
-                output_image,
-                chunk_info_msg,
-                comparison_html,
-                image_slider_update,
-                state
-            )
-
-        if settings.get("batch_enable") and Path(settings["input_path"]).is_dir() and not preview_only:
-            # Use the new BatchProcessor for robust batch processing
-            batch_processor = BatchProcessor(
-                max_workers=1,  # Sequential processing for GPU-bound tasks
-                logger=run_logger
-            )
-
-            # Discover all supported files
-            supported_exts = list(SEEDVR2_VIDEO_EXTS | SEEDVR2_IMAGE_EXTS)
-            input_files = batch_processor.discover_files(settings["input_path"], supported_exts)
-
-            if not input_files:
-                return (
-                    "❌ No supported media files found in batch folder",
+                yield (
+                    "❌ Input path missing or not found",
                     "",
                     None,
                     None,
@@ -767,214 +661,150 @@ def build_seedvr2_callbacks(
                     gr.ImageSlider.update(value=None),
                     state
                 )
+                return
 
-            # Create batch jobs
-            batch_jobs = batch_processor.create_batch_jobs(
-                input_files=input_files,
-                settings=settings,
-                output_dir=runner.output_dir if hasattr(runner, "output_dir") else str(output_dir)
+            # Validate CUDA devices
+            cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
+            if cuda_warning:
+                yield (
+                    f"⚠️ {cuda_warning}",
+                    "",
+                    None,
+                    None,
+                    "No chunks",
+                    gr.HTML.update(value="No comparison"),
+                    gr.ImageSlider.update(value=None),
+                    state
+                )
+                return
+
+            # Check ffmpeg availability
+            if not _ffmpeg_available():
+                yield (
+                    "❌ ffmpeg not found in PATH. Install ffmpeg and retry.",
+                    "",
+                    None,
+                    None,
+                    "No chunks",
+                    gr.HTML.update(value="No comparison"),
+                    gr.ImageSlider.update(value=None),
+                    state
+                )
+                return
+
+            # Setup processing parameters
+            face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))
+            face_strength = float(global_settings.get("face_strength", 0.5))
+
+            # Apply cached values from Resolution & Scene Split tab
+            if seed_controls.get("resolution_val") is not None:
+                settings["resolution"] = seed_controls["resolution_val"]
+            if seed_controls.get("max_resolution_val") is not None:
+                settings["max_resolution"] = seed_controls["max_resolution_val"]
+
+            auto_res = seed_controls.get("auto_resolution", True)
+            enable_max_target = seed_controls.get("enable_max_target", True)
+            chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
+            chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0) or 0)
+            ratio_downscale = seed_controls.get("ratio_downscale", False)
+            per_chunk_cleanup = seed_controls.get("per_chunk_cleanup", False)
+
+            settings["chunk_size_sec"] = chunk_size_sec
+            settings["chunk_overlap_sec"] = chunk_overlap_sec
+            settings["per_chunk_cleanup"] = per_chunk_cleanup
+
+            # Auto-resolution calculation
+            media_dims = get_media_dimensions(settings["input_path"])
+            if media_dims and auto_res:
+                w, h = media_dims
+                short_side = min(w, h)
+                target_res = settings["resolution"]
+                max_target_res = settings["max_resolution"]
+
+                computed_res = min(short_side, target_res or short_side)
+                if ratio_downscale:
+                    computed_res = min(computed_res, target_res or computed_res)
+                if enable_max_target and max_target_res and max_target_res > 0:
+                    computed_res = min(computed_res, max_target_res)
+                settings["resolution"] = int(computed_res // 16 * 16 or computed_res)
+
+            # Apply output format from Comparison tab if set
+            if seed_controls.get("output_format_val"):
+                if settings.get("output_format") in (None, "auto"):
+                    settings["output_format"] = seed_controls["output_format_val"]
+
+            if settings["output_format"] == "auto":
+                settings["output_format"] = None
+
+            # Batch processing
+            if settings.get("batch_enable"):
+                yield (
+                    "❌ Batch processing not yet implemented",
+                    "",
+                    None,
+                    None,
+                    "No chunks",
+                    gr.HTML.update(value="No comparison"),
+                    gr.ImageSlider.update(value=None),
+                    state
+                )
+                return
+
+            # Single file processing
+            status, logs, output_video, output_image, chunk_info, chunk_summary = _process_single_file(
+                runner,
+                settings,
+                global_settings,
+                seed_controls,
+                face_apply,
+                face_strength,
+                run_logger,
+                output_dir,
+                preview_only
             )
 
-            # Progress tracking
-            batch_progress_updates = []
-
-            def batch_progress_callback(progress: BatchProgress):
-                """Update UI with batch progress"""
-                if progress.current_file:
-                    current_name = Path(progress.current_file).name
-                    status_msg = f"Batch Progress: {progress.completed_files}/{progress.total_files} files completed"
-                    if progress.estimated_time_remaining:
-                        eta_minutes = int(progress.estimated_time_remaining / 60)
-                        status_msg += f" (ETA: {eta_minutes}min)"
-
-                    batch_progress_updates.append(f"[{current_name}] Processing... ({progress.overall_progress:.1%})")
-
-                    # Update state with current progress
-                    state["operation_status"] = "running"
-
-            batch_processor.progress_callback = batch_progress_callback
-
-            # Process batch
-            def process_single_job(job: BatchJob) -> bool:
-                """Process a single file in the batch"""
-                try:
-                    single_settings = settings.copy()
-                    single_settings["input_path"] = job.input_path
-                    single_settings["batch_enable"] = False
-                    single_settings["batch_mode"] = False
-                    single_settings["output_override"] = job.output_path
-
-                    # Process the single file
-                    result = _process_single(single_settings)
-
-                    # Update job with results
-                    if result and len(result) >= 4:
-                        status, log, output_video, output_image = result[:4]
-                        job.output_path = output_video or output_image
-                        job.metadata.update({
-                            "status": status,
-                            "log": log,
-                            "output_video": output_video,
-                            "output_image": output_image
-                        })
-                        return bool(output_video or output_image)
-                    else:
-                        job.error_message = "Processing failed - invalid result"
-                        return False
-
-                except Exception as e:
-                    job.error_message = str(e)
-                    return False
-
-            # Run batch processing
-            batch_result = batch_processor.process_batch(
-                jobs=batch_jobs,
-                processor_func=process_single_job,
-                max_concurrent=1  # Sequential for GPU tasks
+            # Create comparison
+            comparison_mode = seed_controls.get("comparison_mode_val", "slider")
+            comparison_html, image_slider_update = create_comparison_selector(
+                input_path=settings.get("input_path"),
+                output_path=output_video or output_image,
+                comparison_mode=comparison_mode
             )
 
-            # Collect results
-            batch_outputs = []
-            batch_logs = []
-            last_video = None
-            last_image = None
+            # If no HTML comparison, use ImageSlider for images
+            if not comparison_html and output_image and not output_video:
+                image_slider_update = gr.ImageSlider.update(
+                    value=(settings.get("input_path"), output_image),
+                    visible=True,
+                )
+            elif not image_slider_update:
+                image_slider_update = gr.ImageSlider.update(value=None, visible=False)
 
-            for job in batch_result.jobs:
-                batch_logs.append(f"[{Path(job.input_path).name}] {job.status.upper()}")
-                if job.error_message:
-                    batch_logs.append(f"  Error: {job.error_message}")
-
-                if job.output_path:
-                    batch_outputs.append(job.output_path)
-                    if job.metadata.get("output_video"):
-                        last_video = job.metadata["output_video"]
-                    if job.metadata.get("output_image"):
-                        last_image = job.metadata["output_image"]
-
-            # Create batch summary
-            batch_summary = batch_processor.get_batch_summary(batch_result)
-
-            # Update state with final results
-            current_out_dir = runner.output_dir if hasattr(runner, "output_dir") else output_dir
-            if batch_outputs:
-                try:
-                    last_out = Path(batch_outputs[-1])
-                    seed_controls_cache["last_output_dir"] = str(last_out.parent if last_out.is_file() else last_out)
-                except Exception:
-                    pass
-
-            # Log batch summary
-            run_logger.write_summary(
-                Path(last_video or last_image or current_out_dir),
-                {
-                    "batch_summary": batch_summary,
-                    "input": settings["input_path"],
-                    "output": batch_outputs,
-                    "returncode": 0 if batch_result.completed_files > 0 else 1,
-                    "args": settings,
-                },
-            )
-
-            # Format final status message
-            status_msg = f"Batch complete: {batch_result.completed_files}/{batch_result.total_files} files processed"
-            if batch_result.failed_files > 0:
-                status_msg += f" ({batch_result.failed_files} failed)"
-
-            # Return results for UI update
-            last_chunk_info = f"Batch: {batch_result.completed_files}/{batch_result.total_files} completed"
-            last_cmp = f'<div class="batch-summary"><h4>Batch Results</h4><p>{status_msg}</p></div>'
-            last_slider = gr.ImageSlider.update(value=None)  # No comparison for batch
-
-            return (
-                status_msg,
-                "\n".join(batch_logs[-20:]),  # Show last 20 log entries
-                last_video,
-                last_image,
-                last_chunk_info,
-                gr.HTML.update(value=last_cmp),
-                last_slider,
+            state["operation_status"] = "completed" if "✅" in status else "ready"
+            yield (
+                status,
+                logs,
+                output_video,
+                output_image,
+                chunk_info,
+                comparison_html,
+                image_slider_update,
                 state
             )
 
-        # Streaming: queue progress lines while a worker thread runs the job
-        progress_q: "queue.Queue[str]" = queue.Queue()
-        result_holder: Dict[str, Any] = {}
-        last_chunk_line = "Processing..."
-        pending_update = False
-        last_emit = time.time()
-
-        def progress_cb(line: str):
-            nonlocal last_chunk_line
-            if "chunk" in line.lower():
-                last_chunk_line = line.strip()
-            progress_q.put(line)
-
-        def worker():
-            try:
-                result_holder["payload"] = _process_single(settings, progress_cb=progress_cb)
-            except Exception as exc:
-                result_holder["payload"] = (f"❌ Failed: {exc}", "", None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None))
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-
-        log_acc: List[str] = []
-        # Stream logs while processing; emit on chunk boundaries or sparse heartbeat
-        while t.is_alive() or not progress_q.empty():
-            try:
-                line = progress_q.get(timeout=0.5)
-                log_acc.append(line)
-                if "chunk" in line.lower():
-                    last_chunk_line = line.strip()
-                    pending_update = True
-            except queue.Empty:
-                pass
-            now = time.time()
-            if pending_update or (now - last_emit > 5 and log_acc):
-                last_emit = now
-                pending_update = False
-                yield (
-                    gr.Markdown.update(value="⏳ Running SeedVR2..."),
-                    "\n".join(log_acc[-400:]),
-                    None,
-                    None,
-                    last_chunk_line,
-                    gr.HTML.update(value=""),
-                    gr.ImageSlider.update(value=None),
-                    state
-                )
-        t.join()
-
-        status, log_text, output_video, output_image, chunk_info_msg, comparison_html, image_slider_update = result_holder.get(
-            "payload",
-            ("❌ Failed", "\n".join(log_acc), None, None, "No chunks", gr.HTML.update(value="No comparison"), gr.ImageSlider.update(value=None), state),
-        )
-        # Final yield with results and accumulated logs
-        final_log = log_text if log_text else "\n".join(log_acc)
-        state["operation_status"] = "completed" if "✅" in status else "ready"
-        yield (
-            status,
-            final_log,
-            output_video,
-            output_image,
-            chunk_info_msg if chunk_info_msg else last_chunk_line,
-            gr.HTML.update(value=comparison_html),
-            image_slider_update,
-            state
-        )
-            except Exception as e:
-                error_msg = f"Critical error in SeedVR2 processing: {str(e)}"
-                state["operation_status"] = "error"
-                yield (
-                    "❌ Critical error",
-                    error_msg,
-                    None,
-                    None,
-                    "Error",
-                    gr.HTML.update(value="Error occurred"),
-                    gr.ImageSlider.update(value=None),
-                    state
-                )
+        except Exception as e:
+            error_msg = f"Critical error in SeedVR2 processing: {str(e)}"
+            state["operation_status"] = "error"
+            yield (
+                "❌ Critical error",
+                error_msg,
+                None,
+                None,
+                "Error",
+                gr.HTML.update(value="Error occurred"),
+                gr.ImageSlider.update(value=None),
+                state
+            )
 
     return {
         "defaults": defaults,
@@ -984,10 +814,11 @@ def build_seedvr2_callbacks(
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
         "check_resume_status": check_resume_status,
-        "run_action": lambda *args: run_action(*args[:-1], state=args[-1]) if len(args) > 1 else run_action(*args),
-        "cancel_action": lambda state=None: cancel(),
+        "run_action": run_action,
+        "cancel_action": cancel,
+        "open_outputs_folder": open_outputs_folder,
+        "clear_temp_folder": clear_temp_folder,
         "comparison_html_slider": comparison_html_slider,
-        "auto_res_on_input": lambda path, state=None: _auto_res_from_input(path, state or {"seed_controls": {}}),
+        "auto_res_on_input": _auto_res_from_input,
+        "get_model_loading_status": get_model_loading_status,
     }
-
-
