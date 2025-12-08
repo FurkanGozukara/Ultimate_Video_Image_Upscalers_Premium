@@ -9,6 +9,8 @@ from typing import Dict, Any
 from shared.services.gan_service import (
     build_gan_callbacks, GAN_ORDER
 )
+from shared.video_comparison_slider import create_video_comparison_html
+from shared.ui_validators import validate_resolution
 
 
 def gan_tab(
@@ -157,6 +159,7 @@ def gan_tab(
                     value=values[5],
                     info="Desired output resolution (will be adjusted based on model scale)"
                 )
+                target_res_warning = gr.Markdown("", visible=False)
 
                 downscale_first = gr.Checkbox(
                     label="Downscale First if Needed",
@@ -293,6 +296,13 @@ def gan_tab(
             max_height=600,
             buttons=["download", "fullscreen"]
         )
+        
+        # Video Comparison with custom HTML5 slider
+        video_comparison_html = gr.HTML(
+            label="🎬 Video Comparison Slider",
+            value="",
+            visible=False
+        )
 
     # Last processed info
     last_processed = gr.Markdown("Batch processing results will appear here.")
@@ -413,7 +423,7 @@ def gan_tab(
         inputs=inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,
-            last_processed, image_slider, batch_gallery, shared_state
+            last_processed, image_slider, video_comparison_html, batch_gallery, shared_state
         ]
     )
 
@@ -422,8 +432,21 @@ def gan_tab(
         inputs=inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,
-            last_processed, image_slider, batch_gallery, shared_state
+            last_processed, image_slider, video_comparison_html, batch_gallery, shared_state
         ]
+    )
+    
+    # Add resolution validation
+    def validate_target_res_ui(val):
+        is_valid, message, corrected = validate_resolution(val, must_be_multiple_of=64)
+        if not is_valid:
+            return corrected, gr.Markdown.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
+        return val, gr.Markdown.update(value="", visible=False)
+    
+    target_resolution.change(
+        fn=validate_target_res_ui,
+        inputs=target_resolution,
+        outputs=[target_resolution, target_res_warning]
     )
 
     cancel_btn.click(

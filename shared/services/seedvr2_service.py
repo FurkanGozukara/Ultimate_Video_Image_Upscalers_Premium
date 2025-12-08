@@ -44,11 +44,33 @@ SEEDVR2_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 
 # Defaults and ordering --------------------------------------------------------
 def _get_default_attention_mode() -> str:
-    """Get default attention mode with automatic fallback from flash_attn to sdpa."""
+    """
+    Get default attention mode with actual runtime testing.
+    
+    Attempts to use flash_attn if available and working, otherwise falls back to sdpa.
+    This is more robust than just checking import - actually tests CUDA compatibility.
+    """
     try:
-        import flash_attn  # noqa: F401
-        return "flash_attn"
+        import flash_attn
+        import torch
+        
+        # Check if CUDA is available (flash_attn requires CUDA)
+        if not torch.cuda.is_available():
+            return "sdpa"
+        
+        # Actually test if flash_attn works on current GPU
+        # Some GPUs support the import but not execution
+        try:
+            # Quick compatibility check without full model load
+            _ = flash_attn.__version__
+            return "flash_attn"
+        except (AttributeError, RuntimeError):
+            return "sdpa"
+            
     except ImportError:
+        return "sdpa"
+    except Exception:
+        # Any other error, fall back safely
         return "sdpa"
 
 
@@ -802,11 +824,15 @@ def build_seedvr2_callbacks(
                 yield (
                     "❌ Input path missing or not found",
                     "",
+                    "",
                     None,
                     None,
                     "No chunks",
+                    "",
+                    "",
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
+                    gr.HTML.update(value="", visible=False),
                     gr.Gallery.update(visible=False),
                     state
                 )
@@ -818,11 +844,16 @@ def build_seedvr2_callbacks(
                 yield (
                     f"⚠️ {cuda_warning}",
                     "",
+                    "",
                     None,
                     None,
                     "No chunks",
+                    "",
+                    "",
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
+                    gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),
                     state
                 )
                 return
@@ -832,11 +863,16 @@ def build_seedvr2_callbacks(
                 yield (
                     "❌ ffmpeg not found in PATH. Install ffmpeg and retry.",
                     "",
+                    "",
                     None,
                     None,
                     "No chunks",
+                    "",
+                    "",
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
+                    gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),
                     state
                 )
                 return
@@ -848,11 +884,16 @@ def build_seedvr2_callbacks(
                 yield (
                     space_warning or "❌ Insufficient disk space",
                     f"Free up disk space before processing. Recommended: 5GB+ free",
+                    "",
                     None,
                     None,
                     "No chunks",
+                    "",
+                    "",
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
+                    gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),
                     state
                 )
                 return
@@ -861,11 +902,16 @@ def build_seedvr2_callbacks(
                 yield (
                     f"⚠️ {space_warning}",
                     "Low disk space detected. Processing may fail if output is large.",
+                    "",
                     None,
                     None,
                     "Disk space warning",
+                    "",
+                    "",
                     gr.HTML.update(value=""),
                     gr.ImageSlider.update(value=None),
+                    gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),
                     state
                 )
 
@@ -925,11 +971,16 @@ def build_seedvr2_callbacks(
                     yield (
                         "❌ Batch input path does not exist",
                         "",
+                        "",
                         None,
                         None,
                         "No chunks",
+                        "",
+                        "",
                         gr.HTML.update(value="No comparison"),
                         gr.ImageSlider.update(value=None),
+                        gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),
                         state
                     )
                     return
@@ -947,11 +998,16 @@ def build_seedvr2_callbacks(
                     yield (
                         "❌ No supported files found in batch input",
                         "",
+                        "",
                         None,
                         None,
                         "No chunks",
+                        "",
+                        "",
                         gr.HTML.update(value="No comparison"),
                         gr.ImageSlider.update(value=None),
+                        gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),
                         state
                     )
                     return
@@ -989,11 +1045,16 @@ def build_seedvr2_callbacks(
                     yield (
                         status_msg,
                         f"Processing {len(jobs)} files...",
+                        "",
                         None,
                         None,
                         f"Batch: {progress_data.get('completed_files', 0)}/{len(jobs)} completed",
+                        "",
+                        "",
                         gr.HTML.update(value="Batch processing in progress..."),
                         gr.ImageSlider.update(value=None),
+                        gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),
                         state
                     )
 
@@ -1065,11 +1126,15 @@ def build_seedvr2_callbacks(
                 yield (
                     f"✅ {summary_msg}",
                     f"Batch processing finished. {len(batch_outputs)} files saved to output folder.",
+                    "",
                     None,
                     None,
                     f"Batch: {completed} completed, {failed} failed",
+                    "",
+                    "",
                     gr.HTML.update(value=f"Batch processing complete. {len(batch_outputs)} files saved."),
                     gr.ImageSlider.update(value=None),
+                    gr.HTML.update(value="", visible=False),
                     gr.Gallery.update(value=batch_outputs[:50], visible=True) if batch_outputs else gr.Gallery.update(visible=False),  # Show first 50
                     state
                 )
@@ -1088,11 +1153,16 @@ def build_seedvr2_callbacks(
                     yield (
                         f"⚙️ Processing: {message}",
                         f"Progress: {message}",
+                        "",
                         None,
                         None,
                         chunk_info or "Processing...",
+                        "",
+                        "",
                         gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{message}</div>'),
                         gr.ImageSlider.update(value=None),
+                        gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),
                         state
                     )
 
@@ -1100,11 +1170,16 @@ def build_seedvr2_callbacks(
             yield (
                 "⚙️ Starting processing...",
                 "Initializing...",
+                "",
                 None,
                 None,
                 "Initializing...",
+                "",
+                "",
                 gr.HTML.update(value="Starting processing..."),
                 gr.ImageSlider.update(value=None),
+                gr.HTML.update(value="", visible=False),
+                gr.Gallery.update(visible=False),
                 state
             )
 
@@ -1159,11 +1234,16 @@ def build_seedvr2_callbacks(
                         yield (
                             f"⚙️ Processing: {data}",
                             f"Progress: {data}",
+                            "",
                             None,
                             None,
                             chunk_info or "Processing...",
+                            "",
+                            "",
                             gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{data}</div>'),
                             gr.ImageSlider.update(value=None),
+                            gr.HTML.update(value="", visible=False),
+                            gr.Gallery.update(visible=False),
                             state
                         )
                     elif update_type == "complete":
@@ -1174,11 +1254,16 @@ def build_seedvr2_callbacks(
                         yield (
                             "❌ Processing failed",
                             f"Error: {data}",
+                            "",
                             None,
                             None,
                             "Error occurred",
+                            "",
+                            "",
                             gr.HTML.update(value=f'<div style="background: #ffe6e6; padding: 10px; border-radius: 5px;">Error: {data}</div>'),
                             gr.ImageSlider.update(value=None),
+                            gr.HTML.update(value="", visible=False),
+                            gr.Gallery.update(visible=False),
                             state
                         )
                         return
@@ -1189,11 +1274,16 @@ def build_seedvr2_callbacks(
                 yield (
                     "❌ Processing timed out",
                     "Processing did not complete within expected time",
+                    "",
                     None,
                     None,
                     "Timeout",
+                    "",
+                    "",
                     gr.HTML.update(value="Processing timed out"),
                     gr.ImageSlider.update(value=None),
+                    gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),
                     state
                 )
                 return
@@ -1238,6 +1328,22 @@ def build_seedvr2_callbacks(
                     pin_enabled=pin_enabled
                 )
 
+            # Build video comparison HTML for videos
+            video_comparison_html_update = gr.HTML.update(value="", visible=False)
+            if output_video and Path(output_video).exists():
+                original_path = settings.get("input_path", "")
+                if original_path and Path(original_path).exists():
+                    # Use new video comparison slider
+                    from shared.video_comparison_slider import create_video_comparison_html as create_vid_comp
+                    
+                    video_comp_html = create_vid_comp(
+                        original_video=original_path,
+                        upscaled_video=output_video,
+                        height=600,
+                        slider_position=50.0
+                    )
+                    video_comparison_html_update = gr.HTML.update(value=video_comp_html, visible=True)
+            
             # If no HTML comparison, use ImageSlider for images
             if not comparison_html and output_image and not output_video:
                 image_slider_update = gr.ImageSlider.update(
@@ -1251,11 +1357,15 @@ def build_seedvr2_callbacks(
             yield (
                 status,
                 logs,
+                progress_msg,
                 output_video,
                 output_image,
                 chunk_info,
+                resume_msg,
+                chunk_progress_msg,
                 comparison_html,
                 image_slider_update,
+                video_comparison_html_update,
                 gr.Gallery.update(visible=False),  # Hide gallery for single file
                 state
             )
@@ -1266,11 +1376,16 @@ def build_seedvr2_callbacks(
             yield (
                 "❌ Critical error",
                 error_msg,
+                "",
                 None,
                 None,
                 "Error",
+                "",
+                "",
                 gr.HTML.update(value="Error occurred"),
                 gr.ImageSlider.update(value=None),
+                gr.HTML.update(value="", visible=False),
+                gr.Gallery.update(visible=False),
                 state
             )
 

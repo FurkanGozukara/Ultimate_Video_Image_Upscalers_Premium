@@ -388,29 +388,67 @@ class Runner:
     # ------------------------------------------------------------------ #
     def _find_vcvars(self) -> Optional[Path]:
         """
-        Try to locate vcvarsall.bat in common VS Build Tools locations.
+        Try to locate vcvarsall.bat using multiple detection methods.
+        
+        Uses the most robust approach:
+        1. Check VSINSTALLDIR environment variable
+        2. Use vswhere.exe (official VS installer locator)
+        3. Fall back to hardcoded common paths
+        
+        This ensures maximum compatibility across different VS installations.
         """
-        candidates = [
-            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"),
-            Path(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"),
-            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"),
-            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"),
-        ]
-        # Check environment variable first
+        # Method 1: Check environment variable (fastest)
         vs_install_dir = os.environ.get("VSINSTALLDIR")
         if vs_install_dir:
             env_candidate = Path(vs_install_dir) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
             if env_candidate.exists():
                 return env_candidate
-
-        # Check candidates
+        
+        # Method 2: Use vswhere.exe (most reliable)
+        vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+        if vswhere.exists():
+            try:
+                # Query vswhere for latest Visual Studio installation
+                result = subprocess.run(
+                    [str(vswhere), "-latest", "-property", "installationPath"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    install_path = Path(result.stdout.strip())
+                    vcvars = install_path / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
+                    if vcvars.exists():
+                        return vcvars
+            except (subprocess.TimeoutExpired, Exception):
+                # vswhere failed, continue to fallback
+                pass
+        
+        # Method 3: Check common installation paths
+        candidates = [
+            # BuildTools (most common for CI/CD)
+            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"),
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"),
+            # Community Edition
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"),
+            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"),
+            # Professional Edition
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat"),
+            # Enterprise Edition
+            Path(r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"),
+            # VS 2019 fallback
+            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"),
+            Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat"),
+        ]
+        
         for candidate in candidates:
             if candidate.exists():
                 # Quick validation that it's actually a vcvarsall.bat file
                 try:
                     with open(candidate, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read(200)
-                        if 'vcvarsall.bat' in content or '@echo off' in content:
+                        # Verify it looks like a vcvarsall.bat file
+                        if 'vcvarsall' in content.lower() or '@echo off' in content:
                             return candidate
                 except Exception:
                     continue
@@ -755,13 +793,13 @@ class Runner:
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> RunResult:
         """
-        Run GAN-based upscaling using the gan_runner module.
+        Run GAN-based upscaling using the complete GAN runner implementation.
         """
-        from .gan_runner import GanRunner, GanResult
+        from .gan_runner_complete import GanRunner, GanResult
 
         try:
             # Initialize GAN runner
-            gan_runner = GanRunner()
+            gan_runner = GanRunner(self.base_dir)
 
             # Convert settings to GAN runner format
             model_name = settings.get("model", "")

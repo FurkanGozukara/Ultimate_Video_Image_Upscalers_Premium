@@ -12,6 +12,8 @@ from shared.services.seedvr2_service import (
 )
 from shared.models.seedvr2_meta import get_seedvr2_model_names
 from ui.shared_components import preset_section
+from shared.video_comparison_slider import create_video_comparison_html
+from shared.ui_validators import validate_batch_size_seedvr2, validate_resolution
 
 
 def seedvr2_tab(
@@ -205,6 +207,7 @@ def seedvr2_tab(
                     value=values[12],
                     info="Maximum resolution cap for safety. Prevents accidental 8K+ upscaling. 0 = unlimited. Set to 4096 for 4K max, 2160 for 1080p max."
                 )
+            resolution_warning = gr.Markdown("", visible=False)
 
             # Core processing parameters
             batch_size = gr.Slider(
@@ -213,6 +216,7 @@ def seedvr2_tab(
                 value=values[13],
                 info="SeedVR2 requires batch size to follow 4n+1 formula (5, 9, 13, 17, 21...)"
             )
+            batch_size_warning = gr.Markdown("", visible=False)
             uniform_batch_size = gr.Checkbox(
                 label="Uniform Batch Size",
                 value=values[14],
@@ -477,6 +481,13 @@ def seedvr2_tab(
                 max_height=600,
                 buttons=["download", "fullscreen"]
             )
+            
+            # Video Comparison with custom HTML5 slider
+            video_comparison_html = gr.HTML(
+                label="🎬 Video Comparison Slider",
+                value="",
+                visible=False
+            )
 
             # Last processed chunk info
             chunk_info = gr.Markdown("Last processed chunk will appear here.")
@@ -659,7 +670,7 @@ def seedvr2_tab(
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
-            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, batch_gallery, shared_state
+            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, batch_gallery, shared_state
         ]
     )
 
@@ -668,7 +679,7 @@ def seedvr2_tab(
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
-            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, batch_gallery, shared_state
+            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, batch_gallery, shared_state
         ]
     )
 
@@ -823,6 +834,32 @@ def seedvr2_tab(
         fn=detect_input_type,
         inputs=input_path,
         outputs=input_detection_result
+    )
+
+    # Add batch size validation
+    def validate_batch_size_ui(val):
+        is_valid, message, corrected = validate_batch_size_seedvr2(val)
+        if not is_valid:
+            return corrected, gr.Markdown.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
+        return val, gr.Markdown.update(value="", visible=False)
+    
+    batch_size.change(
+        fn=validate_batch_size_ui,
+        inputs=batch_size,
+        outputs=[batch_size, batch_size_warning]
+    )
+    
+    # Add resolution validation
+    def validate_resolution_ui(val):
+        is_valid, message, corrected = validate_resolution(val, must_be_multiple_of=16)
+        if not is_valid:
+            return corrected, gr.Markdown.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
+        return val, gr.Markdown.update(value="", visible=False)
+    
+    resolution.change(
+        fn=validate_resolution_ui,
+        inputs=resolution,
+        outputs=[resolution, resolution_warning]
     )
 
     # Initialize comparison slider and model status

@@ -460,9 +460,24 @@ class ModelManager:
 
 
 # Global instance
-model_manager = ModelManager()
+# Singleton instance with thread-safe initialization
+_model_manager_instance: Optional[ModelManager] = None
+_manager_lock = threading.Lock()
 
 
 def get_model_manager() -> ModelManager:
-    """Get the global model manager instance"""
-    return model_manager
+    """
+    Get singleton ModelManager instance (thread-safe).
+    
+    This ensures only one ModelManager exists across the entire application,
+    preventing duplicate model loading and VRAM waste.
+    """
+    global _model_manager_instance
+    
+    if _model_manager_instance is None:
+        with _manager_lock:
+            # Double-check locking pattern for thread safety
+            if _model_manager_instance is None:
+                _model_manager_instance = ModelManager()
+    
+    return _model_manager_instance

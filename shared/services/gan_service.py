@@ -18,8 +18,10 @@ from shared.path_utils import (
 from shared.face_restore import restore_image, restore_video
 from shared.logging_utils import RunLogger
 from shared.realesrgan_runner import run_realesrgan
-from shared.gan_runner import run_gan_upscale
+from shared.gan_runner_complete import GanRunner, GanResult
+from shared.gan_runner import get_gan_model_metadata
 from shared.video_comparison import build_video_comparison, build_image_comparison
+from shared.video_comparison_slider import create_video_comparison_html
 
 
 GAN_MODEL_EXTS = {".pth", ".safetensors"}
@@ -560,16 +562,23 @@ def build_gan_callbacks(
                     prepped_settings["face_restore"] = face_apply
                     prepped_settings["face_strength"] = face_strength
                     
-                    result = run_gan_upscale(
+                    # Use new complete GAN runner
+                    gan_runner = GanRunner(base_dir)
+                    output_path_target = current_output_dir / f"{Path(prepped_settings['input_path']).stem}_upscaled.png"
+                    gan_result = gan_runner.run_gan_processing(
                         input_path=prepped_settings["input_path"],
-                        model_name=prepped_settings["model_name"],
+                        model_name=prepped_settings["model"],
+                        output_path=str(output_path_target),
                         settings=prepped_settings,
-                        base_dir=base_dir,
-                        temp_dir=current_temp_dir,
-                        output_dir=current_output_dir,
-                        on_progress=progress_cb if progress_cb else None,
-                        cancel_event=cancel_event
+                        on_progress=progress_cb if progress_cb else None
                     )
+                    
+                    # Convert GanResult to expected result format
+                    result = type('obj', (object,), {
+                        'returncode': gan_result.returncode,
+                        'output_path': gan_result.output_path,
+                        'log': gan_result.log
+                    })()
                 except Exception as exc:  # surface ffmpeg or other runtime issues
                     err_msg = f"❌ GAN upscale failed: {exc}"
                     if progress_cb:
@@ -670,16 +679,34 @@ def build_gan_callbacks(
 
             status, lg, outp, cmp_html, slider_upd = result_holder.get(
                 "payload",
-                ("❌ Failed", "", None, "", gr.ImageSlider.update(value=None), state),
+                ("❌ Failed", "", None, "", gr.ImageSlider.update(value=None)),
             )
             live_logs = result_holder.get("live_logs", [])
             merged_logs = lg if lg else "\n".join(live_logs)
+            
+            # Build video comparison for videos
+            video_comp_html_update = gr.HTML.update(value="", visible=False)
+            if outp and Path(outp).exists() and Path(outp).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'):
+                original_path = settings.get("input_path", "")
+                if original_path and Path(original_path).exists():
+                    video_comp_html_value = create_video_comparison_html(
+                        original_video=original_path,
+                        upscaled_video=outp,
+                        height=600,
+                        slider_position=50.0
+                    )
+                    video_comp_html_update = gr.HTML.update(value=video_comp_html_value, visible=True)
+            
             yield (
                 status,
                 merged_logs,
-                outp if outp and str(outp).endswith(".mp4") else outp,
-                cmp_html,
+                gr.Markdown.update(value="", visible=False),
+                outp if outp and not Path(outp).is_dir() and Path(outp).suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp') else None,
+                outp if outp and str(outp).endswith(".mp4") else None,
+                f"Output: {outp}" if outp else "No output",
                 slider_upd,
+                video_comp_html_update,
+                gr.Gallery.update(visible=False),
                 state
             )
         except Exception as e:
@@ -687,9 +714,13 @@ def build_gan_callbacks(
             yield (
                 "❌ Critical error",
                 error_msg,
+                gr.Markdown.update(value="", visible=False),
                 None,
-                "",
+                None,
+                "Error",
                 gr.ImageSlider.update(value=None),
+                gr.HTML.update(value="", visible=False),
+                gr.Gallery.update(visible=False),
                 state or {}
             )
 
