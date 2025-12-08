@@ -55,7 +55,7 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
         shared_state.value = update_warning(shared_state.value)
 
     merged_defaults = preset_manager.merge_config(defaults, last_used or {})
-    values = [merged_defaults[k] for k in FACE_ORDER]
+    values = [merged_defaults.get(k, defaults.get(k, "")) for k in FACE_ORDER]
 
     # Layout
     gr.Markdown("### 👤 Face Restoration Settings")
@@ -95,6 +95,77 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
     )
 
     with gr.Tabs():
+        # Model Selection
+        with gr.TabItem("🤖 Model Selection"):
+            gr.Markdown("#### Face Restoration Model")
+            
+            # Get available backends
+            from shared.face_restore import get_available_backends
+            available_backends = get_available_backends()
+            
+            if not available_backends:
+                gr.Markdown("""
+                **⚠️ No Face Restoration Models Available**
+                
+                Please install one of the following:
+                - **GFPGAN**: `pip install gfpgan`
+                - **CodeFormer**: Coming soon
+                
+                Until installed, face restoration will be skipped.
+                """)
+                backend_choices = ["auto"]
+            else:
+                backend_choices = ["auto"] + available_backends
+            
+            with gr.Group():
+                face_backend = gr.Dropdown(
+                    label="Face Restoration Backend",
+                    choices=backend_choices,
+                    value=values[1] if len(values) > 1 else "auto",
+                    info="'auto' uses first available backend. GFPGAN is recommended for most cases."
+                )
+                
+                face_strength = gr.Slider(
+                    label="Restoration Strength",
+                    minimum=0.0,
+                    maximum=1.0,
+                    step=0.05,
+                    value=values[2] if len(values) > 2 else 0.5,
+                    info="How much to restore faces. 0.0 = no change, 1.0 = maximum restoration. Try 0.5-0.8 for balanced results."
+                )
+                
+                backend_info = gr.Markdown("")
+                
+                def update_backend_info(backend):
+                    if backend == "auto":
+                        if available_backends:
+                            return f"**Auto**: Will use {available_backends[0]} (first available)"
+                        else:
+                            return "**Auto**: No backends available - face restoration will be skipped"
+                    elif backend == "gfpgan":
+                        return """
+                        **GFPGAN v1.3**
+                        - High quality face restoration
+                        - Works on photos and videos
+                        - GPU accelerated
+                        - Best for realistic faces
+                        """
+                    elif backend == "codeformer":
+                        return """
+                        **CodeFormer**
+                        - Advanced face restoration
+                        - Better for heavily degraded faces
+                        - Controllable fidelity
+                        - Coming soon
+                        """
+                    return ""
+                
+                face_backend.change(
+                    fn=update_backend_info,
+                    inputs=face_backend,
+                    outputs=backend_info
+                )
+        
         # Face Detection Settings
         with gr.TabItem("🔍 Face Detection"):
             gr.Markdown("#### Face Detection Configuration")

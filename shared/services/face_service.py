@@ -5,18 +5,49 @@ from shared.preset_manager import PresetManager
 
 
 def face_defaults(models: List[str]) -> Dict[str, Any]:
+    """Get default face restoration settings"""
+    from shared.face_restore import get_available_backends
+    available = get_available_backends()
+    default_backend = available[0] if available else "auto"
+    
     return {
         "model": models[0] if models else "",
-        "enable_face_restore": False,
-        "strength": 0.5,
+        "backend": default_backend,
+        "face_strength": 0.5,
+        "face_detector": "retinaface",
+        "detection_confidence": 0.7,
+        "min_face_size": 64,
+        "max_faces": 0,
+        "restoration_model": "auto",
+        "restore_strength": 0.5,
+        "restore_blindly": False,
+        "upscale_faces": False,
+        "face_padding": 0.3,
+        "use_landmarks": True,
+        "color_correction": True,
+        "gpu_acceleration": True,
+        "batch_faces": True,
         "apply_globally": False,
     }
 
 
 FACE_ORDER: List[str] = [
     "model",
-    "enable_face_restore",
-    "strength",
+    "backend",
+    "face_strength",
+    "face_detector",
+    "detection_confidence",
+    "min_face_size",
+    "max_faces",
+    "restoration_model",
+    "restore_strength",
+    "restore_blindly",
+    "upscale_faces",
+    "face_padding",
+    "use_landmarks",
+    "color_correction",
+    "gpu_acceleration",
+    "batch_faces",
     "apply_globally",
 ]
 

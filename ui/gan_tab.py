@@ -124,8 +124,7 @@ def gan_tab(
                         return "Select a model to see details..."
 
                     try:
-                        from shared.gan_runner import get_gan_model_metadata
-                        base_dir = base_dir  # Use the passed base_dir
+                        from shared.gan_runner_complete import get_gan_model_metadata
                         metadata = get_gan_model_metadata(model_name, base_dir)
 
                         info_lines = [f"**{model_name}**"]

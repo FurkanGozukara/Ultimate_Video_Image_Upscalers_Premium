@@ -254,11 +254,17 @@ def main():
                 output_dir=output_dir
             )
 
-        # Update health banner on load
+        # Update health banner on load and changes
         def update_health_banner(state):
-            return gr.Markdown.update(value=f'<div class="health-banner">{state["health_banner"]["text"]}</div>')
+            """Update health banner with current state"""
+            health_text = state.get("health_banner", {}).get("text", "System ready")
+            return gr.Markdown.update(value=f'<div class="health-banner">{health_text}</div>')
 
+        # Update on load
         demo.load(fn=update_health_banner, inputs=shared_state, outputs=health_banner)
+        
+        # Update when shared state changes (for dynamic updates from tabs)
+        shared_state.change(fn=update_health_banner, inputs=shared_state, outputs=health_banner)
 
     demo.launch()
 

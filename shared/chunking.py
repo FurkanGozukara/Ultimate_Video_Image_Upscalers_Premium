@@ -5,6 +5,9 @@ import tempfile
 from pathlib import Path
 from typing import Callable, List, Tuple, Optional
 
+import cv2
+import numpy as np
+
 from .path_utils import (
     collision_safe_dir,
     collision_safe_path,
@@ -12,6 +15,7 @@ from .path_utils import (
     resolve_output_location,
     detect_input_type,
     emit_metadata,
+    get_media_fps,
 )
 
 # Try to import PySceneDetect (optional dependency)
@@ -238,7 +242,48 @@ def split_video(video_path: str, scenes: List[Tuple[float, float]], work_dir: Pa
     return chunk_paths
 
 
+def blend_overlapping_frames_opencv(
+    prev_frames: np.ndarray,
+    cur_frames: np.ndarray,
+    overlap_frames: int
+) -> np.ndarray:
+    """
+    Blend overlapping frames using smooth crossfade (OpenCV implementation).
+    
+    Args:
+        prev_frames: Last `overlap_frames` from previous chunk [N, H, W, C]
+        cur_frames: First `overlap_frames` from current chunk [N, H, W, C]
+        overlap_frames: Number of frames to blend
+        
+    Returns:
+        Blended frames [overlap_frames, H, W, C]
+    """
+    if overlap_frames <= 0:
+        return cur_frames
+    
+    if overlap_frames >= 3:
+        # Smooth Hann window for better blending
+        t = np.linspace(0.0, 1.0, overlap_frames)
+        blend_start = 1.0 / 3.0
+        blend_end = 2.0 / 3.0
+        u = np.clip((t - blend_start) / (blend_end - blend_start), 0.0, 1.0)
+        w_prev = 0.5 + 0.5 * np.cos(np.pi * u)  # Hann window
+    else:
+        # Linear blend for short overlaps
+        w_prev = np.linspace(1.0, 0.0, overlap_frames)
+    
+    # Reshape weights for broadcasting [N, 1, 1, 1]
+    w_prev = w_prev.reshape(-1, 1, 1, 1)
+    w_cur = 1.0 - w_prev
+    
+    # Blend frames
+    blended = prev_frames.astype(np.float32) * w_prev + cur_frames.astype(np.float32) * w_cur
+    
+    return blended.astype(prev_frames.dtype)
+
+
 def concat_videos(chunk_paths: List[Path], output_path: Path) -> bool:
+    """Simple concatenation without blending (for non-overlapping chunks)"""
     if not chunk_paths:
         return False
     txt = output_path.parent / "concat.txt"
@@ -248,6 +293,164 @@ def concat_videos(chunk_paths: List[Path], output_path: Path) -> bool:
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(txt), "-c", "copy", str(output_path)]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return proc.returncode == 0 and output_path.exists()
+
+
+def concat_videos_with_blending(
+    chunk_paths: List[Path],
+    output_path: Path,
+    overlap_frames: int = 0,
+    fps: Optional[float] = None,
+    on_progress: Optional[Callable[[str], None]] = None
+) -> bool:
+    """
+    Concatenate video chunks with smooth blending of overlapping regions.
+    
+    Args:
+        chunk_paths: List of video chunk file paths
+        output_path: Output video path
+        overlap_frames: Number of overlapping frames between chunks
+        fps: Frame rate (detected from first chunk if None)
+        on_progress: Progress callback
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if not chunk_paths:
+        return False
+    
+    # If no overlap, use simple concat
+    if overlap_frames <= 0:
+        return concat_videos(chunk_paths, output_path)
+    
+    try:
+        if on_progress:
+            on_progress("Concatenating chunks with frame blending...\n")
+        
+        # Create temp directory for blended output
+        with tempfile.TemporaryDirectory(prefix="blend_") as temp_dir:
+            temp_path = Path(temp_dir)
+            
+            # Read all chunks and blend overlaps
+            all_frames = []
+            
+            for i, chunk_path in enumerate(chunk_paths):
+                if on_progress:
+                    on_progress(f"Loading chunk {i+1}/{len(chunk_paths)}...\n")
+                
+                # Read chunk frames
+                cap = cv2.VideoCapture(str(chunk_path))
+                if not cap.isOpened():
+                    if on_progress:
+                        on_progress(f"⚠️ Failed to open chunk {chunk_path}, skipping\n")
+                    continue
+                
+                # Detect FPS from first chunk
+                if fps is None and i == 0:
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                
+                chunk_frames = []
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    chunk_frames.append(frame)
+                
+                cap.release()
+                
+                if not chunk_frames:
+                    continue
+                
+                # Convert to numpy array for blending
+                chunk_array = np.array(chunk_frames)
+                
+                if i == 0:
+                    # First chunk - add all frames
+                    all_frames.extend(chunk_frames)
+                else:
+                    # Subsequent chunks - blend overlap region
+                    if len(all_frames) >= overlap_frames and len(chunk_frames) >= overlap_frames:
+                        # Get overlapping regions
+                        prev_tail = np.array(all_frames[-overlap_frames:])
+                        cur_head = chunk_array[:overlap_frames]
+                        
+                        # Blend
+                        if on_progress:
+                            on_progress(f"Blending {overlap_frames} frames between chunks {i} and {i+1}...\n")
+                        
+                        blended = blend_overlapping_frames_opencv(prev_tail, cur_head, overlap_frames)
+                        
+                        # Replace tail of all_frames with blended, add rest of chunk
+                        all_frames = all_frames[:-overlap_frames]
+                        all_frames.extend(blended)
+                        all_frames.extend(chunk_frames[overlap_frames:])
+                    else:
+                        # Not enough frames to blend, just append
+                        non_overlap_start = min(overlap_frames, len(chunk_frames))
+                        all_frames.extend(chunk_frames[non_overlap_start:])
+            
+            if not all_frames:
+                if on_progress:
+                    on_progress("❌ No frames to write\n")
+                return False
+            
+            # Write blended frames to temp video
+            if on_progress:
+                on_progress(f"Writing {len(all_frames)} blended frames to output...\n")
+            
+            # Get dimensions from first frame
+            height, width = all_frames[0].shape[:2]
+            
+            # Create temp video file
+            temp_output = temp_path / "blended_temp.mp4"
+            
+            # Use ffmpeg to encode (better quality than cv2.VideoWriter)
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo",
+                "-vcodec", "rawvideo",
+                "-s", f"{width}x{height}",
+                "-pix_fmt", "bgr24",
+                "-r", str(fps or 30.0),
+                "-i", "-",
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                str(temp_output)
+            ]
+            
+            proc = subprocess.Popen(
+                ffmpeg_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            # Write frames to ffmpeg
+            for frame in all_frames:
+                proc.stdin.write(frame.tobytes())
+            
+            proc.stdin.close()
+            proc.wait()
+            
+            if proc.returncode != 0 or not temp_output.exists():
+                if on_progress:
+                    on_progress(f"❌ FFmpeg encoding failed: {proc.stderr.read().decode()}\n")
+                return False
+            
+            # Move to final output
+            shutil.move(str(temp_output), str(output_path))
+            
+            if on_progress:
+                on_progress(f"✅ Blended video saved to {output_path}\n")
+            
+            return True
+            
+    except Exception as e:
+        if on_progress:
+            on_progress(f"❌ Blending failed: {e}\n")
+        # Fallback to simple concat
+        return concat_videos(chunk_paths, output_path)
 
 
 def detect_resume_state(work_dir: Path, output_format: str) -> Tuple[Optional[Path], List[Path]]:
@@ -457,7 +660,14 @@ def chunk_and_process(
                         return 1, log_blob, str(partial_target), len(chunk_paths)
                     else:
                         partial_target = partial_video_target or collision_safe_path(work / "partial_concat.mp4")
-                        ok = concat_videos(output_chunks, partial_target)
+                        # Use blending concat if overlap specified
+                        overlap_frames_for_blend = int(chunk_overlap * 30.0) if chunk_overlap > 0 else 0
+                        ok = concat_videos_with_blending(
+                            output_chunks, 
+                            partial_target, 
+                            overlap_frames=overlap_frames_for_blend,
+                            on_progress=on_progress
+                        )
                         log_blob = f"Chunking canceled at chunk {idx}; partial output saved: {partial_target}"
                         try:
                             emit_metadata(
@@ -524,7 +734,14 @@ def chunk_and_process(
                     return res.returncode, log_blob, str(partial_target), len(chunk_paths)
                 else:
                     partial_target = partial_video_target or collision_safe_path(work / "partial_concat.mp4")
-                    ok = concat_videos(output_chunks, partial_target)
+                    # Use blending concat if overlap specified
+                    overlap_frames_for_blend = int(chunk_overlap * 30.0) if chunk_overlap > 0 else 0
+                    ok = concat_videos_with_blending(
+                        output_chunks,
+                        partial_target,
+                        overlap_frames=overlap_frames_for_blend,
+                        on_progress=on_progress
+                    )
                     if ok:
                         on_progress(f"Partial output stitched to {partial_target}\n")
                         meta = {
@@ -610,10 +827,20 @@ def chunk_and_process(
         png_keep_basename=settings.get("png_keep_basename", False),
     )
     final_path = collision_safe_path(Path(final_path))
-    ok = concat_videos(output_chunks, final_path)
+    
+    # Use blending concat if overlap specified
+    overlap_frames_for_blend = int(chunk_overlap * (get_media_fps(input_path) or 30.0)) if chunk_overlap > 0 else 0
+    ok = concat_videos_with_blending(
+        output_chunks,
+        final_path,
+        overlap_frames=overlap_frames_for_blend,
+        fps=get_media_fps(input_path),
+        on_progress=on_progress
+    )
+    
     if not ok:
         return 1, "Concat failed", str(final_path), len(chunk_paths)
-    on_progress(f"Chunks concatenated to {final_path}\n")
+    on_progress(f"Chunks concatenated with blending to {final_path}\n")
     if per_chunk_cleanup:
         shutil.rmtree(work, ignore_errors=True)
     # Write chunk metadata

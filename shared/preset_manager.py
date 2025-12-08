@@ -143,12 +143,38 @@ class PresetManager:
     # ------------------------------------------------------------------ #
     @staticmethod
     def merge_config(current: Dict[str, Any], preset: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """Merge preset values onto current values, preserving current values for missing preset keys."""
+        """
+        Merge preset values onto current values, preserving current values for missing preset keys.
+        
+        This allows older presets to work with new features - if a preset doesn't have a key,
+        the current default value is preserved.
+        """
         if not preset:
-            return current
+            return current.copy()
+        
         merged = current.copy()
+        
+        # Only update keys that exist in the preset
+        # Keys in current that aren't in preset are preserved with their default values
         for key, value in preset.items():
-            merged[key] = value
+            # Type checking to ensure compatibility
+            if key in current:
+                # Try to preserve type of current value
+                try:
+                    current_type = type(current[key])
+                    if current_type in (int, float, str, bool):
+                        # Convert to expected type
+                        merged[key] = current_type(value)
+                    else:
+                        # For complex types, use as-is
+                        merged[key] = value
+                except (ValueError, TypeError):
+                    # If conversion fails, use default
+                    merged[key] = current[key]
+            else:
+                # New key from preset not in current defaults - add it
+                merged[key] = value
+        
         return merged
 
     @staticmethod
@@ -217,35 +243,113 @@ class PresetManager:
         validated = preset.copy()
 
         # Batch size must be 4n+1
-        bs = int(validated.get("batch_size", 5))
-        if bs % 4 != 1:
-            validated["batch_size"] = max(1, (bs // 4) * 4 + 1)
+        try:
+            bs = int(validated.get("batch_size", 5))
+            if bs % 4 != 1:
+                validated["batch_size"] = max(1, (bs // 4) * 4 + 1)
+        except (ValueError, TypeError):
+            validated["batch_size"] = 5  # Safe default
+
+        # Resolution must be multiple of 16
+        try:
+            res = int(validated.get("resolution", 1080))
+            if res % 16 != 0:
+                validated["resolution"] = (res // 16) * 16
+        except (ValueError, TypeError):
+            validated["resolution"] = 1080
+
+        # Max resolution validation
+        try:
+            max_res = int(validated.get("max_resolution", 0))
+            if max_res < 0:
+                validated["max_resolution"] = 0
+        except (ValueError, TypeError):
+            validated["max_resolution"] = 0
 
         # VAE tiling constraints
         if validated.get("vae_encode_tiled"):
-            tile_size = validated.get("vae_encode_tile_size", 1024)
-            overlap = validated.get("vae_encode_tile_overlap", 128)
-            if overlap >= tile_size:
-                validated["vae_encode_tile_overlap"] = max(0, tile_size - 1)
+            try:
+                tile_size = int(validated.get("vae_encode_tile_size", 1024))
+                overlap = int(validated.get("vae_encode_tile_overlap", 128))
+                if overlap >= tile_size:
+                    validated["vae_encode_tile_overlap"] = max(0, tile_size - 1)
+                if tile_size < 64:
+                    validated["vae_encode_tile_size"] = 512
+            except (ValueError, TypeError):
+                validated["vae_encode_tile_size"] = 1024
+                validated["vae_encode_tile_overlap"] = 128
 
         if validated.get("vae_decode_tiled"):
-            tile_size = validated.get("vae_decode_tile_size", 1024)
-            overlap = validated.get("vae_decode_tile_overlap", 128)
-            if overlap >= tile_size:
-                validated["vae_decode_tile_overlap"] = max(0, tile_size - 1)
+            try:
+                tile_size = int(validated.get("vae_decode_tile_size", 1024))
+                overlap = int(validated.get("vae_decode_tile_overlap", 128))
+                if overlap >= tile_size:
+                    validated["vae_decode_tile_overlap"] = max(0, tile_size - 1)
+                if tile_size < 64:
+                    validated["vae_decode_tile_size"] = 512
+            except (ValueError, TypeError):
+                validated["vae_decode_tile_size"] = 1024
+                validated["vae_decode_tile_overlap"] = 128
 
         # BlockSwap requires dit_offload_device
-        blockswap_enabled = validated.get("blocks_to_swap", 0) > 0 or validated.get("swap_io_components", False)
-        if blockswap_enabled and str(validated.get("dit_offload_device", "none")).lower() in ("none", ""):
-            validated["dit_offload_device"] = "cpu"
+        try:
+            blocks_to_swap = int(validated.get("blocks_to_swap", 0))
+            swap_io = bool(validated.get("swap_io_components", False))
+            blockswap_enabled = blocks_to_swap > 0 or swap_io
+            if blockswap_enabled:
+                offload_device = str(validated.get("dit_offload_device", "none")).lower().strip()
+                if offload_device in ("none", ""):
+                    validated["dit_offload_device"] = "cpu"
+        except (ValueError, TypeError):
+            pass
 
-        # Multi-GPU constraints
-        devices = [d.strip() for d in str(validated.get("cuda_device", "")).split(",") if d.strip()]
-        if len(devices) > 1:
-            if validated.get("cache_dit"):
-                validated["cache_dit"] = False
-            if validated.get("cache_vae"):
-                validated["cache_vae"] = False
+        # Multi-GPU constraints - improved parsing
+        try:
+            cuda_device_str = str(validated.get("cuda_device", "0"))
+            # Remove all whitespace and split by comma
+            devices = [d.strip() for d in cuda_device_str.replace(" ", "").split(",") if d.strip() and d.strip().isdigit()]
+            
+            if len(devices) > 1:
+                # Multi-GPU detected - disable cache options
+                if validated.get("cache_dit"):
+                    validated["cache_dit"] = False
+                if validated.get("cache_vae"):
+                    validated["cache_vae"] = False
+        except Exception:
+            # If parsing fails, assume single GPU
+            pass
+
+        # Validate compile cache limits
+        try:
+            cache_limit = int(validated.get("compile_dynamo_cache_size_limit", 64))
+            if cache_limit < 1:
+                validated["compile_dynamo_cache_size_limit"] = 64
+        except (ValueError, TypeError):
+            validated["compile_dynamo_cache_size_limit"] = 64
+
+        try:
+            recompile_limit = int(validated.get("compile_dynamo_recompile_limit", 128))
+            if recompile_limit < 1:
+                validated["compile_dynamo_recompile_limit"] = 128
+        except (ValueError, TypeError):
+            validated["compile_dynamo_recompile_limit"] = 128
+
+        # Validate noise scales (0.0 to 1.0)
+        for noise_key in ["input_noise_scale", "latent_noise_scale"]:
+            try:
+                noise_val = float(validated.get(noise_key, 0.0))
+                validated[noise_key] = max(0.0, min(1.0, noise_val))
+            except (ValueError, TypeError):
+                validated[noise_key] = 0.0
+
+        # Validate seed
+        try:
+            seed = int(validated.get("seed", 42))
+            # Allow -1 for random
+            if seed < -1:
+                validated["seed"] = 42
+        except (ValueError, TypeError):
+            validated["seed"] = 42
 
         return validated
 

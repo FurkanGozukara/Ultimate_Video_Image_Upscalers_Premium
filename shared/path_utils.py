@@ -149,34 +149,81 @@ def get_default_temp_dir(base_dir: Path, global_settings: dict) -> Path:
 def collision_safe_path(path: Path) -> Path:
     """
     Append numeric suffixes to avoid overwriting existing files or folders.
+    
+    Handles special cases:
+    - file.mp4 -> file_0001.mp4 if exists
+    - file_upscaled.mp4 -> file_upscaled_0001.mp4 if exists
+    - file_upscaled_0001.mp4 -> file_upscaled_0002.mp4 if exists
     """
     if not path.exists():
         return path
+    
     stem = path.stem
     suffix = path.suffix
     parent = path.parent
-    counter = 1
-    pattern = re.compile(r"(.*)_(\d{4})$")
+    
+    # Pattern to match existing _NNNN suffix
+    pattern = re.compile(r"^(.+?)_(\d{4})$")
     match = pattern.match(stem)
+    
     if match:
-        stem = match.group(1)
+        # Already has numeric suffix, extract base and increment
+        base_stem = match.group(1)
         counter = int(match.group(2)) + 1
-    while True:
-        candidate = parent / f"{stem}_{counter:04d}{suffix}"
+    else:
+        # No numeric suffix yet, start from 0001
+        base_stem = stem
+        counter = 1
+    
+    # Find next available number
+    max_attempts = 10000  # Prevent infinite loop
+    for attempt in range(max_attempts):
+        candidate = parent / f"{base_stem}_{counter:04d}{suffix}"
         if not candidate.exists():
             return candidate
         counter += 1
+    
+    # If we somehow reach here, add timestamp
+    import time
+    timestamp = int(time.time())
+    return parent / f"{base_stem}_{timestamp}{suffix}"
 
 
 def collision_safe_dir(path: Path) -> Path:
     """
     Collision-safe directory naming with _0001 suffix.
+    
+    Similar to collision_safe_path but for directories.
     """
     if not path.exists():
         return path
+    
     base = path.name
     parent = path.parent
-    counter = 1
+    
+    # Pattern to match existing _NNNN suffix
+    pattern = re.compile(r"^(.+?)_(\d{4})$")
+    match = pattern.match(base)
+    
+    if match:
+        base_name = match.group(1)
+        counter = int(match.group(2)) + 1
+    else:
+        base_name = base
+        counter = 1
+    
+    # Find next available directory number
+    max_attempts = 10000
+    for attempt in range(max_attempts):
+        candidate = parent / f"{base_name}_{counter:04d}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+    
+    # Fallback with timestamp
+    import time
+    timestamp = int(time.time())
+    return parent / f"{base_name}_{timestamp}"
     pattern = re.compile(r"(.*)_(\d{4})$")
     match = pattern.match(base)
     if match:

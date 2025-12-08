@@ -74,26 +74,94 @@ class Runner:
     # Cancellation
     # ------------------------------------------------------------------ #
     def cancel(self) -> bool:
+        """
+        Cancel the active subprocess.
+        
+        Handles platform-specific termination:
+        - Windows: Uses CTRL_BREAK_EVENT then terminate/kill
+        - Unix: Uses SIGTERM then SIGKILL
+        
+        Returns True if cancellation was attempted, False if no active process.
+        """
         with self._lock:
             proc = self._active_process
             self._canceled = True
+        
         if not proc:
             return False
+        
         try:
             if platform.system() == "Windows":
-                # Send CTRL_BREAK to the process group if possible
-                proc.send_signal(signal.CTRL_BREAK_EVENT)
-                time.sleep(0.5)
-                proc.terminate()
-            else:
-                proc.terminate()
-                time.sleep(0.5)
-                if proc.poll() is None:
+                # Windows-specific graceful shutdown
+                try:
+                    # First try CTRL_BREAK_EVENT (only works if CREATE_NEW_PROCESS_GROUP was used)
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                    
+                    # Wait briefly for graceful shutdown
+                    try:
+                        proc.wait(timeout=2.0)
+                        return True  # Process exited gracefully
+                    except subprocess.TimeoutExpired:
+                        pass
+                except (OSError, AttributeError):
+                    # CTRL_BREAK might not work, continue to terminate
+                    pass
+                
+                # Try terminate
+                try:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2.0)
+                        return True
+                    except subprocess.TimeoutExpired:
+                        pass
+                except OSError:
+                    pass
+                
+                # Force kill as last resort
+                try:
                     proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+                    
+            else:
+                # Unix/Linux: SIGTERM then SIGKILL
+                try:
+                    proc.terminate()  # SIGTERM
+                    try:
+                        proc.wait(timeout=2.0)
+                        return True
+                    except subprocess.TimeoutExpired:
+                        pass
+                except OSError:
+                    pass
+                
+                # Force kill
+                try:
+                    proc.kill()  # SIGKILL
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+            
             return True
+            
+        except Exception as e:
+            # Log error but don't crash
+            print(f"Error during cancellation: {e}")
+            return False
         finally:
+            # Always clear the active process reference
             with self._lock:
                 self._active_process = None
+                
+            # Clean up any zombie processes on Unix
+            if platform.system() != "Windows":
+                try:
+                    import os
+                    os.waitpid(-1, os.WNOHANG)
+                except (ChildProcessError, OSError):
+                    pass
 
     def is_canceled(self) -> bool:
         with self._lock:

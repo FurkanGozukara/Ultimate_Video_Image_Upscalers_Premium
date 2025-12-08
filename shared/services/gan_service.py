@@ -18,8 +18,7 @@ from shared.path_utils import (
 from shared.face_restore import restore_image, restore_video
 from shared.logging_utils import RunLogger
 from shared.realesrgan_runner import run_realesrgan
-from shared.gan_runner_complete import GanRunner, GanResult
-from shared.gan_runner import get_gan_model_metadata
+from shared.gan_runner_complete import GanRunner, GanResult, get_gan_model_metadata
 from shared.video_comparison import build_video_comparison, build_image_comparison
 from shared.video_comparison_slider import create_video_comparison_html
 
