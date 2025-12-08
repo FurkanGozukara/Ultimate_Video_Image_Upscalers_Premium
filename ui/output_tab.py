@@ -240,6 +240,32 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     info="Detail level for processing logs"
                 )
 
+    # Pin Reference Feature
+    with gr.Accordion("📌 Pin Reference Frame", open=False):
+        gr.Markdown("#### Pin a reference frame for iterative comparison")
+        gr.Markdown("*Useful when testing different settings - keep the original pinned while comparing multiple upscaled versions*")
+        
+        pinned_reference_display = gr.Image(
+            label="Pinned Reference",
+            interactive=False,
+            height=200
+        )
+        
+        with gr.Row():
+            pin_btn = gr.Button("📌 Pin Current Output", variant="secondary")
+            unpin_btn = gr.Button("❌ Unpin Reference")
+        
+        pin_status = gr.Markdown("")
+
+    # Apply to Pipeline
+    gr.Markdown("#### 🔗 Apply to Pipeline")
+    apply_to_pipeline_btn = gr.Button(
+        "✅ Apply Output Settings to All Upscalers",
+        variant="primary",
+        size="lg"
+    )
+    apply_status = gr.Markdown("")
+
     # Preset management
     with gr.Accordion("💾 Preset Management", open=True):
         gr.Markdown("#### Save/Load Output Settings")
@@ -313,6 +339,32 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         fn=lambda model: service["safe_defaults"](model),
         inputs=model_selector,
         outputs=inputs_list[1:]  # Skip model_selector
+    )
+
+    # Apply to pipeline
+    apply_to_pipeline_btn.click(
+        fn=lambda *args: service["apply_to_pipeline"](*args),
+        inputs=inputs_list + [shared_state],
+        outputs=[apply_status, shared_state]
+    )
+
+    # Pin reference handlers
+    def pin_current_output(state):
+        """Pin the current output as reference"""
+        # Get last output path from state
+        last_output = state.get("seed_controls", {}).get("last_output_path", "")
+        return service["pin_reference_frame"](last_output, state)
+    
+    pin_btn.click(
+        fn=pin_current_output,
+        inputs=shared_state,
+        outputs=[pin_status, shared_state]
+    )
+    
+    unpin_btn.click(
+        fn=lambda state: service["unpin_reference"](state),
+        inputs=shared_state,
+        outputs=[pin_status, shared_state]
     )
 
     # Cache management

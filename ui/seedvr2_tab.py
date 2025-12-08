@@ -103,6 +103,13 @@ def seedvr2_tab(
                     placeholder="C:/path/to/video.mp4 or C:/path/to/frames/",
                     info="Enter path to either a video file (mp4, avi, mov, etc.) or folder containing image frames (jpg, png, tiff, etc.). Automatically detected - works on Windows and Linux."
                 )
+                
+                # Auto-detection results
+                input_detection_result = gr.Markdown("", visible=False)
+                
+                # Detect input button
+                detect_input_btn = gr.Button("🔍 Detect Input Type", size="sm", variant="secondary")
+                
                 input_cache_msg = gr.Markdown("", visible=False)
                 auto_res_msg = gr.Markdown("", visible=False)
 
@@ -762,6 +769,60 @@ def seedvr2_tab(
         fn=check_fps_metadata,
         inputs=[input_path],
         outputs=fps_warn
+    )
+
+    # Input detection callback
+    def detect_input_type(input_path_val):
+        """Detect and display input type information"""
+        from shared.input_detector import detect_input
+        
+        if not input_path_val or not input_path_val.strip():
+            return gr.Markdown.update(value="⚠️ No input path provided", visible=True)
+        
+        try:
+            input_info = detect_input(input_path_val)
+            
+            if not input_info.is_valid:
+                return gr.Markdown.update(
+                    value=f"❌ **Invalid Input**\n\n{input_info.error_message}",
+                    visible=True
+                )
+            
+            # Build info message
+            info_lines = [f"### ✅ Input Detected: {input_info.input_type.upper()}\n"]
+            info_lines.append(input_info.info_message)
+            
+            if input_info.input_type == "frame_sequence":
+                info_lines.append(f"\n**Frame Pattern:** `{input_info.frame_pattern}`")
+                info_lines.append(f"**Frame Range:** {input_info.frame_start} - {input_info.frame_end}")
+                if input_info.missing_frames:
+                    info_lines.append(f"⚠️ **Missing Frames:** {len(input_info.missing_frames)}")
+            elif input_info.input_type == "directory":
+                info_lines.append(f"\n**Total Files:** {input_info.total_files}")
+                info_lines.append("\n💡 **Tip:** Enable batch processing for multiple files")
+            elif input_info.input_type in ["video", "image"]:
+                info_lines.append(f"\n**Format:** {input_info.format.upper()}")
+            
+            result_md = "\n".join(info_lines)
+            return gr.Markdown.update(value=result_md, visible=True)
+            
+        except Exception as e:
+            return gr.Markdown.update(
+                value=f"❌ **Detection Error**\n\n{str(e)}",
+                visible=True
+            )
+    
+    detect_input_btn.click(
+        fn=detect_input_type,
+        inputs=input_path,
+        outputs=input_detection_result
+    )
+    
+    # Auto-detect on input path change
+    input_path.change(
+        fn=detect_input_type,
+        inputs=input_path,
+        outputs=input_detection_result
     )
 
     # Initialize comparison slider and model status

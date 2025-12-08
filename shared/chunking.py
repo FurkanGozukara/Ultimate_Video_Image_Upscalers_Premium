@@ -38,20 +38,22 @@ def detect_scenes(
     threshold: float = 27.0, 
     min_scene_len: float = 2.0,
     fade_detection: bool = False,
+    overlap_sec: float = 0.5,
     on_progress: Optional[Callable[[str], None]] = None
 ) -> List[Tuple[float, float]]:
     """
-    Detect scenes using PySceneDetect with proper API usage.
+    Detect scenes using PySceneDetect with proper API usage and overlap support.
     
     Args:
         video_path: Path to video file
         threshold: Content threshold for scene detection (lower = more sensitive)
         min_scene_len: Minimum scene length in seconds
         fade_detection: Enable fade in/out detection
+        overlap_sec: Seconds of overlap between chunks (for temporal consistency)
         on_progress: Optional callback for progress updates
         
     Returns:
-        List of (start_seconds, end_seconds) tuples for each scene
+        List of (start_seconds, end_seconds) tuples for each scene with overlap applied
     """
     if not _has_scenedetect():
         if on_progress:
@@ -124,6 +126,44 @@ def detect_scenes(
         return []
 
 
+def apply_overlap_to_scenes(
+    scenes: List[Tuple[float, float]], 
+    overlap_sec: float,
+    total_duration: float
+) -> List[Tuple[float, float]]:
+    """
+    Apply overlap to scene boundaries for temporal consistency.
+    
+    Args:
+        scenes: List of (start, end) tuples without overlap
+        overlap_sec: Seconds of overlap to add
+        total_duration: Total video duration to clamp overlaps
+        
+    Returns:
+        List of (start, end) tuples with overlap applied
+    """
+    if overlap_sec <= 0 or not scenes:
+        return scenes
+    
+    overlapped = []
+    for i, (start, end) in enumerate(scenes):
+        # Extend start backwards (except first chunk)
+        if i > 0:
+            new_start = max(0, start - overlap_sec / 2)
+        else:
+            new_start = start
+        
+        # Extend end forwards (except last chunk)
+        if i < len(scenes) - 1:
+            new_end = min(total_duration, end + overlap_sec / 2)
+        else:
+            new_end = end
+        
+        overlapped.append((new_start, new_end))
+    
+    return overlapped
+
+
 def fallback_scenes(video_path: str, chunk_seconds: float = 60.0, overlap_seconds: float = 0.0) -> List[Tuple[float, float]]:
     """
     Fallback to fixed-length segments using ffprobe duration with optional overlap.
@@ -134,42 +174,42 @@ def fallback_scenes(video_path: str, chunk_seconds: float = 60.0, overlap_second
         overlap_seconds: Overlap between chunks in seconds
         
     Returns:
-        List of (start_sec, end_sec) tuples
+        List of (start_sec, end_sec) tuples with overlap applied
     """
+    from .path_utils import get_media_duration_seconds
+    
     try:
-        proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        duration = float(proc.stdout.strip())
+        duration = get_media_duration_seconds(video_path)
+        if not duration or duration <= 0:
+            # Try ffprobe as fallback
+            proc = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            duration = float(proc.stdout.strip())
     except Exception:
-        # If ffprobe fails, use default chunk size
-        duration = chunk_seconds * 2  # At least 2 chunks as fallback
+        # If all fails, use default
+        duration = chunk_seconds * 2
     
     scenes = []
     start = 0.0
     
-    # Calculate step size (accounting for overlap)
-    step = max(1.0, chunk_seconds - overlap_seconds) if chunk_seconds > 0 else chunk_seconds
-    if step <= 0 or overlap_seconds >= chunk_seconds:
-        # Invalid overlap, use no overlap
-        step = chunk_seconds
-        overlap_seconds = 0.0
-    
+    # First pass: create chunks without overlap
     while start < duration:
         end = min(start + chunk_seconds, duration)
         scenes.append((start, end))
-        
-        # Move start forward by step (chunk_size - overlap)
-        start += step
+        start += chunk_seconds
         
         # Avoid tiny last chunk
         if start < duration and (duration - start) < (chunk_seconds * 0.3):
-            # If remaining duration is less than 30% of chunk size, extend last chunk
             scenes[-1] = (scenes[-1][0], duration)
             break
+    
+    # Second pass: apply overlap
+    if overlap_seconds > 0:
+        scenes = apply_overlap_to_scenes(scenes, overlap_seconds, duration)
     
     return scenes
 

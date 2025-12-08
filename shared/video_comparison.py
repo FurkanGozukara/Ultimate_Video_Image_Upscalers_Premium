@@ -296,35 +296,50 @@ def create_side_by_side_comparison(
 def create_comparison_selector(
     input_path: Optional[str],
     output_path: Optional[str],
-    comparison_mode: str = "slider"
+    comparison_mode: str = "slider",
+    pinned_reference_path: Optional[str] = None,
+    pin_enabled: bool = False
 ) -> Tuple[str, Optional[gr.ImageSlider]]:
     """
     Create the appropriate comparison component based on mode and content type.
-
+    
+    Args:
+        input_path: Path to input/original file
+        output_path: Path to output/upscaled file
+        comparison_mode: "slider", "side_by_side", or "stacked"
+        pinned_reference_path: If set, use this as reference instead of input_path
+        pin_enabled: Whether pin reference feature is active
+    
     Returns:
         Tuple of (HTML content, ImageSlider component or None)
     """
-    if not input_path or not output_path:
-        return '<div class="no-comparison"><p>No content available for comparison</p></div>', None
+    if not output_path:
+        return '<div class="no-comparison"><p>No output available for comparison</p></div>', None
+    
+    # Use pinned reference if available and enabled
+    effective_input = pinned_reference_path if (pin_enabled and pinned_reference_path) else input_path
+    
+    if not effective_input:
+        return '<div class="no-comparison"><p>No reference available for comparison</p></div>', None
 
-    input_ext = Path(input_path).suffix.lower()
+    input_ext = Path(effective_input).suffix.lower()
 
     if input_ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp']:
         # Image comparison
         if comparison_mode == "slider":
-            return "", create_image_comparison(input_path, output_path)
+            return "", create_image_comparison(effective_input, output_path)
         elif comparison_mode == "side_by_side":
-            return create_side_by_side_comparison(input_path, output_path), None
+            return create_side_by_side_comparison(effective_input, output_path), None
         else:
-            return create_side_by_side_comparison(input_path, output_path), None
+            return create_side_by_side_comparison(effective_input, output_path), None
     else:
         # Video comparison
         if comparison_mode == "slider":
-            return create_video_comparison_html(input_path, output_path), None
+            return create_video_comparison_html(effective_input, output_path), None
         elif comparison_mode == "side_by_side":
-            return create_side_by_side_comparison(input_path, output_path), None
+            return create_side_by_side_comparison(effective_input, output_path), None
         else:
-            return create_video_comparison_html(input_path, output_path), None
+            return create_video_comparison_html(effective_input, output_path), None
 
 
 def _pin_js(val: bool) -> str:

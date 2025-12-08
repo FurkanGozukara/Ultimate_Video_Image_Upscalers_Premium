@@ -325,6 +325,58 @@ def _process_single_file(
     status = "⚠️ Processing exited unexpectedly"
 
     try:
+        # Handle first-frame preview mode
+        if preview_only:
+            input_type = detect_input_type(settings["input_path"])
+            
+            if input_type == "video":
+                # Extract first frame
+                from shared.frame_utils import extract_first_frame
+                
+                if progress_cb:
+                    progress_cb("🎬 Extracting first frame for preview...\n")
+                
+                success, frame_path, error = extract_first_frame(
+                    settings["input_path"],
+                    format="png"
+                )
+                
+                if not success or not frame_path:
+                    return f"❌ Frame extraction failed: {error}", error, None, None, "Preview failed", "Preview failed"
+                
+                # Process the extracted frame as an image
+                preview_settings = settings.copy()
+                preview_settings["input_path"] = frame_path
+                preview_settings["output_format"] = "png"
+                preview_settings["load_cap"] = 1
+                
+                if progress_cb:
+                    progress_cb("🎨 Upscaling first frame...\n")
+                
+                result = runner.run_seedvr2(
+                    preview_settings,
+                    on_progress=lambda x: progress_cb(x) if progress_cb else None,
+                    preview_only=True
+                )
+                
+                if result.output_path and Path(result.output_path).exists():
+                    output_image = result.output_path
+                    status = "✅ First-frame preview complete"
+                    local_logs.append("Preview mode: Processed first frame only")
+                    chunk_info_msg = "Preview: First frame extracted and upscaled"
+                    chunk_summary = f"Preview output: {output_image}"
+                else:
+                    status = "❌ Preview upscaling failed"
+                    local_logs.append(result.log)
+                    
+                return status, "\n".join(local_logs), None, output_image, chunk_info_msg, chunk_summary
+                
+            else:
+                # For images, just process normally with load_cap=1
+                settings["load_cap"] = 1
+                settings["output_format"] = "png"
+
+    try:
         # Model loading check
         model_manager = get_model_manager()
         dit_model = settings.get("dit_model", "")
@@ -436,6 +488,29 @@ def _process_single_file(
             adjusted = ffmpeg_set_fps(Path(output_video), float(fps_val))
             output_video = str(adjusted)
             local_logs.append(f"FPS overridden to {fps_val}: {adjusted}")
+
+        # Generate comparison video if enabled
+        comparison_mode = seed_controls.get("comparison_mode_val", "slider")
+        if comparison_mode in ["side_by_side", "stacked"] and output_video and Path(output_video).exists():
+            from shared.video_comparison_advanced import create_side_by_side_video, create_stacked_video
+            
+            input_video = settings["input_path"]
+            if Path(input_video).exists() and Path(input_video).suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']:
+                comparison_path = Path(output_video).parent / f"{Path(output_video).stem}_comparison.mp4"
+                
+                if comparison_mode == "side_by_side":
+                    success, comp_path, err = create_side_by_side_video(
+                        input_video, output_video, str(comparison_path)
+                    )
+                else:  # stacked
+                    success, comp_path, err = create_stacked_video(
+                        input_video, output_video, str(comparison_path)
+                    )
+                
+                if success:
+                    local_logs.append(f"✅ Comparison video created: {comp_path}")
+                else:
+                    local_logs.append(f"⚠️ Comparison video failed: {err}")
 
     except Exception as e:
         error_msg = f"Processing failed: {str(e)}"
@@ -1130,22 +1205,37 @@ def build_seedvr2_callbacks(
                 # Use gradio's native ImageSlider for images
                 if output_image and Path(output_image).exists():
                     comparison_html = ""
+                    # Check for pinned reference
+                    pinned_ref = seed_controls.get("pinned_reference_path")
+                    pin_enabled = seed_controls.get("pin_reference_val", False)
+                    
                     image_slider_update = gr.ImageSlider.update(
-                        value=(settings.get("input_path"), output_image),
+                        value=(pinned_ref if (pin_enabled and pinned_ref) else settings.get("input_path"), output_image),
                         visible=True
                     )
                 else:
+                    # Check for pinned reference
+                    pinned_ref = seed_controls.get("pinned_reference_path")
+                    pin_enabled = seed_controls.get("pin_reference_val", False)
+                    
                     comparison_html, image_slider_update = create_comparison_selector(
                         input_path=settings.get("input_path"),
                         output_path=output_video or output_image,
-                        comparison_mode="slider"
+                        comparison_mode="slider",
+                        pinned_reference_path=pinned_ref,
+                        pin_enabled=pin_enabled
                     )
             else:
                 # Use custom HTML comparisons for other modes
+                pinned_ref = seed_controls.get("pinned_reference_path")
+                pin_enabled = seed_controls.get("pin_reference_val", False)
+                
                 comparison_html, image_slider_update = create_comparison_selector(
                     input_path=settings.get("input_path"),
                     output_path=output_video or output_image,
-                    comparison_mode=comparison_mode
+                    comparison_mode=comparison_mode,
+                    pinned_reference_path=pinned_ref,
+                    pin_enabled=pin_enabled
                 )
 
             # If no HTML comparison, use ImageSlider for images

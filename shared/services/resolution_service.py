@@ -1,8 +1,13 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import gradio as gr
 
 from shared.preset_manager import PresetManager
 from shared.path_utils import normalize_path, get_media_duration_seconds
+from shared.resolution_calculator import (
+    calculate_resolution, calculate_chunk_count, calculate_disk_space_required,
+    get_available_disk_space, ResolutionConfig, ResolutionResult
+)
+from shared.input_detector import detect_input, validate_batch_directory
 
 
 def resolution_defaults(models: List[str]) -> Dict[str, Any]:
@@ -11,9 +16,9 @@ def resolution_defaults(models: List[str]) -> Dict[str, Any]:
         "auto_resolution": True,
         "enable_max_target": True,
         "target_resolution": 1080,
-        "max_target_resolution": 1920,
+        "max_target_resolution": 0,  # 0 = unlimited
         "chunk_size": 0,
-        "chunk_overlap": 0,
+        "chunk_overlap": 0.5,
         "ratio_downscale_then_upscale": False,
         "per_chunk_cleanup": False,
     }
@@ -49,6 +54,39 @@ def _apply_resolution_preset(
     if merged.get("chunk_size", 0) and merged.get("chunk_overlap", 0) >= merged.get("chunk_size", 0):
         merged["chunk_overlap"] = max(0, merged.get("chunk_size", 0) - 1)
     return [merged[k] for k in RESOLUTION_ORDER]
+
+
+def _get_aspect_ratio_str(aspect_ratio: float) -> Tuple[int, int]:
+    """Convert aspect ratio to simplified fraction (e.g., 1.777 -> 16:9)"""
+    common_ratios = {
+        (16, 9): 1.778,
+        (4, 3): 1.333,
+        (21, 9): 2.333,
+        (1, 1): 1.0,
+        (3, 2): 1.5,
+        (5, 4): 1.25,
+    }
+    
+    # Find closest common ratio
+    min_diff = float('inf')
+    best_ratio = (16, 9)
+    
+    for (w, h), ratio in common_ratios.items():
+        diff = abs(aspect_ratio - ratio)
+        if diff < min_diff:
+            min_diff = diff
+            best_ratio = (w, h)
+    
+    # If very close to common ratio, use it
+    if min_diff < 0.01:
+        return best_ratio
+    
+    # Otherwise, calculate from actual ratio
+    from math import gcd
+    w = int(aspect_ratio * 1000)
+    h = 1000
+    divisor = gcd(w, h)
+    return (w // divisor, h // divisor)
 
 
 def chunk_estimate(chunk_size: float, chunk_overlap: float):
@@ -116,6 +154,127 @@ def build_resolution_callbacks(
     def safe_defaults():
         return [defaults[k] for k in RESOLUTION_ORDER]
 
+    def calculate_auto_resolution(input_path: str, target_res: int, max_res: int, 
+                                  enable_max: bool, auto_mode: bool, ratio_aware: bool,
+                                  model_scale: Optional[int], state: Dict) -> Tuple[str, Dict]:
+        """
+        Auto-calculate optimal resolution based on input and settings.
+        
+        Returns:
+            (info_message, updated_state)
+        """
+        if not input_path or not input_path.strip():
+            return "⚠️ No input path provided", state
+        
+        try:
+            # Detect input
+            input_info = detect_input(input_path)
+            if not input_info.is_valid:
+                return f"⚠️ {input_info.error_message}", state
+            
+            # Create resolution config
+            config = ResolutionConfig(
+                input_width=0,  # Will be detected
+                input_height=0,
+                target_resolution=target_res,
+                max_resolution=max_res if enable_max else 0,
+                model_scale=model_scale,
+                enable_max_target=enable_max,
+                auto_resolution=auto_mode,
+                ratio_aware=ratio_aware,
+                allow_downscale=True
+            )
+            
+            # Calculate resolution
+            result = calculate_resolution(input_path, config)
+            
+            # Update state with calculated values
+            seed_controls = state.get("seed_controls", {})
+            seed_controls["calculated_output_width"] = result.output_width
+            seed_controls["calculated_output_height"] = result.output_height
+            seed_controls["needs_downscale_first"] = result.needs_downscale_first
+            seed_controls["input_resize_width"] = result.input_resize_width
+            seed_controls["input_resize_height"] = result.input_resize_height
+            state["seed_controls"] = seed_controls
+            
+            # Build info message
+            info = f"### Auto-Resolution Result\n\n"
+            info += f"{result.info_message}\n\n"
+            
+            if result.needs_downscale_first:
+                info += f"**Note:** Input will be downscaled first to match model scale factor.\n\n"
+            
+            if result.clamped_by_max:
+                info += f"⚠️ **Resolution was clamped by max target setting.**\n\n"
+            
+            # Add aspect ratio info
+            ar_w, ar_h = _get_aspect_ratio_str(result.aspect_ratio)
+            info += f"**Aspect Ratio:** {ar_w}:{ar_h} ({result.aspect_ratio:.3f})\n"
+            
+            return info, state
+            
+        except Exception as e:
+            return f"❌ Error calculating resolution: {str(e)}", state
+    
+    def calculate_chunk_estimate(input_path: str, chunk_size: float, chunk_overlap: float, state: Dict) -> Tuple[str, Dict]:
+        """
+        Estimate number of chunks and processing info.
+        
+        Returns:
+            (info_message, updated_state)
+        """
+        if not input_path or not input_path.strip():
+            return "⚠️ No input path provided", state
+        
+        if chunk_size <= 0:
+            return "ℹ️ Chunking disabled (chunk size = 0)", state
+        
+        try:
+            # Get chunk estimate
+            chunk_count, duration, info = calculate_chunk_count(input_path, chunk_size, 2.0)
+            
+            if chunk_count == 0:
+                return info, state
+            
+            # Add disk space estimate (rough)
+            config = ResolutionConfig(
+                input_width=0,
+                input_height=0,
+                target_resolution=state.get("seed_controls", {}).get("resolution_val", 1080),
+                max_resolution=0
+            )
+            
+            try:
+                result = calculate_resolution(input_path, config)
+                space_required, space_str = calculate_disk_space_required(
+                    input_path, result, "mp4", duration
+                )
+                
+                # Get available space
+                output_dir = state.get("seed_controls", {}).get("last_output_dir", ".")
+                avail_bytes, avail_str = get_available_disk_space(output_dir)
+                
+                info += f"\n\n### Disk Space\n"
+                info += f"Estimated required: **{space_str}**\n"
+                info += f"Available: **{avail_str}**\n"
+                
+                if space_required > 0 and avail_bytes > 0:
+                    if space_required > avail_bytes * 0.9:  # Using >90% of available
+                        info += f"\n⚠️ **Warning:** Insufficient disk space!"
+                    
+            except Exception:
+                pass
+            
+            # Update state
+            seed_controls = state.get("seed_controls", {})
+            seed_controls["estimated_chunk_count"] = chunk_count
+            state["seed_controls"] = seed_controls
+            
+            return info, state
+            
+        except Exception as e:
+            return f"❌ Error estimating chunks: {str(e)}", state
+    
     def apply_to_seed(*args):
         """Apply resolution settings to SeedVR2 pipeline via shared state"""
         state = args[-1]
@@ -191,6 +350,8 @@ def build_resolution_callbacks(
         "estimate_from_input": estimate_from_input,
         "cache_resolution": lambda *args: cache_resolution(*args[:-1], args[-1]),
         "cache_resolution_flags": lambda *args: cache_resolution_flags(*args[:-1], args[-1]),
+        "calculate_auto_resolution": calculate_auto_resolution,
+        "calculate_chunk_estimate": calculate_chunk_estimate,
     }
 
 

@@ -8,28 +8,53 @@ def output_defaults(models: List[str]) -> Dict[str, Any]:
     return {
         "model": models[0] if models else "",
         "output_format": "auto",
-        "fps_override": 0,
-        "comparison_mode": "native",
-        "pin_reference": False,
-        "fullscreen": True,
+        "png_sequence_enabled": False,
         "png_padding": 5,
         "png_keep_basename": True,
+        "fps_override": 0,
+        "video_codec": "libx264",
+        "video_quality": 18,
+        "video_preset": "medium",
+        "two_pass_encoding": False,
         "skip_first_frames": 0,
         "load_cap": 0,
+        "temporal_padding": 0,
+        "frame_interpolation": False,
+        "comparison_mode": "slider",
+        "pin_reference": False,
+        "fullscreen_enabled": True,
+        "comparison_zoom": 100,
+        "show_difference": False,
+        "save_metadata": True,
+        "metadata_format": "json",
+        "telemetry_enabled": True,
+        "log_level": "info",
     }
 
 
 OUTPUT_ORDER: List[str] = [
-    "model",
     "output_format",
-    "fps_override",
-    "comparison_mode",
-    "pin_reference",
-    "fullscreen",
+    "png_sequence_enabled",
     "png_padding",
     "png_keep_basename",
+    "fps_override",
+    "video_codec",
+    "video_quality",
+    "video_preset",
+    "two_pass_encoding",
     "skip_first_frames",
     "load_cap",
+    "temporal_padding",
+    "frame_interpolation",
+    "comparison_mode",
+    "pin_reference",
+    "fullscreen_enabled",
+    "comparison_zoom",
+    "show_difference",
+    "save_metadata",
+    "metadata_format",
+    "telemetry_enabled",
+    "log_level",
 ]
 
 
@@ -147,6 +172,44 @@ def build_output_callbacks(
             state["seed_controls"]["load_cap_val"] = 0
         return gr.Markdown.update(value="Load-cap cached for runs."), state
 
+    def apply_to_pipeline(*args):
+        """Apply all output settings to pipeline at once"""
+        state = args[-1]
+        values = list(args[:-1])
+        settings_dict = _output_dict_from_args(values)
+        
+        seed_controls = state.get("seed_controls", {})
+        seed_controls["output_format_val"] = settings_dict.get("output_format", "auto")
+        seed_controls["fps_override_val"] = settings_dict.get("fps_override", 0)
+        seed_controls["comparison_mode_val"] = settings_dict.get("comparison_mode", "slider")
+        seed_controls["pin_reference_val"] = settings_dict.get("pin_reference", False)
+        seed_controls["fullscreen_val"] = settings_dict.get("fullscreen_enabled", True)
+        seed_controls["png_padding_val"] = settings_dict.get("png_padding", 5)
+        seed_controls["png_keep_basename_val"] = settings_dict.get("png_keep_basename", True)
+        state["seed_controls"] = seed_controls
+        
+        status = f"✅ Applied output settings\n- Format: {seed_controls['output_format_val']}\n- Comparison: {seed_controls['comparison_mode_val']}"
+        return gr.Markdown.update(value=status), state
+
+    def pin_reference_frame(image_path, state):
+        """Pin a reference frame for iterative comparison"""
+        seed_controls = state.get("seed_controls", {})
+        if image_path:
+            seed_controls["pinned_reference_path"] = image_path
+            msg = f"✅ Reference pinned: {image_path}"
+        else:
+            seed_controls["pinned_reference_path"] = None
+            msg = "⚠️ No image to pin"
+        state["seed_controls"] = seed_controls
+        return gr.Markdown.update(value=msg), state
+
+    def unpin_reference(state):
+        """Clear pinned reference"""
+        seed_controls = state.get("seed_controls", {})
+        seed_controls["pinned_reference_path"] = None
+        state["seed_controls"] = seed_controls
+        return gr.Markdown.update(value="✅ Reference unpinned"), state
+
     return {
         "defaults": defaults,
         "order": OUTPUT_ORDER,
@@ -163,6 +226,9 @@ def build_output_callbacks(
         "cache_png_basename": lambda *args: cache_png_basename(*args[:-1], args[-1]),
         "cache_skip": lambda *args: cache_skip(*args[:-1], args[-1]),
         "cache_cap": lambda *args: cache_cap(*args[:-1], args[-1]),
+        "apply_to_pipeline": apply_to_pipeline,
+        "pin_reference_frame": pin_reference_frame,
+        "unpin_reference": unpin_reference,
     }
 
 

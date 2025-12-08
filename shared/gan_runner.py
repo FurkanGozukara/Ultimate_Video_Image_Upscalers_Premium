@@ -535,10 +535,55 @@ def _run_with_realesrgan_image(
 
         # Import Real-ESRGAN components
         from shared.realesrgan_runner import run_realesrgan
+        from shared.resolution_calculator import calculate_resolution, ResolutionConfig
+        
+        # Check if downscale-then-upscale is needed
+        target_resolution = settings.get("target_resolution", 0)
+        needs_downscale = settings.get("downscale_first", False) or settings.get("auto_calculate_input", False)
+        
+        effective_input = input_path
+        temp_downscaled = None
+        
+        if needs_downscale and target_resolution > 0:
+            # Calculate optimal input resolution for GAN model
+            config = ResolutionConfig(
+                input_width=0,
+                input_height=0,
+                target_resolution=target_resolution,
+                max_resolution=0,
+                model_scale=metadata.scale,
+                enable_max_target=True,
+                auto_resolution=True,
+                ratio_aware=True,
+                allow_downscale=True
+            )
+            
+            result_calc = calculate_resolution(str(input_path), config)
+            
+            if result_calc.needs_downscale_first and result_calc.input_resize_width:
+                import subprocess
+                import tempfile
+                
+                temp_dir = Path(tempfile.mkdtemp(prefix="gan_downscale_"))
+                temp_downscaled = temp_dir / f"downscaled_{input_path.name}"
+                
+                # Downscale using ffmpeg
+                cmd = [
+                    "ffmpeg", "-y", "-i", str(input_path),
+                    "-vf", f"scale={result_calc.input_resize_width}:{result_calc.input_resize_height}",
+                    "-q:v", "1",  # Highest quality
+                    str(temp_downscaled)
+                ]
+                
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                if proc.returncode == 0 and temp_downscaled.exists():
+                    effective_input = temp_downscaled
+                    if on_progress:
+                        on_progress(f"✓ Downscaled input to {result_calc.input_resize_width}x{result_calc.input_resize_height}\n")
 
         # Prepare settings for Real-ESRGAN
         realesrgan_settings = {
-            "input_path": str(input_path),
+            "input_path": str(effective_input),
             "model": model_name,
             "scale": metadata.scale,
             "output_format": settings.get("output_format", "png"),
@@ -550,8 +595,14 @@ def _run_with_realesrgan_image(
             apply_face=False,  # We handle face restoration separately
             cancel_event=cancel_event
         )
+        
+        # Cleanup temporary downscaled file
+        if temp_downscaled and temp_downscaled.exists():
+            import shutil
+            shutil.rmtree(temp_downscaled.parent, ignore_errors=True)
 
         return GanResult(result.returncode, result.output_path, result.log)
 
     except Exception as e:
-        return GanResult(1, None, f"Real-ESRGAN error: {str(e)}")
+        import traceback
+        return GanResult(1, None, f"Real-ESRGAN error: {str(e)}\n{traceback.format_exc()}")
