@@ -499,11 +499,57 @@ def build_seedvr2_callbacks(
             return gr.Markdown.update(value=f"ℹ️ {message}", visible=True)
 
     def cancel():
-        """Cancel current processing."""
+        """Cancel current processing and compile any partial outputs if available."""
         canceled = runner.cancel()
-        if canceled:
-            return gr.Markdown.update(value="⏹️ Cancel requested"), ""
-        return gr.Markdown.update(value="No active process"), ""
+        if not canceled:
+            return gr.Markdown.update(value="No active process to cancel"), ""
+
+        # Check for partial outputs that can be compiled
+        temp_chunks_dir = Path(global_settings["temp_dir"]) / "chunks"
+        if temp_chunks_dir.exists():
+            try:
+                from shared.chunking import detect_resume_state, concat_videos
+                from shared.path_utils import collision_safe_path
+
+                partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
+                partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
+
+                compiled_output = None
+
+                # Try to compile video chunks
+                if completed_chunks and len(completed_chunks) > 0:
+                    partial_target = collision_safe_path(temp_chunks_dir / "cancelled_partial.mp4")
+                    if concat_videos(completed_chunks, partial_target):
+                        compiled_output = str(partial_target)
+                        # Copy to outputs folder
+                        final_output = Path(output_dir) / f"{Path(settings.get('input_path', 'unknown')).stem}_partial_upscaled.mp4"
+                        final_output = collision_safe_path(final_output)
+                        shutil.copy2(partial_target, final_output)
+                        compiled_output = str(final_output)
+
+                # Or compile PNG chunks
+                elif completed_png_chunks and len(completed_png_chunks) > 0:
+                    partial_target = collision_safe_path(temp_chunks_dir / "cancelled_partial_png")
+                    partial_target.mkdir(parents=True, exist_ok=True)
+
+                    for i, chunk_path in enumerate(completed_png_chunks, 1):
+                        dest = partial_target / f"chunk_{i:04d}"
+                        if Path(chunk_path).is_dir():
+                            shutil.copytree(chunk_path, dest, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(chunk_path, dest)
+
+                    compiled_output = str(partial_target)
+
+                if compiled_output:
+                    return gr.Markdown.update(value=f"⏹️ Cancelled - Partial output compiled: {Path(compiled_output).name}"), f"Partial results saved to: {compiled_output}"
+                else:
+                    return gr.Markdown.update(value="⏹️ Cancelled - No partial outputs to compile"), "Processing was cancelled before any chunks were completed"
+
+            except Exception as e:
+                return gr.Markdown.update(value=f"⏹️ Cancelled - Error compiling partials: {str(e)}"), "Cancellation successful but partial compilation failed"
+
+        return gr.Markdown.update(value="⏹️ Processing cancelled"), "No partial outputs found to compile"
 
     def open_outputs_folder(state: Dict[str, Any]):
         """Open the outputs folder in file explorer."""
@@ -738,30 +784,260 @@ def build_seedvr2_callbacks(
 
             # Batch processing
             if settings.get("batch_enable"):
+                # Use the batch processor for multiple files
+                from shared.batch_processor import BatchProcessor, BatchJob
+
+                batch_input_path = Path(settings.get("batch_input_path", ""))
+                batch_output_path = Path(settings.get("batch_output_path", ""))
+
+                if not batch_input_path.exists():
+                    yield (
+                        "❌ Batch input path does not exist",
+                        "",
+                        None,
+                        None,
+                        "No chunks",
+                        gr.HTML.update(value="No comparison"),
+                        gr.ImageSlider.update(value=None),
+                        state
+                    )
+                    return
+
+                # Collect all files to process
+                supported_exts = SEEDVR2_VIDEO_EXTS | SEEDVR2_IMAGE_EXTS
+                batch_files = []
+                if batch_input_path.is_dir():
+                    for ext in supported_exts:
+                        batch_files.extend(batch_input_path.glob(f"**/*{ext}"))
+                elif batch_input_path.suffix.lower() in supported_exts:
+                    batch_files = [batch_input_path]
+
+                if not batch_files:
+                    yield (
+                        "❌ No supported files found in batch input",
+                        "",
+                        None,
+                        None,
+                        "No chunks",
+                        gr.HTML.update(value="No comparison"),
+                        gr.ImageSlider.update(value=None),
+                        state
+                    )
+                    return
+
+                # Create batch processor
+                batch_processor = BatchProcessor(
+                    output_dir=batch_output_path if batch_output_path.exists() else output_dir,
+                    max_workers=1,  # Sequential processing for memory management
+                    telemetry_enabled=global_settings.get("telemetry", True)
+                )
+
+                # Create batch jobs
+                jobs = []
+                for input_file in sorted(set(batch_files)):
+                    job = BatchJob(
+                        input_path=str(input_file),
+                        metadata={
+                            "settings": settings.copy(),
+                            "global_settings": global_settings,
+                            "face_apply": face_apply,
+                            "face_strength": face_strength,
+                            "seed_controls": seed_controls.copy(),
+                        }
+                    )
+                    jobs.append(job)
+
+                # Process batch with progress updates
+                def batch_progress_callback(progress_data):
+                    current_job = progress_data.get("current_job")
+                    overall_progress = progress_data.get("overall_progress", 0)
+                    status_msg = f"Batch processing: {overall_progress:.1f}% complete"
+                    if current_job:
+                        status_msg += f" - Processing: {Path(current_job).name}"
+
+                    yield (
+                        status_msg,
+                        f"Processing {len(jobs)} files...",
+                        None,
+                        None,
+                        f"Batch: {progress_data.get('completed_files', 0)}/{len(jobs)} completed",
+                        gr.HTML.update(value="Batch processing in progress..."),
+                        gr.ImageSlider.update(value=None),
+                        state
+                    )
+
+                # Define processing function for each job
+                def process_single_batch_job(job: BatchJob, progress_cb):
+                    try:
+                        job.status = "processing"
+                        job.start_time = time.time()
+
+                        # Process single file with current settings
+                        single_settings = job.metadata["settings"].copy()
+                        single_settings["input_path"] = job.input_path
+                        single_settings["batch_enable"] = False  # Disable batch for individual processing
+
+                        status, logs, output_video, output_image, chunk_info, chunk_summary = _process_single_file(
+                            runner,
+                            single_settings,
+                            job.metadata["global_settings"],
+                            job.metadata["seed_controls"],
+                            job.metadata["face_apply"],
+                            job.metadata["face_strength"],
+                            run_logger,
+                            output_dir,
+                            False,  # not preview
+                            progress_cb
+                        )
+
+                        if output_video or output_image:
+                            job.output_path = output_video or output_image
+                            job.status = "completed"
+                        else:
+                            job.status = "failed"
+                            job.error_message = logs
+
+                        job.end_time = time.time()
+
+                    except Exception as e:
+                        job.status = "failed"
+                        job.error_message = str(e)
+                        job.end_time = time.time()
+
+                    return job
+
+                # Run batch processing
+                results = batch_processor.process_batch(
+                    jobs=jobs,
+                    process_func=process_single_batch_job,
+                    progress_callback=batch_progress_callback
+                )
+
+                # Summarize results
+                completed = sum(1 for r in results if r.status == "completed")
+                failed = sum(1 for r in results if r.status == "failed")
+
+                summary_msg = f"Batch complete: {completed}/{len(jobs)} succeeded"
+                if failed > 0:
+                    summary_msg += f", {failed} failed"
+
                 yield (
-                    "❌ Batch processing not yet implemented",
-                    "",
+                    f"✅ {summary_msg}",
+                    f"Batch processing finished. Check output folder for results.",
                     None,
                     None,
-                    "No chunks",
-                    gr.HTML.update(value="No comparison"),
+                    f"Batch: {completed} completed, {failed} failed",
+                    gr.HTML.update(value="Batch processing complete. Files saved to output directory."),
                     gr.ImageSlider.update(value=None),
                     state
                 )
                 return
 
-            # Single file processing
-            status, logs, output_video, output_image, chunk_info, chunk_summary = _process_single_file(
-                runner,
-                settings,
-                global_settings,
-                seed_controls,
-                face_apply,
-                face_strength,
-                run_logger,
-                output_dir,
-                preview_only
+            # Single file processing with streaming updates
+            processing_complete = False
+            last_progress_update = 0
+
+            def progress_callback(message: str):
+                nonlocal last_progress_update
+                current_time = time.time()
+                # Throttle updates to every 0.5 seconds to avoid UI spam
+                if current_time - last_progress_update > 0.5:
+                    last_progress_update = current_time
+                    yield (
+                        f"⚙️ Processing: {message}",
+                        f"Progress: {message}",
+                        None,
+                        None,
+                        chunk_info or "Processing...",
+                        gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{message}</div>'),
+                        gr.ImageSlider.update(value=None),
+                        state
+                    )
+
+            # Start processing with progress tracking
+            yield (
+                "⚙️ Starting processing...",
+                "Initializing...",
+                None,
+                None,
+                "Initializing...",
+                gr.HTML.update(value="Starting processing..."),
+                gr.ImageSlider.update(value=None),
+                state
             )
+
+            # Create a queue for progress updates
+            progress_queue = queue.Queue()
+
+            def processing_thread():
+                try:
+                    status, logs, output_video, output_image, chunk_info, chunk_summary = _process_single_file(
+                        runner,
+                        settings,
+                        global_settings,
+                        seed_controls,
+                        face_apply,
+                        face_strength,
+                        run_logger,
+                        output_dir,
+                        preview_only,
+                        lambda msg: progress_queue.put(("progress", msg))
+                    )
+                    progress_queue.put(("complete", (status, logs, output_video, output_image, chunk_info, chunk_summary)))
+                except Exception as e:
+                    progress_queue.put(("error", str(e)))
+
+            # Start processing in background thread
+            import threading
+            proc_thread = threading.Thread(target=processing_thread, daemon=True)
+            proc_thread.start()
+
+            # Stream progress updates
+            while proc_thread.is_alive() or not progress_queue.empty():
+                try:
+                    update_type, data = progress_queue.get(timeout=0.1)
+                    if update_type == "progress":
+                        yield (
+                            f"⚙️ Processing: {data}",
+                            f"Progress: {data}",
+                            None,
+                            None,
+                            chunk_info or "Processing...",
+                            gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{data}</div>'),
+                            gr.ImageSlider.update(value=None),
+                            state
+                        )
+                    elif update_type == "complete":
+                        status, logs, output_video, output_image, chunk_info, chunk_summary = data
+                        processing_complete = True
+                        break
+                    elif update_type == "error":
+                        yield (
+                            "❌ Processing failed",
+                            f"Error: {data}",
+                            None,
+                            None,
+                            "Error occurred",
+                            gr.HTML.update(value=f'<div style="background: #ffe6e6; padding: 10px; border-radius: 5px;">Error: {data}</div>'),
+                            gr.ImageSlider.update(value=None),
+                            state
+                        )
+                        return
+                except queue.Empty:
+                    continue
+
+            if not processing_complete:
+                yield (
+                    "❌ Processing timed out",
+                    "Processing did not complete within expected time",
+                    None,
+                    None,
+                    "Timeout",
+                    gr.HTML.update(value="Processing timed out"),
+                    gr.ImageSlider.update(value=None),
+                    state
+                )
+                return
 
             # Create comparison
             comparison_mode = seed_controls.get("comparison_mode_val", "slider")

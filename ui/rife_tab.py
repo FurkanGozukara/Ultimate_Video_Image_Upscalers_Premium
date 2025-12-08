@@ -85,34 +85,34 @@ def rife_tab(
                 rife_model = gr.Dropdown(
                     label="RIFE Model",
                     choices=["rife-v4.6", "rife-v4.13", "rife-v4.14", "rife-v4.15", "rife-v4.16", "rife-anime"],
-                    value=values[2],
+                    value=values[5],
                     info="Newer models are slower but higher quality"
                 )
 
                 target_fps = gr.Number(
                     label="Target FPS",
-                    value=values[3],
+                    value=values[7],
                     precision=1,
-                    info="Desired output frame rate"
+                    info="Desired output frame rate (0 = auto)"
                 )
 
                 fps_multiplier = gr.Dropdown(
                     label="FPS Multiplier",
-                    choices=["x2", "x4", "x8"],
-                    value=values[4],
+                    choices=["x1", "x2", "x4", "x8"],
+                    value=values[6],
                     info="How many times to multiply original FPS"
                 )
 
                 rife_precision = gr.Dropdown(
                     label="Precision",
                     choices=["fp16", "fp32"],
-                    value=values[5],
+                    value=values[10],
                     info="fp16 is faster, fp32 is more accurate"
                 )
 
                 rife_gpu = gr.Textbox(
                     label="GPU Device",
-                    value=values[6],
+                    value=values[24],
                     placeholder="0 or 0,1",
                     info="GPU(s) to use for RIFE processing"
                 )
@@ -124,21 +124,21 @@ def rife_tab(
             with gr.Group():
                 edit_mode = gr.Dropdown(
                     label="Edit Mode",
-                    choices=["trim", "concatenate", "speed_change", "effects"],
-                    value=values[7],
+                    choices=["none", "trim", "concatenate", "speed_change", "effects"],
+                    value=values[25],
                     info="Type of video editing to perform"
                 )
 
                 start_time = gr.Textbox(
                     label="Start Time (HH:MM:SS or seconds)",
-                    value=values[8],
+                    value=values[26],
                     placeholder="00:00:30 or 30",
                     info="Where to start the edit"
                 )
 
                 end_time = gr.Textbox(
                     label="End Time (HH:MM:SS or seconds)",
-                    value=values[9],
+                    value=values[27],
                     placeholder="00:01:30 or 90",
                     info="Where to end the edit"
                 )
@@ -146,8 +146,16 @@ def rife_tab(
                 speed_factor = gr.Slider(
                     label="Speed Factor",
                     minimum=0.25, maximum=4.0, step=0.25,
-                    value=values[10],
+                    value=values[28],
                     info="1.0 = normal speed, 2.0 = 2x faster, 0.5 = 2x slower"
+                )
+
+                concat_videos = gr.Textbox(
+                    label="Additional Videos for Concatenation",
+                    value=values[33],  # Updated index for concat_videos
+                    placeholder="C:/path/to/video1.mp4, C:/path/to/video2.mp4",
+                    info="Comma-separated list of video files to concatenate with the main input",
+                    lines=2
                 )
 
         # Output Settings
@@ -157,34 +165,34 @@ def rife_tab(
             with gr.Group():
                 output_format_rife = gr.Dropdown(
                     label="Output Format",
-                    choices=["mp4", "avi", "mov", "webm"],
-                    value=values[11],
+                    choices=["auto", "mp4", "avi", "mov", "webm"],
+                    value=values[3],
                     info="Container format for output video"
                 )
 
                 video_codec_rife = gr.Dropdown(
                     label="Video Codec",
                     choices=["libx264", "libx265", "libvpx-vp9"],
-                    value=values[12],
+                    value=values[29],
                     info="Compression codec"
                 )
 
                 output_quality_rife = gr.Slider(
                     label="Quality (CRF)",
                     minimum=0, maximum=51, step=1,
-                    value=values[13],
+                    value=values[30],
                     info="Lower = higher quality, larger file"
                 )
 
                 no_audio = gr.Checkbox(
                     label="Remove Audio",
-                    value=values[14],
+                    value=values[12],
                     info="Strip audio track from output"
                 )
 
                 show_ffmpeg_output = gr.Checkbox(
                     label="Show FFmpeg Output",
-                    value=values[15],
+                    value=values[13],
                     info="Display detailed processing logs"
                 )
 
