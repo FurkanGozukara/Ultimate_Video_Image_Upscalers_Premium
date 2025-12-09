@@ -10,6 +10,14 @@ from shared.services.output_service import (
     build_output_callbacks, OUTPUT_ORDER
 )
 from shared.models.seedvr2_meta import get_seedvr2_model_names
+from shared.video_codec_options import (
+    get_codec_choices,
+    get_pixel_format_choices,
+    get_codec_info,
+    get_pixel_format_info,
+    ENCODING_PRESETS,
+    AUDIO_CODECS
+)
 
 
 def _get_gan_model_names(base_dir: Path) -> list:
@@ -112,33 +120,70 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     precision=2,
                     info="Override output FPS (0 = use source FPS)"
                 )
+                
+                gr.Markdown("---\n**Codec Selection**")
 
                 video_codec = gr.Dropdown(
                     label="Video Codec",
-                    choices=["libx264", "libx265", "libvpx-vp9", "auto"],
-                    value=values[5],
-                    info="'auto' selects based on quality preferences"
+                    choices=get_codec_choices(),
+                    value=values[5] if values[5] in get_codec_choices() else "h264",
+                    info="Choose encoding codec based on your use case"
                 )
+                
+                codec_info_display = gr.Markdown("")
+                
+                pixel_format = gr.Dropdown(
+                    label="Pixel Format",
+                    choices=["yuv420p", "yuv422p", "yuv444p", "yuv420p10le", "yuv444p10le", "rgb24"],
+                    value=values[11] if len(values) > 11 else "yuv420p",
+                    info="Color subsampling and bit depth. yuv420p = best compatibility"
+                )
+                
+                pixel_format_info = gr.Markdown("")
 
                 video_quality = gr.Slider(
-                    label="Video Quality (CRF)",
+                    label="Video Quality (CRF - lower is better)",
                     minimum=0, maximum=51, step=1,
                     value=values[6],
-                    info="Lower = higher quality, higher file size (libx264/libx265)"
+                    info="0 = lossless (huge files), 18 = visually lossless, 23 = high quality, 28 = medium, 35+ = low quality"
                 )
 
                 video_preset = gr.Dropdown(
                     label="Encoding Preset",
-                    choices=["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"],
+                    choices=ENCODING_PRESETS,
                     value=values[7],
-                    info="Encoding speed vs compression efficiency"
+                    info="ultrafast = fastest encoding, veryslow = best compression. medium = balanced"
+                )
+                
+                gr.Markdown("---\n**Audio Options**")
+                
+                audio_codec = gr.Dropdown(
+                    label="Audio Codec",
+                    choices=list(AUDIO_CODECS.keys()),
+                    value=values[12] if len(values) > 12 else "copy",
+                    info="Audio encoding: copy = no re-encode (fastest), aac = compatible, flac = lossless, none = remove audio"
+                )
+                
+                audio_bitrate = gr.Textbox(
+                    label="Audio Bitrate (optional)",
+                    value=values[13] if len(values) > 13 else "",
+                    placeholder="192k, 320k, etc.",
+                    info="Only used when re-encoding audio (not for 'copy')"
                 )
 
                 two_pass_encoding = gr.Checkbox(
                     label="Two-Pass Encoding",
                     value=values[8],
-                    info="Slower but better quality for target file sizes"
+                    info="Slower but better quality/filesize ratio. Recommended for archival."
                 )
+                
+                # Quick preset buttons
+                gr.Markdown("---\n**Quick Presets**")
+                with gr.Row():
+                    preset_youtube = gr.Button("🎬 YouTube", size="sm")
+                    preset_archival = gr.Button("💾 Archival", size="sm")
+                    preset_editing = gr.Button("✂️ Editing", size="sm")
+                    preset_web = gr.Button("🌐 Web", size="sm")
 
         # Frame Handling
         with gr.TabItem("🎭 Frame Processing"):
@@ -305,10 +350,11 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
 
     # Collect inputs for callbacks
     inputs_list = [
-        model_selector, output_format, png_sequence_enabled, png_padding, png_keep_basename,
+        output_format, png_sequence_enabled, png_padding, png_keep_basename,
         fps_override, video_codec, video_quality, video_preset, two_pass_encoding,
-        skip_first_frames, load_cap, temporal_padding, frame_interpolation,
-        comparison_mode, pin_reference, fullscreen_enabled, comparison_zoom, show_difference,
+        skip_first_frames, load_cap, pixel_format, audio_codec, audio_bitrate,
+        temporal_padding, frame_interpolation, comparison_mode, pin_reference,
+        fullscreen_enabled, comparison_zoom, show_difference,
         save_metadata, metadata_format, telemetry_enabled, log_level
     ]
 
@@ -390,4 +436,42 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         fn=lambda *vals: service["cache_skip"](list(vals)) + "\n" + service["cache_cap"](list(vals)),
         inputs=inputs_list,
         outputs=cache_status
+    )
+    
+    # Codec info updates
+    video_codec.change(
+        fn=service["update_codec_info"],
+        inputs=video_codec,
+        outputs=codec_info_display
+    )
+    
+    pixel_format.change(
+        fn=service["update_pixel_format_info"],
+        inputs=pixel_format,
+        outputs=pixel_format_info
+    )
+    
+    # Quick codec preset buttons
+    preset_youtube.click(
+        fn=lambda *vals: service["apply_codec_preset"]("youtube", list(vals)),
+        inputs=inputs_list,
+        outputs=inputs_list
+    )
+    
+    preset_archival.click(
+        fn=lambda *vals: service["apply_codec_preset"]("archival", list(vals)),
+        inputs=inputs_list,
+        outputs=inputs_list
+    )
+    
+    preset_editing.click(
+        fn=lambda *vals: service["apply_codec_preset"]("editing", list(vals)),
+        inputs=inputs_list,
+        outputs=inputs_list
+    )
+    
+    preset_web.click(
+        fn=lambda *vals: service["apply_codec_preset"]("web", list(vals)),
+        inputs=inputs_list,
+        outputs=inputs_list
     )

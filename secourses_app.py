@@ -16,6 +16,7 @@ from ui.output_tab import output_tab
 from ui.face_tab import face_tab
 from ui.rife_tab import rife_tab
 from ui.gan_tab import gan_tab
+from ui.flashvsr_tab import flashvsr_tab
 from ui.health_tab import health_tab
 
 BASE_DIR = Path(__file__).parent.resolve()
@@ -238,6 +239,17 @@ def main():
             gan_tab(
                 preset_manager=preset_manager,
                 runner=runner,
+                run_logger=run_logger,
+                global_settings=global_settings,
+                shared_state=shared_state,
+                base_dir=BASE_DIR,
+                temp_dir=temp_dir,
+                output_dir=output_dir
+            )
+
+        with gr.Tab("⚡ FlashVSR+ (Real-Time Diffusion)"):
+            flashvsr_tab(
+                preset_manager=preset_manager,
                 run_logger=run_logger,
                 global_settings=global_settings,
                 shared_state=shared_state,

@@ -400,7 +400,8 @@ def _run_gan_video(
             
             if on_progress:
                 progress_pct = int((i / total_frames) * 100)
-                on_progress(f"Progress: {progress_pct}% ({i}/{total_frames} frames)\n")
+                # Report progress in format that gr.Progress can parse
+                on_progress(f"Progress: {progress_pct}% - Processing frames {i}/{total_frames}\n")
 
             # Process each frame in batch
             for frame_path in batch_frames:

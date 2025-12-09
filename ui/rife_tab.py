@@ -125,6 +125,18 @@ def rife_tab(
                     value=values[10],
                     info="fp16 = half precision, 2x faster, uses less VRAM, minimal quality loss. fp32 = full precision, slower, more accurate. Use fp16 unless quality-critical."
                 )
+                
+                montage = gr.Checkbox(
+                    label="📊 Create Montage (Side-by-Side Comparison)",
+                    value=values[14],  # montage is at index 14 in RIFE_ORDER
+                    info="Generate side-by-side comparison video showing original vs interpolated. Useful for quality checking."
+                )
+                
+                img_mode = gr.Checkbox(
+                    label="🖼️ Image Sequence Mode",
+                    value=values[15],  # img_mode is at index 15
+                    info="Process image sequence instead of video. Automatically enabled when input is folder of images."
+                )
 
                 rife_gpu = gr.Textbox(
                     label="GPU Device",
@@ -304,11 +316,40 @@ def rife_tab(
         """)
 
     # Collect all inputs
+    # Collect ALL inputs matching RIFE_ORDER
+    # Note: Some parameters may be missing from UI - using placeholders where needed
     inputs_list = [
-        input_path, rife_enabled, rife_model, target_fps, fps_multiplier,
-        rife_precision, rife_gpu, edit_mode, start_time, end_time,
-        speed_factor, output_format_rife, video_codec_rife, output_quality_rife,
-        no_audio, show_ffmpeg_output
+        input_path,           # 0: input_path
+        rife_enabled,         # 1: rife_enabled  
+        output_format_rife,   # 2: output_override (using format as proxy)
+        output_format_rife,   # 3: output_format
+        gr.State(""),         # 4: model_dir (not in UI)
+        rife_model,           # 5: model
+        fps_multiplier,       # 6: fps_multiplier
+        target_fps,           # 7: fps_override
+        gr.State(1.0),        # 8: scale (not in UI, default 1.0)
+        gr.State(False),      # 9: uhd_mode (not in UI)
+        rife_precision,       # 10: fp16_mode
+        gr.State(False),      # 11: png_output (not in UI)
+        no_audio,             # 12: no_audio
+        show_ffmpeg_output,   # 13: show_ffmpeg
+        montage,              # 14: montage (NEW!)
+        img_mode,             # 15: img_mode (NEW!)
+        gr.State(False),      # 16: skip_static_frames (deprecated)
+        gr.State(1),          # 17: exp (not in UI)
+        gr.State(2),          # 18: multi (not in UI)
+        gr.State(False),      # 19: batch_enable (not in UI)
+        gr.State(""),         # 20: batch_input_path
+        gr.State(""),         # 21: batch_output_path
+        gr.State(0),          # 22: skip_first_frames
+        gr.State(0),          # 23: load_cap
+        rife_gpu,             # 24: cuda_device
+        edit_mode,            # 25: edit_mode
+        start_time,           # 26: start_time
+        end_time,             # 27: end_time
+        speed_factor,         # 28: speed_factor
+        video_codec_rife,     # 29: video_codec
+        output_quality_rife,  # 30: output_quality
     ]
 
     # Wire up event handlers

@@ -18,8 +18,8 @@ from shared.path_utils import (
 from shared.face_restore import restore_image, restore_video
 from shared.logging_utils import RunLogger
 from shared.realesrgan_runner import run_realesrgan
-from shared.gan_runner_complete import GanRunner, GanResult, get_gan_model_metadata
-from shared.video_comparison import build_video_comparison, build_image_comparison
+from shared.gan_runner import run_gan_upscale, GanResult, get_gan_model_metadata
+from shared.comparison_unified import create_unified_comparison, create_video_comparison_slider
 from shared.video_comparison_slider import create_video_comparison_html
 
 
@@ -387,10 +387,14 @@ def build_gan_callbacks(
 
             return s
 
-    def run_action(upload, *args, preview_only: bool = False, state=None):
+    def run_action(upload, *args, preview_only: bool = False, state=None, progress=None):
         # Streaming: run in background thread, stream log lines if available
         progress_q: "queue.Queue[str]" = queue.Queue()
         result_holder: Dict[str, Any] = {}
+        
+        # Initialize progress if provided
+        if progress:
+            progress(0, desc="Initializing GAN upscaling...")
 
         # Define worker functions (moved outside try block)
         def worker_single(prepped_settings):
@@ -561,23 +565,17 @@ def build_gan_callbacks(
                     prepped_settings["face_restore"] = face_apply
                     prepped_settings["face_strength"] = face_strength
                     
-                    # Use new complete GAN runner
-                    gan_runner = GanRunner(base_dir)
-                    output_path_target = current_output_dir / f"{Path(prepped_settings['input_path']).stem}_upscaled.png"
-                    gan_result = gan_runner.run_gan_processing(
+                    # Use GAN runner with proper backend integration
+                    result = run_gan_upscale(
                         input_path=prepped_settings["input_path"],
                         model_name=prepped_settings["model"],
-                        output_path=str(output_path_target),
                         settings=prepped_settings,
-                        on_progress=progress_cb if progress_cb else None
+                        base_dir=base_dir,
+                        temp_dir=current_temp_dir,
+                        output_dir=current_output_dir,
+                        on_progress=progress_cb if progress_cb else None,
+                        cancel_event=None  # Will add cancel support
                     )
-                    
-                    # Convert GanResult to expected result format
-                    result = type('obj', (object,), {
-                        'returncode': gan_result.returncode,
-                        'output_path': gan_result.output_path,
-                        'log': gan_result.log
-                    })()
                 except Exception as exc:  # surface ffmpeg or other runtime issues
                     err_msg = f"❌ GAN upscale failed: {exc}"
                     if progress_cb:
@@ -654,11 +652,33 @@ def build_gan_callbacks(
             t.start()
 
             last_yield = time.time()
+            last_progress_update = 0.0
+            
             while t.is_alive() or not progress_q.empty():
                 try:
                     line = progress_q.get(timeout=0.2)
                     if line:
                         result_holder.setdefault("live_logs", []).append(line)
+                        
+                        # Update gr.Progress from log messages
+                        if progress:
+                            import re
+                            # Look for progress indicators in logs
+                            # Pattern: "Progress: 50%", "Processing 5/10 frames", etc.
+                            pct_match = re.search(r'(\d+(?:\.\d+)?)%', line)
+                            if pct_match:
+                                pct = float(pct_match.group(1)) / 100.0
+                                progress(pct, desc=line[:100])
+                                last_progress_update = pct
+                            elif re.search(r'(\d+)/(\d+)', line):
+                                nm_match = re.search(r'(\d+)/(\d+)', line)
+                                if nm_match:
+                                    current = int(nm_match.group(1))
+                                    total = int(nm_match.group(2))
+                                    if total > 0:
+                                        pct = current / total
+                                        progress(pct, desc=line[:100])
+                                        last_progress_update = pct
                 except queue.Empty:
                     pass
                 now = time.time()
@@ -682,6 +702,13 @@ def build_gan_callbacks(
             )
             live_logs = result_holder.get("live_logs", [])
             merged_logs = lg if lg else "\n".join(live_logs)
+            
+            # Update progress to 100% on completion
+            if progress:
+                if "✅" in status:
+                    progress(1.0, desc="GAN upscaling complete!")
+                elif "❌" in status:
+                    progress(0, desc="Failed")
             
             # Build video comparison for videos
             video_comp_html_update = gr.HTML.update(value="", visible=False)

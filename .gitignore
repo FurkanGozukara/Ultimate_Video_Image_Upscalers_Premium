@@ -17,3 +17,5 @@ test_vid_upscaled_BS5.mp4
 venv/
 Real-ESRGAN/
 open-model-database
+.mp4
+*.mp4

@@ -3,8 +3,10 @@ Video Encoding Utilities with Advanced Features
 
 Provides comprehensive video encoding with:
 - Two-pass encoding for optimal quality
-- Multiple codec support (libx264, libx265, libvpx-vp9)
+- Multiple codec support (H.264, H.265, ProRes, VP9, AV1)
+- Pixel format selection (yuv420p, yuv444p, 10-bit, RGB)
 - Quality presets and CRF control
+- Audio codec options
 - FPS handling and preservation
 - Metadata embedding
 """
@@ -15,14 +17,19 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
 
+from .video_codec_options import build_ffmpeg_video_encode_args
+
 
 def encode_video(
     input_frames_path: str,
     output_video_path: str,
     fps: float = 30.0,
-    codec: str = "libx264",
+    codec: str = "h264",
     crf: int = 18,
     preset: str = "medium",
+    pixel_format: str = "yuv420p",
+    audio_codec: str = "copy",
+    audio_bitrate: Optional[str] = None,
     two_pass: bool = False,
     metadata: Optional[Dict[str, Any]] = None,
     on_progress: Optional[Callable[[str], None]] = None
@@ -50,7 +57,7 @@ def encode_video(
         
         # Auto-select codec if 'auto'
         if codec == "auto":
-            codec = "libx264"  # Default to most compatible
+            codec = "h264"  # Default to most compatible
         
         # Build base ffmpeg command
         base_cmd = [
@@ -64,36 +71,15 @@ def encode_video(
             metadata_str = json.dumps(metadata)
             base_cmd.extend(["-metadata", f"comment={metadata_str}"])
         
-        # Codec-specific settings
-        if codec == "libx264":
-            codec_args = [
-                "-c:v", "libx264",
-                "-preset", preset,
-                "-crf", str(crf),
-                "-pix_fmt", "yuv420p"
-            ]
-        elif codec == "libx265":
-            codec_args = [
-                "-c:v", "libx265",
-                "-preset", preset,
-                "-crf", str(crf),
-                "-pix_fmt", "yuv420p",
-                "-tag:v", "hvc1"  # For better compatibility
-            ]
-        elif codec == "libvpx-vp9":
-            codec_args = [
-                "-c:v", "libvpx-vp9",
-                "-crf", str(crf),
-                "-b:v", "0",  # Constant quality mode
-                "-pix_fmt", "yuv420p"
-            ]
-        else:
-            # Fallback
-            codec_args = [
-                "-c:v", codec,
-                "-crf", str(crf),
-                "-pix_fmt", "yuv420p"
-            ]
+        # Use comprehensive codec builder
+        codec_args = build_ffmpeg_video_encode_args(
+            codec=codec,
+            quality=crf,
+            pixel_format=pixel_format,
+            preset=preset,
+            audio_codec=audio_codec,
+            audio_bitrate=audio_bitrate
+        )
         
         if two_pass:
             # Two-pass encoding for better quality/size ratio

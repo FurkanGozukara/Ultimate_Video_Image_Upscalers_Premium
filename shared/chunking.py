@@ -527,10 +527,15 @@ def chunk_and_process(
     work = Path(temp_dir) / "chunks"
     existing_partial, existing_chunks = detect_resume_state(work, output_format)
 
+    # Initialize variables
+    start_chunk_idx = 0
+    resuming = False
+    
     if resume_from_partial and existing_partial and existing_chunks:
-        on_progress(f"Resuming from partial output: {existing_partial}\n")
-        # Skip re-splitting, use existing chunks
-        chunk_paths = existing_chunks
+        on_progress(f"Resuming from partial output: {existing_partial} with {len(existing_chunks)} completed chunks\n")
+        resuming = True
+        # Don't clean work directory - we're resuming!
+        # chunk_paths will be set later from actual input, not from existing chunks
         start_chunk_idx = len(existing_chunks)
     else:
         # Fresh start - clean work directory
@@ -611,18 +616,18 @@ def chunk_and_process(
     output_chunks: List[Path] = []
     chunk_logs: List[dict] = []
 
-    # If resuming, load existing completed chunks
-    if resume_from_partial and existing_chunks:
+    # If resuming, load existing completed chunks and skip them
+    if resuming and existing_chunks:
         output_chunks = existing_chunks.copy()
         for i, chunk_path in enumerate(existing_chunks, 1):
             chunk_logs.append({
                 "chunk_index": i,
-                "input": str(chunk_path),
+                "input": "resumed",
                 "output": str(chunk_path),
                 "returncode": 0,
                 "resumed": True,
             })
-        on_progress(f"Loaded {len(existing_chunks)} completed chunks from previous run\n")
+        on_progress(f"✅ Loaded {len(existing_chunks)} completed chunks from previous run - skipping to chunk {start_chunk_idx + 1}\n")
         if progress_tracker:
             progress_tracker(len(existing_chunks) / len(chunk_paths), desc=f"Resumed {len(existing_chunks)} chunks")
 

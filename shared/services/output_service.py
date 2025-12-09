@@ -2,6 +2,11 @@ from typing import Any, Dict, List, Optional
 import gradio as gr
 
 from shared.preset_manager import PresetManager
+from shared.video_codec_options import (
+    get_codec_info,
+    get_pixel_format_info,
+    get_recommended_settings
+)
 
 
 def output_defaults(models: List[str]) -> Dict[str, Any]:
@@ -12,11 +17,14 @@ def output_defaults(models: List[str]) -> Dict[str, Any]:
         "png_padding": 5,
         "png_keep_basename": True,
         "fps_override": 0,
-        "video_codec": "libx264",
+        "video_codec": "h264",
         "video_quality": 18,
         "video_preset": "medium",
         "two_pass_encoding": False,
         "skip_first_frames": 0,
+        "pixel_format": "yuv420p",
+        "audio_codec": "copy",
+        "audio_bitrate": "",
         "load_cap": 0,
         "temporal_padding": 0,
         "frame_interpolation": False,
@@ -44,6 +52,9 @@ OUTPUT_ORDER: List[str] = [
     "two_pass_encoding",
     "skip_first_frames",
     "load_cap",
+    "pixel_format",
+    "audio_codec",
+    "audio_bitrate",
     "temporal_padding",
     "frame_interpolation",
     "comparison_mode",
@@ -125,6 +136,32 @@ def build_output_callbacks(
 
     def safe_defaults():
         return [defaults[k] for k in OUTPUT_ORDER]
+    
+    def apply_codec_preset(preset_name: str, current_values: List[Any]):
+        """Apply a codec preset (youtube, archival, editing, web)"""
+        try:
+            recommended = get_recommended_settings(preset_name)
+            current_dict = _output_dict_from_args(current_values)
+            
+            # Update only codec-related fields
+            current_dict["video_codec"] = recommended["codec"]
+            current_dict["video_quality"] = recommended["quality"]
+            current_dict["pixel_format"] = recommended["pixel_format"]
+            current_dict["video_preset"] = recommended["preset"]
+            current_dict["audio_codec"] = recommended["audio_codec"]
+            current_dict["audio_bitrate"] = recommended["audio_bitrate"] or ""
+            
+            return [current_dict[k] for k in OUTPUT_ORDER]
+        except Exception:
+            return current_values
+    
+    def update_codec_info(codec_key: str):
+        """Update codec information display"""
+        return gr.Markdown.update(value=get_codec_info(codec_key))
+    
+    def update_pixel_format_info(pix_fmt: str):
+        """Update pixel format information display"""
+        return gr.Markdown.update(value=get_pixel_format_info(pix_fmt))
 
     # Cache helpers used by tab_output UI
     def cache_output(fmt, state):
@@ -217,6 +254,9 @@ def build_output_callbacks(
         "save_preset": save_preset,
         "load_preset": load_preset,
         "safe_defaults": safe_defaults,
+        "apply_codec_preset": apply_codec_preset,
+        "update_codec_info": update_codec_info,
+        "update_pixel_format_info": update_pixel_format_info,
         "cache_output": lambda *args: cache_output(*args[:-1], args[-1]),
         "cache_fps": lambda *args: cache_fps(*args[:-1], args[-1]),
         "cache_comparison": lambda *args: cache_comparison(*args[:-1], args[-1]),

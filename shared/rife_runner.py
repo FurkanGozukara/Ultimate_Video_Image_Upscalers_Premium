@@ -219,6 +219,11 @@ def run_rife_interpolation(
         if not include_audio:
             cmd.append("--no-audio")
         
+        # Montage mode (side-by-side comparison)
+        if settings.get("montage", False):
+            cmd.append("--montage")
+            log("📊 Montage mode enabled - will create side-by-side comparison")
+        
         # Skip deprecated flag warning
         if settings.get("skip_static_frames", False):
             log("⚠️ --skip flag is deprecated in RIFE (see issue #207). Ignoring.")

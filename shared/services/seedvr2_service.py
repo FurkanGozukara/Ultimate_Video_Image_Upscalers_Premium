@@ -25,7 +25,7 @@ from shared.chunking import chunk_and_process, check_resume_available
 from shared.face_restore import restore_image, restore_video
 from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
-from shared.video_comparison import create_comparison_selector
+from shared.comparison_unified import create_unified_comparison, build_comparison_selector
 from shared.model_manager import get_model_manager, ModelType
 from shared.error_handling import (
     validate_input_path,
@@ -94,6 +94,7 @@ def seedvr2_defaults() -> Dict[str, Any]:
         "chunk_enable": False,
         "scene_threshold": 27.0,
         "scene_min_len": 2.0,
+        "chunk_size": 0,  # SeedVR2 native chunking (frames per chunk, 0=disabled)
         "resolution": 1080,
         "max_resolution": 0,
         "batch_size": 5,
@@ -147,6 +148,7 @@ SEEDVR2_ORDER: List[str] = [
     "chunk_enable",
     "scene_threshold",
     "scene_min_len",
+    "chunk_size",
     "resolution",
     "max_resolution",
     "batch_size",
@@ -645,8 +647,8 @@ def build_seedvr2_callbacks(
                     partial_target = collision_safe_path(temp_chunks_dir / "cancelled_partial.mp4")
                     if concat_videos(completed_chunks, partial_target):
                         compiled_output = str(partial_target)
-                        # Copy to outputs folder
-                        final_output = Path(output_dir) / f"{Path(settings.get('input_path', 'unknown')).stem}_partial_upscaled.mp4"
+                        # Copy to outputs folder - use generic name since settings not in scope
+                        final_output = Path(output_dir) / f"cancelled_partial_upscaled.mp4"
                         final_output = collision_safe_path(final_output)
                         shutil.copy2(partial_target, final_output)
                         compiled_output = str(final_output)
@@ -1038,9 +1040,17 @@ def build_seedvr2_callbacks(
                 def batch_progress_callback(progress_data):
                     current_job = progress_data.get("current_job")
                     overall_progress = progress_data.get("overall_progress", 0)
+                    completed_files = progress_data.get("completed_files", 0)
                     status_msg = f"Batch processing: {overall_progress:.1f}% complete"
                     if current_job:
                         status_msg += f" - Processing: {Path(current_job).name}"
+
+                    # Update gr.Progress with actual progress
+                    if progress:
+                        progress(
+                            overall_progress / 100.0,
+                            desc=f"Batch: {completed_files}/{len(jobs)} files processed"
+                        )
 
                     yield (
                         status_msg,
@@ -1048,7 +1058,7 @@ def build_seedvr2_callbacks(
                         "",
                         None,
                         None,
-                        f"Batch: {progress_data.get('completed_files', 0)}/{len(jobs)} completed",
+                        f"Batch: {completed_files}/{len(jobs)} completed",
                         "",
                         "",
                         gr.HTML.update(value="Batch processing in progress..."),
@@ -1068,6 +1078,29 @@ def build_seedvr2_callbacks(
                         single_settings = job.metadata["settings"].copy()
                         single_settings["input_path"] = job.input_path
                         single_settings["batch_enable"] = False  # Disable batch for individual processing
+                        
+                        # Generate unique output path for this batch item to prevent collisions
+                        # Use collision_safe_path to ensure uniqueness
+                        input_file = Path(job.input_path)
+                        batch_output_folder = Path(batch_output_path) if batch_output_path.exists() else output_dir
+                        
+                        # Determine output format
+                        out_fmt = single_settings.get("output_format", "auto")
+                        if out_fmt == "auto":
+                            out_fmt = "mp4" if input_file.suffix.lower() in [".mp4", ".avi", ".mov", ".mkv"] else "png"
+                        
+                        # Create unique output path with collision safety
+                        from shared.path_utils import collision_safe_path
+                        if out_fmt == "png":
+                            # For PNG output, create a directory
+                            output_name = f"{input_file.stem}_upscaled"
+                            unique_output = collision_safe_path(batch_output_folder / output_name, is_dir=True)
+                            single_settings["output_override"] = str(unique_output)
+                        else:
+                            # For video output, create a file
+                            output_name = f"{input_file.stem}_upscaled.{out_fmt}"
+                            unique_output = collision_safe_path(batch_output_folder / output_name)
+                            single_settings["output_override"] = str(unique_output)
 
                         status, logs, output_video, output_image, chunk_info, chunk_summary = _process_single_file(
                             runner,
@@ -1212,24 +1245,50 @@ def build_seedvr2_callbacks(
             # Stream progress updates with gr.Progress integration
             chunk_count = 0
             total_chunks_estimate = 1
+            last_progress_value = 0.0
             
             while proc_thread.is_alive() or not progress_queue.empty():
                 try:
                     update_type, data = progress_queue.get(timeout=0.1)
                     if update_type == "progress":
-                        # Update gr.Progress if available
-                        if progress and "chunk" in data.lower():
-                            # Try to extract chunk progress
+                        # Update gr.Progress if available with intelligent parsing
+                        if progress:
                             import re
-                            match = re.search(r'chunk[s]?\s+(\d+)/(\d+)', data, re.IGNORECASE)
-                            if match:
-                                chunk_count = int(match.group(1))
-                                total_chunks_estimate = int(match.group(2))
-                                progress(chunk_count / total_chunks_estimate, desc=f"Processing chunk {chunk_count}/{total_chunks_estimate}")
+                            
+                            # Try to extract chunk progress (e.g., "chunk 5/10", "Completed 3 chunks")
+                            chunk_match = re.search(r'(?:chunk|chunks|Completed)\s+(\d+)(?:/|/|\s+of\s+|\s+)(\d+)', data, re.IGNORECASE)
+                            if chunk_match:
+                                chunk_count = int(chunk_match.group(1))
+                                total_chunks_estimate = int(chunk_match.group(2))
+                                progress_value = chunk_count / total_chunks_estimate
+                                progress(progress_value, desc=f"Processing chunk {chunk_count}/{total_chunks_estimate}")
+                                last_progress_value = progress_value
+                            # Try to extract percentage (e.g., "50%", "Progress: 75%")
+                            elif '%' in data:
+                                pct_match = re.search(r'(\d+(?:\.\d+)?)%', data)
+                                if pct_match:
+                                    progress_value = float(pct_match.group(1)) / 100.0
+                                    progress(progress_value, desc=data[:100])
+                                    last_progress_value = progress_value
+                                else:
+                                    progress(last_progress_value, desc=data[:100])
+                            # Try to extract "N/M" pattern (e.g., "Processing 5/100 frames")
+                            elif re.search(r'(\d+)/(\d+)', data):
+                                nm_match = re.search(r'(\d+)/(\d+)', data)
+                                if nm_match:
+                                    current = int(nm_match.group(1))
+                                    total = int(nm_match.group(2))
+                                    if total > 0:
+                                        progress_value = current / total
+                                        progress(progress_value, desc=data[:100])
+                                        last_progress_value = progress_value
+                                    else:
+                                        progress(last_progress_value, desc=data[:100])
+                                else:
+                                    progress(last_progress_value, desc=data[:100])
                             else:
-                                progress(0, desc=data[:100])  # Update with message
-                        elif progress:
-                            progress(0, desc=data[:100] if data else "Processing...")
+                                # Generic progress update - use last known value
+                                progress(last_progress_value, desc=data[:100] if data else "Processing...")
                         
                         yield (
                             f"⚙️ Processing: {data}",
@@ -1249,8 +1308,12 @@ def build_seedvr2_callbacks(
                     elif update_type == "complete":
                         status, logs, output_video, output_image, chunk_info, chunk_summary = data
                         processing_complete = True
+                        if progress:
+                            progress(1.0, desc="Complete!")
                         break
                     elif update_type == "error":
+                        if progress:
+                            progress(0, desc="Error occurred")
                         yield (
                             "❌ Processing failed",
                             f"Error: {data}",
@@ -1357,13 +1420,13 @@ def build_seedvr2_callbacks(
             yield (
                 status,
                 logs,
-                progress_msg,
+                "",  # progress_indicator
                 output_video,
                 output_image,
                 chunk_info,
-                resume_msg,
-                chunk_progress_msg,
-                comparison_html,
+                "",  # resume_status
+                "",  # chunk_progress
+                comparison_html if comparison_html else gr.HTML.update(value="", visible=False),
                 image_slider_update,
                 video_comparison_html_update,
                 gr.Gallery.update(visible=False),  # Hide gallery for single file
