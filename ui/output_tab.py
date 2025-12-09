@@ -100,7 +100,7 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     label="PNG Frame Number Padding",
                     minimum=1, maximum=10, step=1,
                     value=values[2],
-                    info="Digits in frame filenames (e.g., 0001.png, 00001.png)"
+                    info="Digits in frame filenames (e.g., 000001.png for 6-digit padding). Default 6 matches SeedVR2 CLI."
                 )
 
                 png_keep_basename = gr.Checkbox(
@@ -382,9 +382,8 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     )
 
     safe_defaults_btn.click(
-        fn=lambda model: service["safe_defaults"](model),
-        inputs=model_selector,
-        outputs=inputs_list[1:]  # Skip model_selector
+        fn=lambda: service["safe_defaults"](),
+        outputs=inputs_list  # Reset all controls including output_format
     )
 
     # Apply to pipeline

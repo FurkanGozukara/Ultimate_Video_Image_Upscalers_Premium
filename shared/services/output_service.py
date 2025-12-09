@@ -14,7 +14,7 @@ def output_defaults(models: List[str]) -> Dict[str, Any]:
         "model": models[0] if models else "",
         "output_format": "auto",
         "png_sequence_enabled": False,
-        "png_padding": 5,
+        "png_padding": 6,  # Match SeedVR2 CLI default (6-digit padding)
         "png_keep_basename": True,
         "fps_override": 0,
         "video_codec": "h264",
@@ -221,7 +221,7 @@ def build_output_callbacks(
         seed_controls["comparison_mode_val"] = settings_dict.get("comparison_mode", "slider")
         seed_controls["pin_reference_val"] = settings_dict.get("pin_reference", False)
         seed_controls["fullscreen_val"] = settings_dict.get("fullscreen_enabled", True)
-        seed_controls["png_padding_val"] = settings_dict.get("png_padding", 5)
+        seed_controls["png_padding_val"] = settings_dict.get("png_padding", 6)
         seed_controls["png_keep_basename_val"] = settings_dict.get("png_keep_basename", True)
         seed_controls["skip_first_frames_val"] = settings_dict.get("skip_first_frames", 0)
         seed_controls["load_cap_val"] = settings_dict.get("load_cap", 0)

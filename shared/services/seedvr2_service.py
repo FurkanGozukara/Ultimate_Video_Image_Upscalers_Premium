@@ -26,6 +26,7 @@ from shared.face_restore import restore_image, restore_video
 from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
 from shared.comparison_unified import create_unified_comparison, build_comparison_selector
+from shared.video_comparison import create_comparison_selector
 from shared.model_manager import get_model_manager, ModelType
 from shared.error_handling import (
     validate_input_path,
@@ -474,7 +475,7 @@ def _process_single_file(
         # 
         # METHOD 1: PySceneDetect Chunking (PREFERRED, UNIVERSAL)
         # --------------------------------------------------------
-        # - Controlled by: Resolution & Scene Split tab → chunk_enable checkbox
+        # - Controlled by: Resolution & Scene Split tab → chunk_size_sec setting in shared state
         # - Settings: chunk_size_sec, chunk_overlap_sec, scene_threshold, min_scene_len
         # - How it works: Externally splits video into scenes using PySceneDetect,
         #   processes each scene separately, then concatenates with blending
@@ -493,8 +494,13 @@ def _process_single_file(
         # 
         # Priority: PySceneDetect chunking happens FIRST (external), then native streaming
         # is applied within each chunk if enabled (settings["chunk_size"] > 0 passed to CLI).
+        
+        # Check if chunking should be enabled: either legacy checkbox OR Resolution tab settings
+        chunk_enabled_legacy = settings.get("chunk_enable", False)
+        chunk_enabled_resolution_tab = chunk_size_sec > 0
+        
         should_chunk = (
-            settings.get("chunk_enable", False)
+            (chunk_enabled_legacy or chunk_enabled_resolution_tab)
             and not preview_only
             and detect_input_type(settings["input_path"]) == "video"
         )
@@ -576,9 +582,10 @@ def _process_single_file(
             except Exception:
                 pass
 
-            # Log the run
+            # Log the run - use live output_dir from global settings
+            live_output_dir = Path(global_settings.get("output_dir", output_dir))
             run_logger.write_summary(
-                Path(result.output_path) if result.output_path else output_dir,
+                Path(result.output_path) if result.output_path else live_output_dir,
                 {
                     "input": settings["input_path"],
                     "output": result.output_path,
@@ -778,35 +785,37 @@ def build_seedvr2_callbacks(
         return gr.Markdown.update(value="⏹️ Processing cancelled"), "No partial outputs found to compile"
 
     def open_outputs_folder(state: Dict[str, Any]):
-        """Open the outputs folder in file explorer."""
+        """Open the outputs folder in file explorer - uses live global settings."""
         try:
             import platform
             import subprocess
             
-            out_dir = str(output_dir)
+            # Use live output_dir from global settings (may have changed since tab load)
+            live_output_dir = str(global_settings.get("output_dir", output_dir))
             if platform.system() == "Windows":
-                subprocess.Popen(["explorer", out_dir])
+                subprocess.Popen(["explorer", live_output_dir])
             elif platform.system() == "Darwin":
-                subprocess.Popen(["open", out_dir])
+                subprocess.Popen(["open", live_output_dir])
             else:
-                subprocess.Popen(["xdg-open", out_dir])
-            return gr.Markdown.update(value=f"✅ Opened outputs folder: {out_dir}")
+                subprocess.Popen(["xdg-open", live_output_dir])
+            return gr.Markdown.update(value=f"✅ Opened outputs folder: {live_output_dir}")
         except Exception as e:
             return gr.Markdown.update(value=f"❌ Failed to open outputs folder: {str(e)}")
 
     def clear_temp_folder(confirm: bool):
-        """Clear temporary folder if confirmed."""
+        """Clear temporary folder if confirmed - uses live global settings."""
         if not confirm:
             return gr.Markdown.update(value="⚠️ Check 'Confirm delete temp' to clear temporary files")
         
         try:
-            temp_path = Path(temp_dir)
-            if temp_path.exists():
-                shutil.rmtree(temp_path)
-                temp_path.mkdir(parents=True, exist_ok=True)
-                return gr.Markdown.update(value=f"✅ Cleared temp folder: {temp_path}")
+            # Use live temp_dir from global settings (may have changed since tab load)
+            live_temp_dir = Path(global_settings.get("temp_dir", temp_dir))
+            if live_temp_dir.exists():
+                shutil.rmtree(live_temp_dir)
+                live_temp_dir.mkdir(parents=True, exist_ok=True)
+                return gr.Markdown.update(value=f"✅ Cleared temp folder: {live_temp_dir}")
             else:
-                return gr.Markdown.update(value=f"ℹ️ Temp folder doesn't exist: {temp_path}")
+                return gr.Markdown.update(value=f"ℹ️ Temp folder doesn't exist: {live_temp_dir}")
         except Exception as e:
             return gr.Markdown.update(value=f"❌ Failed to clear temp folder: {str(e)}")
 
@@ -1340,6 +1349,7 @@ def build_seedvr2_callbacks(
             # Single file processing with streaming updates
             processing_complete = False
             last_progress_update = 0
+            chunk_info = "Initializing..."  # Initialize before use
 
             def progress_callback(message: str):
                 nonlocal last_progress_update

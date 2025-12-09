@@ -105,7 +105,7 @@ class BatchProcessor:
                 output_format=settings.get("output_format", "auto"),
                 global_output_dir=output_dir or settings.get("output_dir"),
                 batch_mode=False,  # Each file gets its own output
-                png_padding=settings.get("png_padding", 5),
+                png_padding=settings.get("png_padding", 6),  # Match CLI default
                 png_keep_basename=settings.get("png_keep_basename", True),
             )
 

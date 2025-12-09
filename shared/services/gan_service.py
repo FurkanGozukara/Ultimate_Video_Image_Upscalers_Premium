@@ -307,7 +307,7 @@ def build_gan_callbacks(
         s["supports_multi_gpu"] = meta.get("supports_multi_gpu", False)
         s["model_name"] = meta.get("canonical", s.get("model", ""))
         # PNG padding (from Output tab cache if present)
-        s["png_padding"] = int(seed_controls.get("png_padding_val", 5))
+        s["png_padding"] = int(seed_controls.get("png_padding_val", 6))  # Match CLI default
         return s
 
     def maybe_downscale(s):

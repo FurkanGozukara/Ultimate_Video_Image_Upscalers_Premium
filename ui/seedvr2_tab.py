@@ -582,12 +582,13 @@ def seedvr2_tab(
             # Utility buttons
             with gr.Row():
                 open_outputs_btn = gr.Button("📂 Open Outputs Folder")
-                delete_confirm = gr.Checkbox(
-                    label="Confirm delete temp",
-                    value=False,
-                    visible=False
-                )
                 delete_temp_btn = gr.Button("🗑️ Delete Temp Folder")
+            
+            delete_confirm = gr.Checkbox(
+                label="⚠️ Confirm delete temp folder (required for safety)",
+                value=False,
+                info="Enable this to confirm deletion of temporary files"
+            )
 
             # Preset management
             preset_dropdown, preset_name, save_preset_btn, load_preset_btn, preset_status, safe_defaults_btn = preset_section(
