@@ -128,20 +128,60 @@ class ModelManager:
         except Exception:
             return 0
 
-    def _clear_vram(self):
-        """Clear VRAM and run garbage collection"""
+    def _clear_vram(self, verify: bool = True) -> Tuple[bool, str]:
+        """
+        Clear VRAM and run garbage collection with verification.
+        
+        Args:
+            verify: Whether to verify VRAM was actually freed
+            
+        Returns:
+            (success, message)
+        """
         if not TORCH_AVAILABLE:
-            return
-
+            return True, "PyTorch not available"
+        
+        initial_mem = 0
+        final_mem = 0
+        
         try:
             if torch.cuda.is_available():
+                # Record memory before cleanup
+                if verify:
+                    initial_mem = torch.cuda.memory_allocated() // (1024 * 1024)  # MB
+                
+                # Clear CUDA cache multiple times for thorough cleanup
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+                
+                # Force another pass
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                
+                # Record memory after cleanup
+                if verify:
+                    final_mem = torch.cuda.memory_allocated() // (1024 * 1024)  # MB
+                    freed_mb = initial_mem - final_mem
+                    
+                    if freed_mb > 0:
+                        msg = f"VRAM cleanup successful: freed {freed_mb}MB (was {initial_mem}MB, now {final_mem}MB)"
+                        self._logger.info(msg)
+                        return True, msg
+                    else:
+                        msg = f"VRAM cleanup completed (memory stable at {final_mem}MB)"
+                        return True, msg
+                else:
+                    return True, "VRAM cleared (verification disabled)"
+                    
         except Exception as e:
-            self._logger.warning(f"Failed to clear CUDA cache: {e}")
-
-        # Force garbage collection
+            msg = f"Failed to clear CUDA cache: {e}"
+            self._logger.warning(msg)
+            return False, msg
+        
+        # Force garbage collection even if CUDA unavailable
         gc.collect()
+        return True, "Garbage collection completed"
 
     def _unload_model(self, model_info: ModelInfo):
         """Unload a specific model and clean up resources"""
@@ -362,22 +402,31 @@ class ModelManager:
             if self.current_model_id == model_id:
                 self.current_model_id = None
         
-        self._clear_vram()
-        self._logger.info(f"Manually unloaded model: {model_id}")
+        success, msg = self._clear_vram(verify=True)
+        self._logger.info(f"Manually unloaded model: {model_id} - {msg}")
         return True
 
-    def unload_all_models(self):
-        """Unload all loaded models"""
+    def unload_all_models(self) -> Tuple[bool, str]:
+        """
+        Unload all loaded models and verify VRAM cleanup.
+        
+        Returns:
+            (success, message)
+        """
         with self._lock:
+            count = 0
             for model_info in self.loaded_models.values():
                 if model_info.state == ModelState.LOADED:
                     self._unload_model(model_info)
+                    count += 1
 
             self.loaded_models.clear()
             self.current_model_id = None
 
-        self._clear_vram()
-        self._logger.info("All models unloaded")
+        success, msg = self._clear_vram(verify=True)
+        full_msg = f"Unloaded {count} model(s) - {msg}"
+        self._logger.info(full_msg)
+        return success, full_msg
 
     def switch_model(
         self,

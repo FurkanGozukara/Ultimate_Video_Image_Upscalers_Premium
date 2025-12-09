@@ -154,6 +154,15 @@ class Runner:
             # Always clear the active process reference
             with self._lock:
                 self._active_process = None
+            
+            # Clear CUDA cache after cancellation to free VRAM
+            try:
+                from .gpu_utils import clear_cuda_cache
+                clear_cuda_cache()
+                print("✅ CUDA cache cleared after cancellation")
+            except Exception:
+                # Silently ignore if CUDA not available
+                pass
                 
             # Clean up any zombie processes on Unix
             if platform.system() != "Windows":
@@ -354,6 +363,17 @@ class Runner:
 
             if on_progress:
                 on_progress(f"Subprocess completed with return code: {returncode}\n")
+            
+            # Clear CUDA cache after subprocess completes
+            # This ensures VRAM is freed even if the subprocess didn't clean up properly
+            try:
+                from .gpu_utils import clear_cuda_cache
+                clear_cuda_cache()
+                if on_progress and returncode == 0:
+                    on_progress("✅ CUDA cache cleared\n")
+            except Exception:
+                # Silently ignore if CUDA not available or clear fails
+                pass
 
         except FileNotFoundError as e:
             error_msg = f"CLI script not found: {e}"
@@ -370,6 +390,13 @@ class Runner:
         finally:
             with self._lock:
                 self._active_process = None
+            
+            # Also clear CUDA cache on error/cancellation
+            try:
+                from .gpu_utils import clear_cuda_cache
+                clear_cuda_cache()
+            except Exception:
+                pass
 
         # Determine output path
         output_path = None

@@ -28,21 +28,40 @@ def _check_ffmpeg() -> Dict[str, Optional[str]]:
 
 def _check_cuda() -> Dict[str, Optional[str]]:
     try:
-        import torch
-
-        if torch.cuda.is_available():
-            count = torch.cuda.device_count()
-            device_info = []
-            for i in range(count):
-                name = torch.cuda.get_device_name(i)
-                # Get VRAM info
-                total_mem = torch.cuda.get_device_properties(i).total_memory / (1024**3)  # Convert to GB
-                allocated = torch.cuda.memory_allocated(i) / (1024**3)
-                reserved = torch.cuda.memory_reserved(i) / (1024**3)
-                free = total_mem - allocated
-                device_info.append(f"GPU{i}: {name} ({free:.1f}GB free / {total_mem:.1f}GB total)")
-            return {"status": "ok", "detail": "\n".join(device_info)}
-        return {"status": "missing", "detail": "CUDA not available"}
+        from .gpu_utils import get_gpu_info, get_cuda_version, is_apple_silicon
+        
+        # Check for Apple Silicon
+        if is_apple_silicon():
+            return {
+                "status": "ok",
+                "detail": "🍎 Apple Silicon detected - Use MPS backend for GPU acceleration (CUDA not available on macOS)"
+            }
+        
+        # Get detailed GPU info
+        gpus = get_gpu_info()
+        
+        if not gpus:
+            return {"status": "missing", "detail": "No CUDA GPUs detected - will use CPU (significantly slower)"}
+        
+        device_info = []
+        cuda_ver = get_cuda_version()
+        if cuda_ver:
+            device_info.append(f"**CUDA Version:** {cuda_ver}")
+        
+        device_info.append(f"**Detected {len(gpus)} GPU(s):**")
+        
+        for gpu in gpus:
+            if gpu.is_available:
+                compute_cap = f" [Compute {gpu.compute_capability[0]}.{gpu.compute_capability[1]}]" if gpu.compute_capability else ""
+                device_info.append(
+                    f"✅ GPU {gpu.id}: {gpu.name}\n"
+                    f"   └─ {gpu.available_memory_gb:.1f}GB free / {gpu.total_memory_gb:.1f}GB total{compute_cap}"
+                )
+            else:
+                device_info.append(f"⚠️ GPU {gpu.id}: {gpu.name} (unavailable)")
+        
+        return {"status": "ok", "detail": "\n".join(device_info)}
+        
     except Exception as exc:
         return {"status": "error", "detail": f"CUDA check failed: {exc}"}
 

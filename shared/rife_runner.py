@@ -128,6 +128,23 @@ def run_rife_interpolation(
             on_progress(msg + "\n")
     
     try:
+        # Check for deprecated parameters and warn
+        legacy_warnings = []
+        if settings.get("skip_first_frames", 0) > 0:
+            legacy_warnings.append(
+                "⚠️ DEPRECATED: 'skip_first_frames' is a legacy parameter. "
+                "Please use the 'Video Editing' tab's trim feature instead for better control."
+            )
+        if settings.get("load_cap", 0) > 0:
+            legacy_warnings.append(
+                "⚠️ DEPRECATED: 'load_cap' is a legacy parameter. "
+                "Please use the 'Video Editing' tab's trim feature to specify end time."
+            )
+        
+        # Log warnings
+        for warning in legacy_warnings:
+            log(warning)
+        
         # Validate input
         input_path = normalize_path(settings.get("input_path", ""))
         if not input_path or not Path(input_path).exists():
