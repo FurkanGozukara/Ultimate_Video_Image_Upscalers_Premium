@@ -172,16 +172,22 @@ def gan_tab(
                     info="Automatically calculate optimal input resolution based on target output and model scale. Recommended ON for best results with Resolution & Scene Split tab."
                 )
 
+                use_resolution_tab = gr.Checkbox(
+                    label="🔗 Use Resolution & Scene Split Tab Settings",
+                    value=values[8],
+                    info="Apply target resolution, max resolution, and downscale-then-upscale settings from Resolution tab. Enables universal resolution control across all models. Recommended ON."
+                )
+
                 tile_size = gr.Number(
                     label="Tile Size",
-                    value=values[8],
+                    value=values[9],
                     precision=0,
                     info="Process image in tiles to reduce VRAM usage. 0 = process whole image. Try 512 for 8GB GPUs, 1024 for 12GB+. May cause subtle seams."
                 )
 
                 overlap = gr.Number(
                     label="Tile Overlap",
-                    value=values[9],
+                    value=values[10],
                     precision=0,
                     info="Pixels of overlap between tiles to prevent seam artifacts. Higher = smoother but slower. Try 32-128. Must be less than tile size."
                 )
@@ -189,7 +195,7 @@ def gan_tab(
                 batch_size = gr.Slider(
                     label="Batch Size (Frames per Iteration)",
                     minimum=1, maximum=16, step=1,
-                    value=values[15],
+                    value=values[16],
                     info="Frames processed simultaneously for videos. Higher = faster but more VRAM. 1 = safest, 4-8 = balanced, 16 = max speed if VRAM allows."
                 )
 
@@ -201,32 +207,32 @@ def gan_tab(
                 denoising_strength = gr.Slider(
                     label="Denoising Strength",
                     minimum=0.0, maximum=1.0, step=0.05,
-                    value=values[10],
+                    value=values[11],
                     info="Reduce noise/compression artifacts. 0 = no denoising, 1 = maximum. Try 0.3-0.7 for compressed videos. May reduce fine detail at high values."
                 )
 
                 sharpening = gr.Slider(
                     label="Output Sharpening",
                     minimum=0.0, maximum=2.0, step=0.1,
-                    value=values[11],
+                    value=values[12],
                     info="Post-process sharpening. 0 = none, 1 = moderate, 2 = strong. Over-sharpening causes halos. Try 0.5-1.0 for balanced results."
                 )
 
                 color_correction = gr.Checkbox(
                     label="Color Correction",
-                    value=values[12],
+                    value=values[13],
                     info="Maintain color accuracy by matching output colors to input. Prevents color shifts. Recommended ON for most content."
                 )
 
                 gpu_acceleration = gr.Checkbox(
                     label="GPU Acceleration",
-                    value=values[13],
+                    value=values[14],
                     info="Use GPU for processing. HIGHLY RECOMMENDED for speed. CPU fallback is 10-100x slower. Disable only if no compatible GPU."
                 )
 
                 gpu_device = gr.Textbox(
                     label="GPU Device",
-                    value=values[14],
+                    value=values[15],
                     placeholder="0 or 0,1",
                     info="GPU device ID(s) to use. Single ID (0) for one GPU. Multi-GPU support model-dependent. Check CUDA availability in Health tab."
                 )
@@ -239,26 +245,26 @@ def gan_tab(
                 output_format_gan = gr.Dropdown(
                     label="Output Format",
                     choices=["auto", "png", "jpg", "webp"],
-                    value=values[15],
+                    value=values[17],
                     info="'auto' matches input format"
                 )
 
                 output_quality_gan = gr.Slider(
                     label="Output Quality",
                     minimum=70, maximum=100, step=5,
-                    value=values[16],
+                    value=values[18],
                     info="Quality for lossy formats (JPG/WebP)"
                 )
 
                 save_metadata = gr.Checkbox(
                     label="Save Processing Metadata",
-                    value=values[17],
+                    value=values[19],
                     info="Embed processing information in output files"
                 )
 
                 create_subfolders = gr.Checkbox(
                     label="Create Subfolders by Model",
-                    value=values[18],
+                    value=values[20],
                     info="Organize outputs in model-named subdirectories"
                 )
 
@@ -381,9 +387,9 @@ def gan_tab(
     # Collect all inputs
     inputs_list = [
         input_path, batch_enable, batch_input, batch_output, gan_model,
-        target_resolution, downscale_first, auto_calculate_input, tile_size, overlap,
+        target_resolution, downscale_first, auto_calculate_input, use_resolution_tab, tile_size, overlap,
         denoising_strength, sharpening, color_correction, gpu_acceleration, gpu_device,
-        output_format_gan, output_quality_gan, save_metadata, create_subfolders
+        batch_size, output_format_gan, output_quality_gan, save_metadata, create_subfolders
     ]
 
     # Wire up event handlers

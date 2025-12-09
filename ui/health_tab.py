@@ -90,17 +90,17 @@ def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir
         - Check antivirus software isn't blocking file operations
         """)
 
+    # Health status message (shows what changed)
+    health_status = gr.Markdown("", visible=False)
+    
     # Wire up the health check
+    # The banner updates automatically via shared_state.change() in main app
     health_btn.click(
         fn=run_health_check,
         inputs=shared_state,
-        outputs=[health_report, gr.Markdown(visible=False), shared_state]  # Match 3 return values
+        outputs=[health_report, health_status, shared_state]
     )
 
-    # Auto-run health check on tab load
-    def load_health_check(state):
-        report_text, health_text, updated_state = run_health_check(state)
-        return report_text, updated_state
-
-    # Note: We can't use gr.Tab().load() here since we're inside a tab
-    # The health check will be run when the button is clicked
+    # Auto-run health check on tab load would require tab-level load event
+    # Since we're inside a with gr.Tab() context, we can't attach .load()
+    # Health check runs on button click instead

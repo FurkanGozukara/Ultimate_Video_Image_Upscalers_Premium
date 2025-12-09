@@ -417,8 +417,10 @@ class Runner:
             log_lines.append("Run canceled; partial output preserved.")
             output_path = str(predicted_output)
 
-        # Emit metadata if successful
-        if output_path and returncode == 0 and self._telemetry_enabled:
+        # Emit metadata if successful and enabled
+        # Check both global telemetry AND per-run metadata settings
+        should_emit_metadata = self._telemetry_enabled and settings.get("save_metadata", True)
+        if output_path and returncode == 0 and should_emit_metadata:
             try:
                 emit_metadata(
                     Path(output_path),
@@ -442,19 +444,33 @@ class Runner:
 
     def _run_seedvr2_in_app(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
         """
-        Execute SeedVR2 CLI inline (single process). Not cancelable mid-run.
+        Execute SeedVR2 in-app mode (EXPERIMENTAL - Currently Not Implemented).
 
-        TODO: Implement true in-app mode with direct model loading and caching.
-        For now, this falls back to subprocess execution due to dependency isolation issues.
-        In-app mode would require:
-        - Direct import of SeedVR2 inference modules (not CLI)
-        - Model caching between runs
-        - Proper VRAM management without subprocess cleanup
+        CURRENT STATUS: This method is a stub that falls back to subprocess execution.
+        
+        PLANNED IMPLEMENTATION:
+        True in-app mode will provide:
+        - Direct model loading and caching (models stay in VRAM between runs)
+        - Faster repeated processing (no model reload overhead)
+        - Higher VRAM/RAM usage (models persist until app restart)
+        - Non-cancelable during processing (no subprocess to kill)
+        
+        REQUIREMENTS FOR FULL IMPLEMENTATION:
+        - Direct import of SeedVR2 inference modules (bypass CLI wrapper)
+        - ModelManager integration for cross-run caching
+        - Proper VRAM lifecycle management without subprocess cleanup
+        - Manual model unloading controls in UI
+        
+        For now, this provides subprocess execution with the same guarantees:
+        - Full VRAM cleanup after each run
+        - Cancelable processing
+        - No memory leaks
         """
         if on_progress:
-            on_progress("⚠️ In-app mode not yet implemented, using subprocess mode\n")
+            on_progress("ℹ️ In-app mode is currently experimental (stub implementation)\n")
+            on_progress("ℹ️ Using subprocess mode for guaranteed VRAM cleanup and cancellation support\n")
 
-        # Fall back to subprocess execution
+        # Fall back to subprocess execution until in-app mode is fully implemented
         return self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
 
     def ensure_seedvr2_model_loaded(self, settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> bool:
@@ -830,7 +846,9 @@ class Runner:
             "output": output_path,
             "args": settings,
         }
-        if self._telemetry_enabled:
+        # Check both global telemetry AND per-run metadata settings
+        should_emit_metadata = self._telemetry_enabled and settings.get("save_metadata", True)
+        if should_emit_metadata:
             if png_output:
                 write_png_metadata(Path(output_path), meta_payload)
             else:
@@ -942,8 +960,9 @@ class Runner:
             # Output path comes from result
             output_path = result.output_path
 
-            # Emit metadata if successful
-            if output_path and result.returncode == 0 and self._telemetry_enabled:
+            # Emit metadata if successful and enabled
+            should_emit_metadata = self._telemetry_enabled and settings.get("save_metadata", True)
+            if output_path and result.returncode == 0 and should_emit_metadata:
                 try:
                     emit_metadata(
                         Path(output_path),

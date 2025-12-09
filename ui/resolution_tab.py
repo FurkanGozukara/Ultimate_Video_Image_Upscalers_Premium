@@ -9,19 +9,35 @@ from typing import Dict, Any
 from shared.services.resolution_service import (
     build_resolution_callbacks, RESOLUTION_ORDER
 )
-from shared.models.seedvr2_meta import get_seedvr2_model_names
-from shared.models import scan_gan_models
+from shared.models import (
+    get_seedvr2_model_names,
+    scan_gan_models,
+    get_flashvsr_model_names,
+    get_rife_model_names
+)
 
 
 def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     """
     Self-contained Resolution & Scene Split tab with auto-calculation features.
+    
+    This tab's settings apply to ALL upscaler models (SeedVR2, GAN, FlashVSR+, RIFE).
+    Settings are saved per-model for flexibility.
     """
 
-    # Get available models
+    # Get available models from ALL pipelines
     seedvr2_models = get_seedvr2_model_names()
     gan_models = scan_gan_models(base_dir)
-    combined_models = sorted(list({*seedvr2_models, *gan_models}))
+    flashvsr_models = get_flashvsr_model_names()
+    rife_models = get_rife_model_names(base_dir)
+    
+    # Combine and deduplicate
+    combined_models = sorted(list({
+        *seedvr2_models, 
+        *gan_models,
+        *flashvsr_models,
+        *rife_models
+    }))
 
     # Build service callbacks
     service = build_resolution_callbacks(preset_manager, shared_state, combined_models)

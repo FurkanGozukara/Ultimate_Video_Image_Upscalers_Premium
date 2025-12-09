@@ -289,6 +289,46 @@ def write_png_metadata(dir_path: Path, payload: dict):
         pass
 
 
+def get_png_frame_pattern(output_dir: Path, base_name: str, padding: int = 6) -> str:
+    """
+    Get PNG frame naming pattern for video->PNG exports.
+    
+    Args:
+        output_dir: Directory where frames will be saved
+        base_name: Base name for frames (usually input video stem)
+        padding: Number of digits for frame numbering (default 6 to match SeedVR2 CLI)
+    
+    Returns:
+        Pattern string like "frame_%06d.png" for use with ffmpeg or manual frame saving
+    """
+    # Match SeedVR2 CLI behavior: {base_name}_{index:0Nd}.png
+    return f"{base_name}_%0{padding}d.png"
+
+
+def read_png_settings(output_dir: Path) -> Dict[str, Any]:
+    """
+    Read PNG settings metadata from a PNG sequence directory.
+    
+    Returns:
+        Dict with 'padding', 'keep_basename', 'base_name' or defaults
+    """
+    metadata_path = output_dir / ".png_settings.json"
+    if metadata_path.exists():
+        try:
+            import json
+            with metadata_path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    
+    # Return defaults matching SeedVR2 CLI
+    return {
+        "padding": 6,
+        "keep_basename": True,
+        "base_name": "frame"
+    }
+
+
 def generate_output_path(
     input_path: str,
     output_format: str,
@@ -304,6 +344,12 @@ def generate_output_path(
     We keep the `_upscaled` suffix for single runs even when an explicit output
     directory/global override is provided, but avoid the suffix for directory
     (batch) mode to preserve original names inside the batch folder.
+    
+    For PNG sequences (video -> PNG frames):
+    - Creates directory with name pattern: {input_name}_upscaled/
+    - Individual frames are named by the CLI: {base_name}_{frame_num:0Nd}.png
+    - png_padding controls N (default 6 to match SeedVR2 CLI)
+    - SeedVR2 CLI handles actual frame file creation with padding
     """
     input_path_obj = Path(input_path)
     input_name = input_path_obj.stem
@@ -328,14 +374,35 @@ def generate_output_path(
 
     if output_format == "png":
         if input_type == "image":
+            # Single image -> single PNG file
             target = base_dir / f"{input_name}{file_suffix}.png"
             ensure_dir(target.parent)
             return collision_safe_path(target)
         else:
+            # Video -> PNG sequence directory
+            # NOTE: png_padding is stored as metadata in the directory for CLI usage
+            # The actual frame files are created by SeedVR2 CLI with pattern: {base}_{idx:0Nd}.png
+            # where N comes from png_padding (default 6 to match CLI hardcoded value)
             target_dir = base_dir / f"{input_name}{file_suffix}"
             ensure_dir(target_dir.parent)
             target_dir = collision_safe_dir(target_dir)
             ensure_dir(target_dir)
+            
+            # Store PNG settings as metadata for CLI/processor to use
+            # This allows frame extraction utilities to respect user's padding preference
+            if png_padding is not None:
+                try:
+                    metadata_path = target_dir / ".png_settings.json"
+                    import json
+                    with metadata_path.open("w", encoding="utf-8") as f:
+                        json.dump({
+                            "padding": png_padding,
+                            "keep_basename": png_keep_basename,
+                            "base_name": input_name
+                        }, f, indent=2)
+                except Exception:
+                    pass  # Non-critical metadata write
+            
             return target_dir
     else:
         target = base_dir / f"{input_name}{file_suffix}.mp4"

@@ -164,9 +164,9 @@ def main():
             gr.Markdown("""
             **Subprocess Mode** (Default & Recommended): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but slower model loading.
             
-            **In-App Mode** (Advanced): Runs processes in-app with model caching for faster repeated processing. Uses more VRAM/RAM and may have memory leaks. **⚠️ WARNING: Once enabled, requires app restart to return to subprocess mode.**
+            **In-App Mode** (Advanced - CURRENTLY EXPERIMENTAL): ⚠️ **NOTE**: In-app mode is currently a stub and falls back to subprocess execution. This mode is planned for future implementation to enable model caching and faster repeated processing. When fully implemented, it will use more VRAM/RAM and may have memory leaks, requiring app restart to return to subprocess mode.
             
-            💡 **Recommendation**: Stick with subprocess mode unless you're doing repeated processing with the same model and need maximum speed.
+            💡 **Current Recommendation**: Use subprocess mode (only option currently active). In-app mode will be implemented in a future update.
             """)
             mode_radio = gr.Radio(
                 choices=["subprocess", "in_app"],

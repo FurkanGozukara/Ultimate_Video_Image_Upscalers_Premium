@@ -164,6 +164,7 @@ def gan_defaults(base_dir: Path) -> Dict[str, Any]:
         "target_resolution": 1920,
         "downscale_first": True,
         "auto_calculate_input": True,
+        "use_resolution_tab": True,  # Enable Resolution tab integration by default
         "tile_size": 0,
         "overlap": 32,
         "denoising_strength": 0.0,
@@ -188,6 +189,7 @@ GAN_ORDER: List[str] = [
     "target_resolution",
     "downscale_first",
     "auto_calculate_input",
+    "use_resolution_tab",  # Added to support Resolution tab integration
     "tile_size",
     "overlap",
     "denoising_strength",

@@ -1068,6 +1068,14 @@ def build_seedvr2_callbacks(
             if seed_controls.get("png_keep_basename_val") is not None:
                 settings["png_keep_basename"] = bool(seed_controls["png_keep_basename_val"])
             
+            # Apply metadata and telemetry settings from Output tab
+            if seed_controls.get("save_metadata_val") is not None:
+                settings["save_metadata"] = bool(seed_controls["save_metadata_val"])
+            if seed_controls.get("telemetry_enabled_val") is not None:
+                # Note: telemetry is controlled globally via runner.set_telemetry()
+                # This flag controls per-run metadata emission only
+                settings["telemetry_enabled"] = bool(seed_controls["telemetry_enabled_val"])
+            
             # Apply skip_first_frames and load_cap from Output tab ONLY if not explicitly set in SeedVR2 tab
             # SeedVR2 tab values take precedence over Output tab cached values
             if seed_controls.get("skip_first_frames_val") is not None:

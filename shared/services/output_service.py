@@ -223,9 +223,14 @@ def build_output_callbacks(
         seed_controls["fullscreen_val"] = settings_dict.get("fullscreen_enabled", True)
         seed_controls["png_padding_val"] = settings_dict.get("png_padding", 5)
         seed_controls["png_keep_basename_val"] = settings_dict.get("png_keep_basename", True)
+        seed_controls["skip_first_frames_val"] = settings_dict.get("skip_first_frames", 0)
+        seed_controls["load_cap_val"] = settings_dict.get("load_cap", 0)
+        # Wire metadata and telemetry settings
+        seed_controls["save_metadata_val"] = settings_dict.get("save_metadata", True)
+        seed_controls["telemetry_enabled_val"] = settings_dict.get("telemetry_enabled", True)
         state["seed_controls"] = seed_controls
         
-        status = f"✅ Applied output settings\n- Format: {seed_controls['output_format_val']}\n- Comparison: {seed_controls['comparison_mode_val']}"
+        status = f"✅ Applied output settings\n- Format: {seed_controls['output_format_val']}\n- Comparison: {seed_controls['comparison_mode_val']}\n- Metadata: {seed_controls['save_metadata_val']}"
         return gr.Markdown.update(value=status), state
 
     def pin_reference_frame(image_path, state):

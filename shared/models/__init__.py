@@ -27,5 +27,20 @@ def scan_gan_models(base_dir: Path) -> List[str]:
     return sorted(choices)
 
 
-__all__ = ["scan_gan_models"]
+# Re-export model metadata functions for convenience
+from .seedvr2_meta import get_seedvr2_model_names, get_seedvr2_models, model_meta_map
+from .flashvsr_meta import get_flashvsr_model_names, get_flashvsr_default_model
+from .rife_meta import get_rife_model_names, get_rife_default_model
+
+
+__all__ = [
+    "scan_gan_models",
+    "get_seedvr2_model_names",
+    "get_seedvr2_models", 
+    "model_meta_map",
+    "get_flashvsr_model_names",
+    "get_flashvsr_default_model",
+    "get_rife_model_names",
+    "get_rife_default_model"
+]
 
