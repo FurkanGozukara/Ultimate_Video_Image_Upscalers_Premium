@@ -378,7 +378,7 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     load_preset_btn.click(
         fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals)),
         inputs=[preset_dropdown, model_selector] + inputs_list,
-        outputs=inputs_list[1:] + [preset_status]  # Skip model_selector
+        outputs=inputs_list + [preset_status]  # Include all controls including output_format
     )
 
     safe_defaults_btn.click(
@@ -413,29 +413,45 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         outputs=[pin_status, shared_state]
     )
 
-    # Cache management
+    # Cache management - wire individual values correctly
+    def cache_fps_wrapper(fps_val, state):
+        return service["cache_fps"](fps_val, state)
+    
+    def cache_comparison_wrapper(comp_mode, state):
+        return service["cache_comparison"](comp_mode, state)
+    
+    def cache_png_wrapper(padding, basename, state):
+        msg1, state1 = service["cache_png_padding"](padding, state)
+        msg2, state2 = service["cache_png_basename"](basename, state1)
+        return gr.Markdown.update(value=msg1 + "\n" + msg2), state2
+    
+    def cache_skip_wrapper(skip_val, cap_val, state):
+        msg1, state1 = service["cache_skip"](skip_val, state)
+        msg2, state2 = service["cache_cap"](cap_val, state1)
+        return gr.Markdown.update(value=msg1 + "\n" + msg2), state2
+    
     cache_fps_btn.click(
-        fn=lambda *vals: service["cache_fps"](list(vals)),
-        inputs=inputs_list,
+        fn=cache_fps_wrapper,
+        inputs=[fps_override, shared_state],
         outputs=[cache_status, shared_state]
     )
 
     cache_comparison_btn.click(
-        fn=lambda *vals: service["cache_comparison"](list(vals)),
-        inputs=inputs_list,
+        fn=cache_comparison_wrapper,
+        inputs=[comparison_mode, shared_state],
         outputs=[cache_status, shared_state]
     )
 
     cache_png_btn.click(
-        fn=lambda *vals: service["cache_png_padding"](list(vals)) + "\n" + service["cache_png_basename"](list(vals)),
-        inputs=inputs_list,
-        outputs=cache_status
+        fn=cache_png_wrapper,
+        inputs=[png_padding, png_keep_basename, shared_state],
+        outputs=[cache_status, shared_state]
     )
 
     cache_skip_btn.click(
-        fn=lambda *vals: service["cache_skip"](list(vals)) + "\n" + service["cache_cap"](list(vals)),
-        inputs=inputs_list,
-        outputs=cache_status
+        fn=cache_skip_wrapper,
+        inputs=[skip_first_frames, load_cap, shared_state],
+        outputs=[cache_status, shared_state]
     )
     
     # Codec info updates

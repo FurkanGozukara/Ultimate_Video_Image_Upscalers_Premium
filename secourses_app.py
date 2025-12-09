@@ -47,10 +47,13 @@ runner = Runner(
     output_dir=output_dir,
     telemetry_enabled=global_settings.get("telemetry", True),
 )
-# Force subprocess mode (in-app not yet implemented)
-runner.set_mode("subprocess")
-# Update global settings to ensure it's saved
-global_settings["mode"] = "subprocess"
+# Restore execution mode from saved settings (default to subprocess)
+saved_mode = global_settings.get("mode", "subprocess")
+try:
+    runner.set_mode(saved_mode)
+except Exception:
+    runner.set_mode("subprocess")
+    global_settings["mode"] = "subprocess"
 run_logger = RunLogger(enabled=global_settings.get("telemetry", True))
 
 
@@ -161,23 +164,24 @@ def main():
             gr.Markdown("""
             **Subprocess Mode** (Default & Recommended): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but slower model loading.
             
-            **In-App Mode** (🚧 Not Yet Available): Would run processes in-app with model caching for faster processing. Currently disabled due to dependency isolation issues. Future feature.
+            **In-App Mode** (Advanced): Runs processes in-app with model caching for faster repeated processing. Uses more VRAM/RAM and may have memory leaks. **⚠️ WARNING: Once enabled, requires app restart to return to subprocess mode.**
             
-            For now, all processing uses subprocess mode for maximum stability and VRAM cleanup.
+            💡 **Recommendation**: Stick with subprocess mode unless you're doing repeated processing with the same model and need maximum speed.
             """)
             mode_radio = gr.Radio(
-                choices=["subprocess"],  # Only subprocess for now
-                value="subprocess",
+                choices=["subprocess", "in_app"],
+                value=global_settings.get("mode", "subprocess"),
                 label="Processing Mode",
-                info="Subprocess mode ensures clean memory and maximum compatibility. In-app mode coming in future update.",
-                interactive=False  # Disable since only one option
+                info="Choose execution mode. Subprocess = clean memory, In-app = faster repeats but uses more memory.",
+                interactive=True
             )
             mode_confirm = gr.Checkbox(
-                label="ℹ️ In-app mode will be added in future release",
+                label="⚠️ I understand in-app mode requires restart to return to subprocess",
                 value=False,
-                visible=False  # Hide since not relevant
+                visible=True,
+                info="Enable this checkbox to confirm mode change to in-app (required for safety)"
             )
-            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", visible=False)  # Hide since no options
+            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
 
             # Wire up global settings events
             def save_global_settings(od, td, tel, face, state):

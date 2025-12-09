@@ -74,20 +74,45 @@ def _get_default_attention_mode() -> str:
         return "sdpa"
 
 
-def seedvr2_defaults() -> Dict[str, Any]:
-    """Get default SeedVR2 settings aligned with CLI defaults."""
+def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get default SeedVR2 settings aligned with CLI defaults.
+    Applies model-specific metadata when model_name is provided.
+    """
     try:
         import torch
         cuda_default = "0" if torch.cuda.is_available() else ""
     except Exception:
         cuda_default = ""
     
+    # Get model metadata if specific model is provided
+    model_meta = None
+    default_model = get_seedvr2_model_names()[0] if get_seedvr2_model_names() else "seedvr2_ema_3b_fp16.safetensors"
+    target_model = model_name or default_model
+    
+    if target_model:
+        from shared.models.seedvr2_meta import model_meta_map
+        meta_map = model_meta_map()
+        model_meta = meta_map.get(target_model)
+    
+    # Apply model-specific defaults if metadata available
+    if model_meta:
+        default_attention = model_meta.preferred_attention if hasattr(model_meta, 'preferred_attention') else _get_default_attention_mode()
+        default_batch_size = model_meta.default_batch_size if hasattr(model_meta, 'default_batch_size') else 5
+        compile_compatible = model_meta.compile_compatible if hasattr(model_meta, 'compile_compatible') else True
+        max_res_cap = model_meta.max_resolution if hasattr(model_meta, 'max_resolution') else 0
+    else:
+        default_attention = _get_default_attention_mode()
+        default_batch_size = 5
+        compile_compatible = True
+        max_res_cap = 0
+    
     return {
         "input_path": "",
         "output_override": "",
         "output_format": "auto",
         "model_dir": "",
-        "dit_model": get_seedvr2_model_names()[0] if get_seedvr2_model_names() else "seedvr2_ema_3b_fp16.safetensors",
+        "dit_model": target_model,
         "batch_enable": False,
         "batch_input_path": "",
         "batch_output_path": "",
@@ -96,8 +121,8 @@ def seedvr2_defaults() -> Dict[str, Any]:
         "scene_min_len": 2.0,
         "chunk_size": 0,  # SeedVR2 native chunking (frames per chunk, 0=disabled)
         "resolution": 1080,
-        "max_resolution": 0,
-        "batch_size": 5,
+        "max_resolution": max_res_cap,  # Apply model-specific cap
+        "batch_size": default_batch_size,  # Apply model-specific default
         "uniform_batch_size": False,
         "seed": 42,
         "skip_first_frames": 0,
@@ -120,9 +145,9 @@ def seedvr2_defaults() -> Dict[str, Any]:
         "vae_decode_tile_size": 1024,
         "vae_decode_tile_overlap": 128,
         "tile_debug": "false",
-        "attention_mode": _get_default_attention_mode(),
-        "compile_dit": False,
-        "compile_vae": False,
+        "attention_mode": default_attention,  # Apply model-specific attention
+        "compile_dit": False,  # Default off, will validate against model metadata
+        "compile_vae": False,  # Default off, will validate against model metadata
         "compile_backend": "inductor",
         "compile_mode": "default",
         "compile_fullgraph": False,
@@ -133,6 +158,7 @@ def seedvr2_defaults() -> Dict[str, Any]:
         "cache_vae": False,
         "debug": False,
         "resume_chunking": False,
+        "_compile_compatible": compile_compatible,  # Store for validation
     }
 
 
@@ -194,6 +220,35 @@ SEEDVR2_ORDER: List[str] = [
 def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Apply SeedVR2-specific validation rules and apply resolution tab settings if available."""
     cfg = cfg.copy()
+    
+    # Apply model-specific metadata constraints
+    model_name = cfg.get("dit_model", "")
+    if model_name:
+        from shared.models.seedvr2_meta import model_meta_map
+        meta_map = model_meta_map()
+        model_meta = meta_map.get(model_name)
+        
+        if model_meta:
+            # Disable compile if model doesn't support it
+            compile_compatible = getattr(model_meta, 'compile_compatible', True)
+            if not compile_compatible:
+                if cfg.get("compile_dit") or cfg.get("compile_vae"):
+                    error_logger.warning(f"Model {model_name} doesn't support torch.compile - disabling compile flags")
+                    cfg["compile_dit"] = False
+                    cfg["compile_vae"] = False
+            
+            # Apply model max resolution cap if set
+            model_max_res = getattr(model_meta, 'max_resolution', 0)
+            if model_max_res > 0:
+                current_res = cfg.get("resolution", 1080)
+                if current_res > model_max_res:
+                    error_logger.warning(f"Model {model_name} max resolution is {model_max_res}, clamping from {current_res}")
+                    cfg["resolution"] = model_max_res
+            
+            # Set preferred attention mode if not explicitly set
+            preferred_attention = getattr(model_meta, 'preferred_attention', None)
+            if preferred_attention and cfg.get("attention_mode") == _get_default_attention_mode():
+                cfg["attention_mode"] = preferred_attention
 
     # Apply resolution tab settings from shared state if available
     if state:

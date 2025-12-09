@@ -94,7 +94,7 @@ def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir
     health_btn.click(
         fn=run_health_check,
         inputs=shared_state,
-        outputs=[health_report, shared_state]
+        outputs=[health_report, gr.Markdown(visible=False), shared_state]  # Match 3 return values
     )
 
     # Auto-run health check on tab load

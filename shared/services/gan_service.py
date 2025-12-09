@@ -486,26 +486,34 @@ def build_gan_callbacks(
             inp = normalize_path(upload if upload else settings["input_path"])
             if settings.get("batch_enable"):
                 if not inp or not Path(inp).exists() or not Path(inp).is_dir():
-                    return ("❌ Batch input folder missing", "", None, "", gr.ImageSlider.update(value=None), state)
+                    yield ("❌ Batch input folder missing", "", gr.Markdown.update(value="", visible=False), None, None, "Error", gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), gr.Gallery.update(visible=False), state)
+                    return
             else:
                 if not inp or not Path(inp).exists():
-                    return ("❌ Input missing", "", None, "", gr.ImageSlider.update(value=None), state)
+                    yield ("❌ Input missing", "", gr.Markdown.update(value="", visible=False), None, None, "Error", gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), gr.Gallery.update(visible=False), state)
+                    return
 
             settings["input_path"] = inp
 
             cuda_warn = _validate_cuda_devices(settings.get("cuda_device", ""))
             if cuda_warn:
-                return (f"⚠️ {cuda_warn}", "", None, "", state)
+                yield (f"⚠️ {cuda_warn}", "", gr.Markdown.update(value="", visible=False), None, None, "CUDA Error", gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), gr.Gallery.update(visible=False), state)
+                return
             devices = [d.strip() for d in str(settings.get("cuda_device") or "").split(",") if d.strip()]
             if len(devices) > 1:
-                return (
+                yield (
                     "⚠️ GAN backends currently use a single GPU; select one CUDA device.",
                     "",
+                    gr.Markdown.update(value="", visible=False),
                     None,
-                    "",
+                    None,
+                    "Multi-GPU Error",
                     gr.ImageSlider.update(value=None),
+                    gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),
                     state
                 )
+                return
 
             # Face restoration is controlled ONLY by global setting (no per-run toggle in GAN tab)
             # GAN tab doesn't have a face_restore checkbox, so we only use global setting

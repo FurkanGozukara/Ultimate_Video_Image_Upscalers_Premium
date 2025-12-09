@@ -416,10 +416,10 @@ def gan_tab(
         show_download_button=True
     )
 
-    # Main processing with gr.Progress
+    # Main processing with gr.Progress - include input_file upload
     upscale_btn.click(
-        fn=lambda *args, progress=gr.Progress(): service["run_action"](*args[:-1], preview_only=False, state=args[-1], progress=progress),
-        inputs=inputs_list + [shared_state],
+        fn=lambda upload, *args, progress=gr.Progress(): service["run_action"](upload, *args[:-1], preview_only=False, state=args[-1], progress=progress),
+        inputs=[input_file] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,
             last_processed, image_slider, video_comparison_html, batch_gallery, shared_state
@@ -427,8 +427,8 @@ def gan_tab(
     )
 
     preview_btn.click(
-        fn=lambda *args, progress=gr.Progress(): service["run_action"](*args[:-1], preview_only=True, state=args[-1], progress=progress),
-        inputs=inputs_list + [shared_state],
+        fn=lambda upload, *args, progress=gr.Progress(): service["run_action"](upload, *args[:-1], preview_only=True, state=args[-1], progress=progress),
+        inputs=[input_file] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,
             last_processed, image_slider, video_comparison_html, batch_gallery, shared_state
