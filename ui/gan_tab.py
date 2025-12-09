@@ -30,7 +30,7 @@ def gan_tab(
 
     # Build service callbacks
     service = build_gan_callbacks(
-        preset_manager, run_logger, global_settings, shared_state,
+        preset_manager, runner, run_logger, global_settings, shared_state,
         base_dir, temp_dir, output_dir
     )
 

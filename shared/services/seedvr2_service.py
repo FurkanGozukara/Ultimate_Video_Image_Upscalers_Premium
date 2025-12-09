@@ -415,7 +415,29 @@ def _process_single_file(
             if progress_cb:
                 progress_cb("Model loaded successfully!\n")
 
-        # Determine if chunking should be used
+        # 🎬 CHUNKING SYSTEM ARCHITECTURE - Two Complementary Methods:
+        # 
+        # METHOD 1: PySceneDetect Chunking (PREFERRED, UNIVERSAL)
+        # --------------------------------------------------------
+        # - Controlled by: Resolution & Scene Split tab → chunk_enable checkbox
+        # - Settings: chunk_size_sec, chunk_overlap_sec, scene_threshold, min_scene_len
+        # - How it works: Externally splits video into scenes using PySceneDetect,
+        #   processes each scene separately, then concatenates with blending
+        # - Works with: ALL models (SeedVR2, GAN, RIFE, FlashVSR+)
+        # - Use when: Processing long videos, managing VRAM, or optimizing per-scene quality
+        # 
+        # METHOD 2: SeedVR2 Native Streaming (SEEDVR2-SPECIFIC OPTIMIZATION)
+        # --------------------------------------------------------------------
+        # - Controlled by: SeedVR2 tab → "Streaming Chunk Size (frames)" control
+        # - Settings: chunk_size (frames), temporal_overlap
+        # - How it works: CLI-internal memory-bounded processing, streams frames through model
+        # - Works with: ONLY SeedVR2 (built into the CLI via --chunk_size flag)
+        # - Use when: Processing VERY long videos where even scene chunks exceed VRAM
+        # - Can combine: Both methods work together! PySceneDetect splits into scenes,
+        #   then each scene uses native streaming internally for maximum efficiency.
+        # 
+        # Priority: PySceneDetect chunking happens FIRST (external), then native streaming
+        # is applied within each chunk if enabled (settings["chunk_size"] > 0 passed to CLI).
         should_chunk = (
             settings.get("chunk_enable", False)
             and not preview_only
@@ -423,7 +445,8 @@ def _process_single_file(
         )
 
         if should_chunk:
-            # Process with chunking
+            # Process with external PySceneDetect chunking
+            # This splits video into scenes, processes each, then concatenates
             completed_chunks = 0
 
             def chunk_progress_callback(progress_val, desc=""):
@@ -447,6 +470,8 @@ def _process_single_file(
                 allow_partial=True,
                 global_output_dir=str(runner.output_dir) if hasattr(runner, "output_dir") else None,
                 progress_tracker=chunk_progress_callback,
+                process_func=None,  # Use default model_type routing
+                model_type="seedvr2",  # Explicitly specify SeedVR2 processing
             )
 
             status = "✅ Chunked upscale complete" if rc == 0 else f"⚠️ Chunked upscale ended early ({rc})"
@@ -454,17 +479,35 @@ def _process_single_file(
             output_video = output_path if output_path and output_path.lower().endswith(".mp4") else None
             output_image = None
             local_logs.append(clog)
-            chunk_summary = f"Processed {chunk_count} chunks. Final: {output_path}"
-            chunk_info_msg = f"Chunks: {chunk_count}\nOutput: {output_path}\n{clog}"
+            
+            # Enhanced summary showing both chunking methods if applicable
+            native_streaming_info = ""
+            if settings.get("chunk_size", 0) > 0:
+                native_streaming_info = f" + native streaming ({settings['chunk_size']} frames/chunk)"
+            chunk_summary = f"Processed {chunk_count} scene chunks{native_streaming_info}. Final: {output_path}"
+            chunk_info_msg = f"Chunks: {chunk_count}\nNative streaming: {'Yes' if settings.get('chunk_size', 0) > 0 else 'No'}\nOutput: {output_path}\n{clog}"
             result = RunResult(rc, output_path, clog)
         else:
-            # Process without chunking
+            # Process without external chunking
+            # NOTE: SeedVR2 native streaming (--chunk_size in frames) is handled
+            # directly by the CLI via settings["chunk_size"] parameter
+            # This is independent of PySceneDetect chunking above
             result = runner.run_seedvr2(
                 settings,
                 on_progress=lambda x: progress_cb(x) if progress_cb else None,
                 preview_only=preview_only
             )
-            status = "✅ Upscale complete" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
+            
+            # Add informative message if native streaming is being used
+            native_chunk_size = settings.get("chunk_size", 0)
+            if native_chunk_size > 0:
+                status = "✅ Upscale complete (SeedVR2 native streaming)" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
+                chunk_summary = f"SeedVR2 native streaming: {native_chunk_size} frames/chunk (CLI-internal, memory-efficient)"
+                chunk_info_msg = f"Native streaming enabled: {native_chunk_size} frames/chunk\nTemporal overlap: {settings.get('temporal_overlap', 0)}\nMemory-bounded processing for long videos."
+            else:
+                status = "✅ Upscale complete" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
+                chunk_summary = "Single pass (entire video loaded at once)"
+                chunk_info_msg = "Single-pass processing (entire video in memory)"
 
         # Extract output paths
         if result.output_path:
@@ -962,6 +1005,22 @@ def build_seedvr2_callbacks(
 
             if settings["output_format"] == "auto":
                 settings["output_format"] = None
+            
+            # Apply PNG padding/basename settings from Output tab if available
+            # These are used for PNG sequence outputs and collision-safe path generation
+            if seed_controls.get("png_padding_val") is not None:
+                settings["png_padding"] = int(seed_controls["png_padding_val"])
+            if seed_controls.get("png_keep_basename_val") is not None:
+                settings["png_keep_basename"] = bool(seed_controls["png_keep_basename_val"])
+            
+            # Apply skip_first_frames and load_cap from Output tab ONLY if not explicitly set in SeedVR2 tab
+            # SeedVR2 tab values take precedence over Output tab cached values
+            if seed_controls.get("skip_first_frames_val") is not None:
+                if settings.get("skip_first_frames", 0) == 0:  # Only if not set in SeedVR2 tab
+                    settings["skip_first_frames"] = int(seed_controls["skip_first_frames_val"])
+            if seed_controls.get("load_cap_val") is not None:
+                if settings.get("load_cap", 0) == 0:  # Only if not set in SeedVR2 tab
+                    settings["load_cap"] = int(seed_controls["load_cap_val"])
 
             # Batch processing
             if settings.get("batch_enable"):
@@ -998,6 +1057,11 @@ def build_seedvr2_callbacks(
                 elif batch_input_path.suffix.lower() in supported_exts:
                     batch_files = [batch_input_path]
 
+                # Detect if this is an all-image batch or mixed/video batch
+                video_count = sum(1 for f in batch_files if Path(f).suffix.lower() in SEEDVR2_VIDEO_EXTS)
+                image_count = sum(1 for f in batch_files if Path(f).suffix.lower() in SEEDVR2_IMAGE_EXTS)
+                is_image_only_batch = image_count > 0 and video_count == 0
+
                 if not batch_files:
                     yield (
                         "❌ No supported files found in batch input",
@@ -1026,14 +1090,20 @@ def build_seedvr2_callbacks(
                 # Create batch jobs
                 jobs = []
                 for input_file in sorted(set(batch_files)):
+                    # For image-only batches, disable per-file telemetry (will write consolidated metadata at end)
+                    job_global_settings = global_settings.copy()
+                    if is_image_only_batch:
+                        job_global_settings["telemetry"] = False  # Disable per-file metadata for images
+                    
                     job = BatchJob(
                         input_path=str(input_file),
                         metadata={
                             "settings": settings.copy(),
-                            "global_settings": global_settings,
+                            "global_settings": job_global_settings,
                             "face_apply": face_apply,
                             "face_strength": face_strength,
                             "seed_controls": seed_controls.copy(),
+                            "is_image": Path(input_file).suffix.lower() in SEEDVR2_IMAGE_EXTS,
                         }
                     )
                     jobs.append(job)
@@ -1153,6 +1223,35 @@ def build_seedvr2_callbacks(
                 summary_msg = f"Batch complete: {completed}/{len(jobs)} succeeded"
                 if failed > 0:
                     summary_msg += f", {failed} failed"
+
+                # Write consolidated metadata for image-only batches
+                if is_image_only_batch and batch_outputs:
+                    try:
+                        # Write single metadata file for entire image batch
+                        batch_metadata = {
+                            "batch_type": "images",
+                            "total_files": len(jobs),
+                            "completed": completed,
+                            "failed": failed,
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "settings": settings,
+                            "outputs": batch_outputs,
+                            "failed_files": [
+                                {"input": job.input_path, "error": job.error_message}
+                                for job in jobs if job.status == "failed"
+                            ]
+                        }
+                        
+                        # Write to batch output folder
+                        metadata_dir = Path(batch_output_path) if batch_output_path.exists() else output_dir
+                        metadata_path = metadata_dir / "batch_images_metadata.json"
+                        
+                        import json
+                        with metadata_path.open("w", encoding="utf-8") as f:
+                            json.dump(batch_metadata, f, indent=2)
+                    except Exception as e:
+                        # Don't fail batch on metadata error
+                        pass
 
                 # Update gr.Progress to 100%
                 if progress:

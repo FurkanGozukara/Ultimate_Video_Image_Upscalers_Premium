@@ -510,6 +510,63 @@ def build_rife_callbacks(
             cached_fmt = seed_controls.get("output_format_val")
             if settings.get("output_format") in (None, "auto") and cached_fmt:
                 settings["output_format"] = cached_fmt
+            
+            # Pull PySceneDetect chunking settings from Resolution tab (universal chunking)
+            chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
+            chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0) or 0)
+            per_chunk_cleanup = seed_controls.get("per_chunk_cleanup", False)
+            scene_threshold = 27.0
+            min_scene_len = 2.0
+            
+            # Determine if PySceneDetect chunking should be used
+            from shared.path_utils import detect_input_type as detect_type
+            input_type_check = detect_type(input_path)
+            should_use_chunking = (
+                chunk_size_sec > 0 and
+                input_type_check == "video" and
+                not settings.get("batch_enable", False) and
+                not settings.get("img_mode", False)  # Don't chunk image sequences
+            )
+            
+            # If chunking enabled, use universal chunk_and_process for RIFE
+            if should_use_chunking:
+                from shared.chunking import chunk_and_process
+                
+                yield ("⚙️ Starting PySceneDetect chunking for RIFE processing...", 
+                       "Initializing scene detection...", None, "Chunking...")
+                
+                # Prepare settings for chunking
+                settings["chunk_size_sec"] = chunk_size_sec
+                settings["chunk_overlap_sec"] = chunk_overlap_sec
+                settings["per_chunk_cleanup"] = per_chunk_cleanup
+                
+                def chunk_progress_cb(progress_val, desc=""):
+                    yield (f"⚙️ Chunking: {desc}", f"Processing chunks... {desc}", None, desc)
+                
+                # Run chunked RIFE processing
+                rc, clog, final_output, chunk_count = chunk_and_process(
+                    runner=runner,
+                    settings=settings,
+                    scene_threshold=scene_threshold,
+                    min_scene_len=min_scene_len,
+                    temp_dir=temp_dir,
+                    on_progress=lambda msg: None,
+                    chunk_seconds=chunk_size_sec,
+                    chunk_overlap=chunk_overlap_sec,
+                    per_chunk_cleanup=per_chunk_cleanup,
+                    allow_partial=True,
+                    global_output_dir=str(output_dir),
+                    resume_from_partial=False,
+                    progress_tracker=chunk_progress_cb,
+                    process_func=None,
+                    model_type="rife",  # Route to runner.run_rife
+                )
+                
+                status = "✅ RIFE chunked processing complete" if rc == 0 else f"⚠️ RIFE chunking failed (code {rc})"
+                meta_md = f"PySceneDetect chunking: {chunk_count} chunks processed\nOutput: {final_output}"
+                
+                yield (status, clog, final_output, meta_md)
+                return
 
             # Check for batch processing
             if settings.get("batch_enable"):

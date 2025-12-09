@@ -138,38 +138,52 @@ def seedvr2_tab(
                 gr.Markdown("""
                 ### 📌 Two Chunking Methods Available:
                 
-                **1. PySceneDetect (Scene-Based):** Intelligently splits video at scene changes
-                **2. SeedVR2 Native Streaming:** Memory-efficient frame-based processing for long videos
+                **1. PySceneDetect (PREFERRED, UNIVERSAL):** Configured in **Resolution & Scene Split** tab
+                   - Works with ALL models (SeedVR2, GAN, RIFE, FlashVSR+)
+                   - Intelligently splits at scene changes or fixed intervals
+                   - Best for long videos and managing VRAM
                 
-                *These can be used independently or together for maximum control.*
+                **2. SeedVR2 Native Streaming (SeedVR2-ONLY OPTIMIZATION):** Configured below
+                   - Only works with SeedVR2
+                   - CLI-internal memory-bounded processing
+                   - Can combine with PySceneDetect for maximum efficiency
+                
+                💡 **Recommended**: Use PySceneDetect chunking (Resolution tab) as primary method.
+                Add native streaming only if processing extremely long videos (>10 min).
                 """)
                 
-                gr.Markdown("#### 🎞️ Method 1: PySceneDetect Scene-Based Chunking")
+                gr.Markdown("#### 🎞️ Method 1: PySceneDetect (PREFERRED - Configure in Resolution Tab)")
+                gr.Markdown("""
+                ⚠️ **Note**: PySceneDetect chunking is now configured in the **Resolution & Scene Split** tab.
+                Settings there apply to ALL models universally. This is the recommended chunking method.
+                
+                The controls below are for legacy compatibility. Please use Resolution tab for chunking.
+                """)
                 chunk_enable = gr.Checkbox(
-                    label="Enable PySceneDetect Scene-Based Chunking",
+                    label="[Legacy] Enable PySceneDetect Chunking Here",
                     value=values[8],
-                    info="Split video at scene changes using content analysis. Best for videos with distinct scenes (movies, TV shows). Processes each scene separately for optimal temporal consistency."
+                    info="⚠️ DEPRECATED: Use Resolution & Scene Split tab instead. This will be removed in future versions."
                 )
                 scene_threshold = gr.Slider(
-                    label="Scene Detection Sensitivity",
+                    label="[Legacy] Scene Detection Sensitivity",
                     minimum=5, maximum=50, step=1,
                     value=values[9],
-                    info="Content threshold for scene detection. Lower = more cuts (more sensitive). Higher = fewer cuts. Default 27 works well for most content."
+                    info="⚠️ Use Resolution tab for chunking configuration."
                 )
                 scene_min_len = gr.Slider(
-                    label="Min Scene Length (seconds)",
+                    label="[Legacy] Min Scene Length (seconds)",
                     minimum=1, maximum=20, step=1,
                     value=values[10],
-                    info="Minimum duration for a scene. Prevents too many short chunks. 2-5 seconds recommended for smooth processing."
+                    info="⚠️ Use Resolution tab for chunking configuration."
                 )
                 
                 gr.Markdown("---")
-                gr.Markdown("#### 🚀 Method 2: SeedVR2 Native Streaming (Memory-Efficient)")
+                gr.Markdown("#### 🚀 Method 2: SeedVR2 Native Streaming (SeedVR2-Only, Advanced)")
                 chunk_size_frames = gr.Number(
                     label="Streaming Chunk Size (frames, 0=disabled)",
                     value=values[11] if len(values) > 11 and isinstance(values[11], (int, float)) else 0,
                     precision=0,
-                    info="⚡ NEW in SeedVR2 v2.5.18: Process video in memory-bounded chunks of N frames. Enables arbitrarily long videos without RAM limits. Recommended for very long videos (>10 min): 300-1000 frames/chunk. Works with model caching. 0 = load entire video. Independent of scene detection."
+                    info="⚡ SeedVR2-ONLY optimization: Process video in memory-bounded chunks of N frames via CLI --chunk_size. ONLY works with SeedVR2, not other models. Recommended for VERY long videos (>10 min): 300-1000 frames/chunk. Can work TOGETHER with PySceneDetect: PySceneDetect splits into scenes, native streaming processes each scene in frame chunks. 0 = disabled (use PySceneDetect only)."
                 )
                 resume_chunking = gr.Checkbox(
                     label="Resume from partial chunks",

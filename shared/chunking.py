@@ -515,9 +515,52 @@ def chunk_and_process(
     global_output_dir: Optional[str] = None,
     resume_from_partial: bool = False,
     progress_tracker=None,
+    process_func: Optional[Callable] = None,
+    model_type: str = "seedvr2",
 ) -> Tuple[int, str, str, int]:
     """
-    Returns (returncode, log, final_output_path, chunk_count)
+    🎬 UNIVERSAL PySceneDetect Chunking System - Works with ALL Models
+    
+    This is the PREFERRED chunking method that works universally across:
+    - SeedVR2 (diffusion-based video upscaling)
+    - GAN models (Real-ESRGAN, etc.)
+    - RIFE (frame interpolation)
+    - FlashVSR+ (real-time diffusion)
+    
+    How it works:
+    1. Splits video into scenes using PySceneDetect (intelligent scene detection)
+    2. OR splits into fixed-duration chunks if scene detection disabled
+    3. Processes each chunk independently with the selected model
+    4. Concatenates results with optional frame blending for smooth transitions
+    
+    Configuration (from Resolution & Scene Split tab):
+    - chunk_seconds: Duration of each chunk (0 = use scene detection)
+    - scene_threshold: Sensitivity for scene detection
+    - chunk_overlap: Overlap between chunks for temporal consistency
+    
+    Note: For SeedVR2, this can work ALONGSIDE native streaming (--chunk_size in frames).
+    PySceneDetect creates scene chunks, then each chunk can use native streaming internally.
+    
+    Args:
+        runner: Runner instance with model-specific run methods
+        settings: Processing settings dict (must include input_path, output_format, etc.)
+        scene_threshold: PySceneDetect sensitivity (lower = more cuts, 27 = default)
+        min_scene_len: Minimum scene duration in seconds
+        temp_dir: Temporary directory for chunk storage
+        on_progress: Progress callback for UI updates
+        chunk_seconds: Fixed chunk size in seconds (0 = use intelligent scene detection)
+        chunk_overlap: Overlap between chunks in seconds (for smooth transitions)
+        per_chunk_cleanup: Delete temp files after each chunk (saves disk space)
+        allow_partial: Save partial results on cancel/error
+        global_output_dir: Output directory override
+        resume_from_partial: Resume from previous interrupted run
+        progress_tracker: Additional progress tracking callback
+        process_func: Optional custom processing function (takes settings, returns RunResult)
+                     If None, uses model_type to select runner method
+        model_type: Model type ("seedvr2", "gan", "rife", "flashvsr") - used if process_func is None
+    
+    Returns:
+        (returncode, log, final_output_path, chunk_count)
     """
     input_path = normalize_path(settings["input_path"])
     input_type = detect_input_type(input_path)
@@ -702,7 +745,19 @@ def chunk_and_process(
             chunk_settings["output_override"] = str(work / f"{chunk.stem}_out")
         else:
             chunk_settings["output_override"] = str(work / f"{chunk.stem}_out.mp4")
-        res = runner.run_seedvr2(chunk_settings, on_progress=None, preview_only=False)
+        
+        # Use provided processing function or select based on model type
+        if process_func:
+            res = process_func(chunk_settings, on_progress=None)
+        elif model_type == "seedvr2":
+            res = runner.run_seedvr2(chunk_settings, on_progress=None, preview_only=False)
+        elif model_type == "gan":
+            res = runner.run_gan(chunk_settings, on_progress=None)
+        elif model_type == "rife":
+            res = runner.run_rife(chunk_settings, on_progress=None)
+        else:
+            # Fallback to seedvr2 for backward compatibility
+            res = runner.run_seedvr2(chunk_settings, on_progress=None, preview_only=False)
 
         # Update progress only after chunk completion
         if progress_tracker:

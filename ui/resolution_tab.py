@@ -48,7 +48,12 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
 
     # Header
     gr.Markdown("### 📐 Resolution & Scene Split Settings")
-    gr.Markdown("*Configure resolution, aspect ratio handling, and scene-based chunking for all upscaler models*")
+    gr.Markdown("""
+    *Configure resolution, aspect ratio handling, and **universal PySceneDetect chunking** for all upscaler models*
+    
+    **🎬 PySceneDetect Chunking**: Intelligent scene-based video splitting that works with **ALL models** (SeedVR2, GAN, RIFE, FlashVSR+).
+    This is the **PREFERRED chunking method** for long videos, managing VRAM, and optimizing quality per scene.
+    """)
 
     # Model selector
     model_selector = gr.Dropdown(

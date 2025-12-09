@@ -307,20 +307,22 @@ def build_resolution_callbacks(
         
         return gr.Markdown.update(value=status_msg), state
 
-    def estimate_from_input(size, ov):
-        path = seed_controls_cache.get("last_input_path")
+    def estimate_from_input(size, ov, state):
+        """Estimate chunks from cached input path in shared state"""
+        seed_controls = state.get("seed_controls", {})
+        path = seed_controls.get("last_input_path")
         if not path:
-            return gr.Markdown.update(value="Provide input path (upload or textbox) to estimate chunks.")
+            return gr.Markdown.update(value="Provide input path (upload or textbox) to estimate chunks."), state
         path = normalize_path(path)
         dur = get_media_duration_seconds(path) if path else None
         if not dur:
-            return chunk_estimate(size, ov)
+            return chunk_estimate(size, ov), state
         if size <= 0 or ov >= size:
-            return chunk_estimate(size, ov)
+            return chunk_estimate(size, ov), state
         import math
 
         est = math.ceil(dur / max(0.001, size - ov))
-        return gr.Markdown.update(value=f"Duration ~{dur:.1f}s → est. {est} chunks (size {size}s, overlap {ov}s).")
+        return gr.Markdown.update(value=f"Duration ~{dur:.1f}s → est. {est} chunks (size {size}s, overlap {ov}s)."), state
 
     def cache_resolution(t_res, m_res, model, state):
         model_cache = _ensure_model_cache(model, state)

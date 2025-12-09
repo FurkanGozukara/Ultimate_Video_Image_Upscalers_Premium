@@ -14,6 +14,7 @@ from shared.path_utils import (
     collision_safe_path,
     ffmpeg_set_fps,
     get_media_dimensions,
+    detect_input_type,
 )
 from shared.face_restore import restore_image, restore_video
 from shared.logging_utils import RunLogger
@@ -239,6 +240,7 @@ def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
 
 def build_gan_callbacks(
     preset_manager: PresetManager,
+    runner,  # Runner instance for universal chunking support
     run_logger: RunLogger,
     global_settings: Dict[str, Any],
     shared_state: gr.State,
@@ -505,10 +507,12 @@ def build_gan_callbacks(
                     state
                 )
 
-            face_apply = bool(args[-1])
-            face_apply = face_apply or global_settings.get("face_global", False)
+            # Face restoration is controlled ONLY by global setting (no per-run toggle in GAN tab)
+            # GAN tab doesn't have a face_restore checkbox, so we only use global setting
+            face_apply = global_settings.get("face_global", False)
             face_strength = float(global_settings.get("face_strength", 0.5))
             backend_val = settings.get("backend", "realesrgan")
+            
             # Pull shared output/comparison preferences
             if (not settings.get("output_format")) or settings.get("output_format") == "auto":
                 cached_fmt = seed_controls.get("output_format_val")
@@ -521,7 +525,107 @@ def build_gan_callbacks(
             cmp_mode = seed_controls.get("comparison_mode_val", "native")
             pin_pref = bool(seed_controls.get("pin_reference_val", False))
             fs_pref = bool(seed_controls.get("fullscreen_val", False))
-
+            
+            # Pull PySceneDetect chunking settings from Resolution tab (universal chunking)
+            chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
+            chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0) or 0)
+            per_chunk_cleanup = seed_controls.get("per_chunk_cleanup", False)
+            scene_threshold = 27.0  # Default for scene detection
+            min_scene_len = 2.0
+            
+            # Determine if PySceneDetect chunking should be used for video inputs
+            from shared.path_utils import detect_input_type as detect_type
+            input_type = detect_type(inp)
+            should_use_chunking = (
+                chunk_size_sec > 0 and 
+                input_type == "video" and 
+                not settings.get("batch_enable", False)
+            )
+            
+            # If chunking is enabled for video, use universal chunk_and_process
+            if should_use_chunking:
+                from shared.chunking import chunk_and_process
+                from shared.runner import RunResult
+                
+                if progress:
+                    progress(0, desc="Starting PySceneDetect chunking for GAN processing...")
+                
+                # Prepare settings for chunking
+                settings["chunk_size_sec"] = chunk_size_sec
+                settings["chunk_overlap_sec"] = chunk_overlap_sec
+                settings["per_chunk_cleanup"] = per_chunk_cleanup
+                
+                def chunk_progress_cb(progress_val, desc=""):
+                    if progress:
+                        progress(progress_val, desc=desc)
+                    yield (
+                        f"⚙️ Chunking: {desc}",
+                        f"Processing chunks... {desc}",
+                        gr.Markdown.update(value="", visible=False),
+                        None,
+                        None,
+                        desc,
+                        gr.ImageSlider.update(value=None),
+                        gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),
+                        state
+                    )
+                
+                # Run chunked processing using universal chunk_and_process
+                # This will route to runner.run_gan for each chunk based on model_type="gan"
+                rc, clog, final_output, chunk_count = chunk_and_process(
+                    runner=runner,  # Pass runner instance for model routing
+                    settings=settings,
+                    scene_threshold=scene_threshold,
+                    min_scene_len=min_scene_len,
+                    temp_dir=current_temp_dir,
+                    on_progress=lambda msg: progress(0, desc=msg) if progress else None,
+                    chunk_seconds=chunk_size_sec,
+                    chunk_overlap=chunk_overlap_sec,
+                    per_chunk_cleanup=per_chunk_cleanup,
+                    allow_partial=True,
+                    global_output_dir=str(current_output_dir),
+                    resume_from_partial=False,
+                    progress_tracker=chunk_progress_cb,
+                    process_func=None,  # Use model_type routing to runner.run_gan
+                    model_type="gan",  # Route to runner.run_gan for each chunk
+                )
+                
+                if progress:
+                    progress(1.0, desc="Chunking complete!")
+                
+                status = "✅ GAN chunked upscale complete" if rc == 0 else f"⚠️ GAN chunking failed (code {rc})"
+                
+                # Build comparison for chunked output
+                video_comp_html_update = gr.HTML.update(value="", visible=False)
+                slider_update = gr.ImageSlider.update(value=None)
+                
+                if final_output and Path(final_output).exists():
+                    if Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'):
+                        video_comp_html_value = create_video_comparison_html(
+                            original_video=settings["input_path"],
+                            upscaled_video=final_output,
+                            height=600,
+                            slider_position=50.0
+                        )
+                        video_comp_html_update = gr.HTML.update(value=video_comp_html_value, visible=True)
+                    elif not Path(final_output).is_dir():
+                        slider_update = gr.ImageSlider.update(value=(settings["input_path"], final_output), visible=True)
+                
+                yield (
+                    status,
+                    clog,
+                    gr.Markdown.update(value="", visible=False),
+                    final_output if final_output and Path(final_output).suffix.lower() in ('.png', '.jpg', '.jpeg') else None,
+                    final_output if final_output and Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv') else None,
+                    f"Processed {chunk_count} chunks via PySceneDetect",
+                    slider_update,
+                    video_comp_html_update,
+                    gr.Gallery.update(visible=False),
+                    state
+                )
+                return
+            
             def relocate_output(path_str: Optional[str]) -> Optional[str]:
                 if not path_str:
                     return None
@@ -614,19 +718,19 @@ def build_gan_callbacks(
                     outp = relocated or result.output_path
                     if outp and Path(outp).exists():
                         if Path(outp).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
-                            use_fallback = cmp_mode == "fallback"
-                            cmp_html = build_video_comparison(
-                                src,
-                                outp,
-                                pin_reference=pin_pref,
-                                start_fullscreen=fs_pref,
-                                use_fallback_assets=use_fallback or cmp_mode == "html_slider",
+                            # Use imported video comparison function
+                            cmp_html = create_video_comparison_html(
+                                original_video=src,
+                                upscaled_video=outp,
+                                height=600,
+                                slider_position=50.0
                             )
                         elif Path(outp).is_dir():
                             cmp_html = f"<p>PNG frames saved to {outp}</p>"
                         else:
+                            # For images, use ImageSlider directly
                             slider_update = gr.ImageSlider.update(value=(src, outp), visible=True)
-                            cmp_html = build_image_comparison(src, outp, pin_reference=pin_pref)
+                            cmp_html = ""  # No HTML comparison for images, use slider instead
                 return status, full_log, relocated if relocated else (result.output_path if result.output_path else None), cmp_html, slider_update
 
             # Kick off worker thread

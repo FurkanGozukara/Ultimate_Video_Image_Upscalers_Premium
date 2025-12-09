@@ -47,7 +47,10 @@ runner = Runner(
     output_dir=output_dir,
     telemetry_enabled=global_settings.get("telemetry", True),
 )
-runner.set_mode(global_settings.get("mode", "subprocess"))
+# Force subprocess mode (in-app not yet implemented)
+runner.set_mode("subprocess")
+# Update global settings to ensure it's saved
+global_settings["mode"] = "subprocess"
 run_logger = RunLogger(enabled=global_settings.get("telemetry", True))
 
 
@@ -156,22 +159,25 @@ def main():
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
             gr.Markdown("""
-            **Subprocess Mode** (Recommended): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but slower model loading.
+            **Subprocess Mode** (Default & Recommended): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but slower model loading.
             
-            **In-App Mode** (Advanced): Processes run in-app with model caching. Faster but may have memory leaks. **⚠️ Once selected, cannot switch back until app restart.**
+            **In-App Mode** (🚧 Not Yet Available): Would run processes in-app with model caching for faster processing. Currently disabled due to dependency isolation issues. Future feature.
+            
+            For now, all processing uses subprocess mode for maximum stability and VRAM cleanup.
             """)
             mode_radio = gr.Radio(
-                choices=["subprocess", "in_app"],
-                value=runner.get_mode(),
+                choices=["subprocess"],  # Only subprocess for now
+                value="subprocess",
                 label="Processing Mode",
-                info="Subprocess: Clean memory, slower load. In-app: Faster but may leak memory."
+                info="Subprocess mode ensures clean memory and maximum compatibility. In-app mode coming in future update.",
+                interactive=False  # Disable since only one option
             )
             mode_confirm = gr.Checkbox(
-                label="⚠️ I understand switching to in-app locks until restart",
+                label="ℹ️ In-app mode will be added in future release",
                 value=False,
-                visible=runner.get_mode() == "subprocess"
+                visible=False  # Hide since not relevant
             )
-            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary")
+            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", visible=False)  # Hide since no options
 
             # Wire up global settings events
             def save_global_settings(od, td, tel, face, state):

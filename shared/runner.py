@@ -249,7 +249,11 @@ class Runner:
 
         cmd = self._build_seedvr2_cmd(cli_path, settings, format_for_cli, preview_only, output_override=effective_output_override)
 
-        return self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
+        # Route based on execution mode
+        if self._active_mode == "in_app":
+            return self._run_seedvr2_in_app(cli_path, cmd, predicted_output, settings, on_progress)
+        else:
+            return self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
 
     def _run_seedvr2_subprocess(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
         """
@@ -440,14 +444,18 @@ class Runner:
         """
         Execute SeedVR2 CLI inline (single process). Not cancelable mid-run.
 
-        For now, this falls back to subprocess execution due to dependency issues.
+        TODO: Implement true in-app mode with direct model loading and caching.
+        For now, this falls back to subprocess execution due to dependency isolation issues.
+        In-app mode would require:
+        - Direct import of SeedVR2 inference modules (not CLI)
+        - Model caching between runs
+        - Proper VRAM management without subprocess cleanup
         """
         if on_progress:
-            on_progress("In-app mode not available, falling back to subprocess execution\n")
+            on_progress("⚠️ In-app mode not yet implemented, using subprocess mode\n")
 
         # Fall back to subprocess execution
         return self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
-        return RunResult(rc, output_path, buf.getvalue())
 
     def ensure_seedvr2_model_loaded(self, settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> bool:
         """
