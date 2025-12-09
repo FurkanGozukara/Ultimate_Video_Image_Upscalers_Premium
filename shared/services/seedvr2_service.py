@@ -400,7 +400,9 @@ def _process_single_file(
                 settings["load_cap"] = 1
                 settings["output_format"] = "png"
 
-    try:
+        # Model loading check
+        model_manager = get_model_manager()
+        dit_model = settings.get("dit_model", "")
         # Model loading check
         model_manager = get_model_manager()
         dit_model = settings.get("dit_model", "")
@@ -1090,11 +1092,11 @@ def build_seedvr2_callbacks(
                             out_fmt = "mp4" if input_file.suffix.lower() in [".mp4", ".avi", ".mov", ".mkv"] else "png"
                         
                         # Create unique output path with collision safety
-                        from shared.path_utils import collision_safe_path
+                        from shared.path_utils import collision_safe_path, collision_safe_dir
                         if out_fmt == "png":
                             # For PNG output, create a directory
                             output_name = f"{input_file.stem}_upscaled"
-                            unique_output = collision_safe_path(batch_output_folder / output_name, is_dir=True)
+                            unique_output = collision_safe_dir(batch_output_folder / output_name)
                             single_settings["output_override"] = str(unique_output)
                         else:
                             # For video output, create a file

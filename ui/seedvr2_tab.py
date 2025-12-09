@@ -894,17 +894,17 @@ def seedvr2_tab(
     # Wire up cache validation
     cache_dit.change(
         fn=validate_cache_gpu,
-        inputs=[cache_dit, cache_vae, gpu_device],
+        inputs=[cache_dit, cache_vae, cuda_device],
         outputs=cache_warning
     )
     cache_vae.change(
         fn=validate_cache_gpu,
-        inputs=[cache_dit, cache_vae, gpu_device],
+        inputs=[cache_dit, cache_vae, cuda_device],
         outputs=cache_warning
     )
-    gpu_device.change(
+    cuda_device.change(
         fn=validate_cache_gpu,
-        inputs=[cache_dit, cache_vae, gpu_device],
+        inputs=[cache_dit, cache_vae, cuda_device],
         outputs=cache_warning
     )
     

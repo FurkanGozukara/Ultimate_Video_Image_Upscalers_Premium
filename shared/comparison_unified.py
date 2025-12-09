@@ -12,7 +12,7 @@ best comparison method based on input type and user preferences.
 
 import gradio as gr
 from pathlib import Path
-from typing import Optional, Tuple, Literal, Dict, Any
+from typing import Optional, Tuple, Literal, Dict, Any, List
 
 # Import from existing modules
 from .video_comparison_slider import create_video_comparison_html as _slider_html
