@@ -619,25 +619,94 @@ def seedvr2_tab(
 
     # Wire up all the event handlers
 
-    # Input handling
+    # Input handling with auto-resolution calculation
     def cache_path_value(val, state):
+        """Cache input path and optionally auto-calculate resolution"""
         state["seed_controls"]["last_input_path"] = val if val else ""
-        return gr.Markdown.update(value="✅ Input cached for resolution/chunk estimates.", visible=True), state
+        
+        # Check if auto-resolution is enabled in seed_controls
+        auto_res_enabled = state.get("seed_controls", {}).get("auto_resolution", False)
+        
+        if auto_res_enabled and val and val.strip():
+            # Auto-calculate resolution if enabled
+            try:
+                # Use the service's auto-resolution function
+                res_slider, max_res_slider, calc_msg, updated_state = service["auto_res_on_input"](val, state)
+                return (
+                    gr.Markdown.update(value="✅ Input cached. Auto-resolution calculated.", visible=True),
+                    updated_state,
+                    res_slider,
+                    max_res_slider,
+                    calc_msg
+                )
+            except Exception as e:
+                # Fallback if auto-calc fails
+                return (
+                    gr.Markdown.update(value=f"✅ Input cached. Auto-calc warning: {str(e)[:50]}", visible=True),
+                    state,
+                    gr.Slider.update(),
+                    gr.Slider.update(),
+                    gr.Markdown.update(visible=False)
+                )
+        else:
+            # Just cache without auto-calc
+            return (
+                gr.Markdown.update(value="✅ Input cached for resolution/chunk estimates.", visible=True),
+                state,
+                gr.Slider.update(),
+                gr.Slider.update(),
+                gr.Markdown.update(visible=False)
+            )
 
     def cache_upload(val, state):
+        """Cache uploaded file and optionally auto-calculate resolution"""
         state["seed_controls"]["last_input_path"] = val if val else ""
-        return val or "", gr.Markdown.update(value="✅ Input cached for resolution/chunk estimates.", visible=True), state
+        
+        # Check if auto-resolution is enabled
+        auto_res_enabled = state.get("seed_controls", {}).get("auto_resolution", False)
+        
+        if auto_res_enabled and val:
+            try:
+                # Auto-calculate resolution if enabled
+                res_slider, max_res_slider, calc_msg, updated_state = service["auto_res_on_input"](val, state)
+                return (
+                    val or "",
+                    gr.Markdown.update(value="✅ File uploaded. Auto-resolution calculated.", visible=True),
+                    updated_state,
+                    res_slider,
+                    max_res_slider,
+                    calc_msg
+                )
+            except Exception:
+                return (
+                    val or "",
+                    gr.Markdown.update(value="✅ File uploaded and cached.", visible=True),
+                    state,
+                    gr.Slider.update(),
+                    gr.Slider.update(),
+                    gr.Markdown.update(visible=False)
+                )
+        else:
+            return (
+                val or "",
+                gr.Markdown.update(value="✅ File uploaded and cached.", visible=True),
+                state,
+                gr.Slider.update(),
+                gr.Slider.update(),
+                gr.Markdown.update(visible=False)
+            )
 
+    # Wire up input events with resolution auto-calculation
     input_file.upload(
         fn=lambda val, state: cache_upload(val, state),
         inputs=[input_file, shared_state],
-        outputs=[input_path, input_cache_msg, shared_state]
+        outputs=[input_path, input_cache_msg, shared_state, resolution, max_resolution, auto_res_msg]
     )
 
     input_path.change(
         fn=lambda val, state: cache_path_value(val, state),
         inputs=[input_path, shared_state],
-        outputs=[input_cache_msg, shared_state]
+        outputs=[input_cache_msg, shared_state, resolution, max_resolution, auto_res_msg]
     )
 
     # Model caching and status updates
