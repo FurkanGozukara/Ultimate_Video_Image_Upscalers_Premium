@@ -74,14 +74,46 @@ def _check_vs_build_tools() -> Dict[str, Optional[str]]:
 
     found = next((p for p in candidates if p.exists()), None)
     if found:
-        # Test if the vcvarsall.bat file is actually executable
+        # Test if the vcvarsall.bat file is actually executable and working
         try:
-            # Quick test by checking if we can read the file
-            with open(found, 'r') as f:
-                if 'vcvarsall.bat' in f.read(200):
-                    return {"status": "ok", "detail": f"Found vcvarsall at {found}"}
-        except Exception:
-            pass
+            import subprocess
+            
+            # Actually test execution with a timeout
+            result = subprocess.run(
+                ["cmd", "/c", f'call "{found}" x64 >nul 2>&1 && echo VCVARS_SUCCESS'],
+                capture_output=True,
+                text=True,
+                timeout=15  # vcvarsall can take 5-10 seconds
+            )
+            
+            if "VCVARS_SUCCESS" in result.stdout:
+                return {
+                    "status": "ok",
+                    "detail": f"✅ VS Build Tools verified and working\nPath: {found}\nTorch.compile support: ENABLED"
+                }
+            else:
+                # File exists but execution failed
+                return {
+                    "status": "warning",
+                    "detail": f"⚠️ vcvarsall.bat found at {found} but execution failed.\nTorch.compile may not work. Try reinstalling VS Build Tools."
+                }
+                
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "warning",
+                "detail": f"⚠️ vcvarsall.bat found at {found} but validation timed out.\nFile may work, but verification failed."
+            }
+        except Exception as e:
+            # Fallback to simple file check if execution test fails
+            try:
+                with open(found, 'r', encoding='utf-8', errors='ignore') as f:
+                    if 'vcvarsall' in f.read(200).lower():
+                        return {
+                            "status": "ok",
+                            "detail": f"Found vcvarsall at {found}\n(Execution test failed: {str(e)}, but file appears valid)"
+                        }
+            except Exception:
+                pass
 
     return {"status": "warning", "detail": "VS Build Tools not detected; torch.compile will be automatically disabled. Install 'Desktop development with C++' workload in Visual Studio 2022 Build Tools for optimal performance."}
 

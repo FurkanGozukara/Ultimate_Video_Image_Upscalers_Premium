@@ -333,6 +333,39 @@ class ModelManager:
 
         return None
 
+    def unload_model(self, model_type: ModelType, model_name: str, **kwargs) -> bool:
+        """
+        Manually unload a specific model.
+        
+        Args:
+            model_type: Type of model to unload
+            model_name: Name of the model
+            **kwargs: Additional parameters for model identification
+            
+        Returns:
+            True if unloaded successfully, False if model wasn't loaded
+        """
+        model_id = self._generate_model_id(model_type, model_name, **kwargs)
+        
+        with self._lock:
+            model_info = self.loaded_models.get(model_id)
+            if not model_info or model_info.state != ModelState.LOADED:
+                return False
+            
+            self._unload_model(model_info)
+            
+            # Remove from loaded models if fully unloaded
+            if model_id in self.loaded_models:
+                del self.loaded_models[model_id]
+            
+            # Clear current model ID if this was the current model
+            if self.current_model_id == model_id:
+                self.current_model_id = None
+        
+        self._clear_vram()
+        self._logger.info(f"Manually unloaded model: {model_id}")
+        return True
+
     def unload_all_models(self):
         """Unload all loaded models"""
         with self._lock:

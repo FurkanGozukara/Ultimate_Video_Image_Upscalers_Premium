@@ -135,29 +135,41 @@ def seedvr2_tab(
 
             # Scene splitting controls
             with gr.Accordion("🎬 Chunking & Scene Split", open=False):
+                gr.Markdown("""
+                ### 📌 Two Chunking Methods Available:
+                
+                **1. PySceneDetect (Scene-Based):** Intelligently splits video at scene changes
+                **2. SeedVR2 Native Streaming:** Memory-efficient frame-based processing for long videos
+                
+                *These can be used independently or together for maximum control.*
+                """)
+                
+                gr.Markdown("#### 🎞️ Method 1: PySceneDetect Scene-Based Chunking")
                 chunk_enable = gr.Checkbox(
-                    label="Enable PySceneDetect scene-based chunking",
+                    label="Enable PySceneDetect Scene-Based Chunking",
                     value=values[8],
-                    info="Split video into scenes and process separately using PySceneDetect. Automatically detects scene changes."
+                    info="Split video at scene changes using content analysis. Best for videos with distinct scenes (movies, TV shows). Processes each scene separately for optimal temporal consistency."
                 )
                 scene_threshold = gr.Slider(
-                    label="Content Threshold",
+                    label="Scene Detection Sensitivity",
                     minimum=5, maximum=50, step=1,
                     value=values[9],
-                    info="Sensitivity for scene detection. Lower = more cuts (more sensitive). Higher = fewer cuts. Default 27 works well for most content."
+                    info="Content threshold for scene detection. Lower = more cuts (more sensitive). Higher = fewer cuts. Default 27 works well for most content."
                 )
                 scene_min_len = gr.Slider(
-                    label="Min Scene Length (sec)",
+                    label="Min Scene Length (seconds)",
                     minimum=1, maximum=20, step=1,
                     value=values[10],
                     info="Minimum duration for a scene. Prevents too many short chunks. 2-5 seconds recommended for smooth processing."
                 )
-                gr.Markdown("---\n**SeedVR2 Native Streaming Mode**")
+                
+                gr.Markdown("---")
+                gr.Markdown("#### 🚀 Method 2: SeedVR2 Native Streaming (Memory-Efficient)")
                 chunk_size_frames = gr.Number(
-                    label="Chunk Size (frames, 0=disabled)",
+                    label="Streaming Chunk Size (frames, 0=disabled)",
                     value=values[11] if len(values) > 11 and isinstance(values[11], (int, float)) else 0,
                     precision=0,
-                    info="🚀 SeedVR2's native streaming: process video in memory-efficient chunks of N frames. When > 0, enables frame-based chunking (independent of scene detection). Recommended for long videos: 300-1000 frames per chunk. 0 = load entire video at once."
+                    info="⚡ NEW in SeedVR2 v2.5.18: Process video in memory-bounded chunks of N frames. Enables arbitrarily long videos without RAM limits. Recommended for very long videos (>10 min): 300-1000 frames/chunk. Works with model caching. 0 = load entire video. Independent of scene detection."
                 )
                 resume_chunking = gr.Checkbox(
                     label="Resume from partial chunks",
@@ -196,6 +208,12 @@ def seedvr2_tab(
 
             # Model loading status with periodic updates
             model_status = gr.Markdown("### 🔧 Model Status\nNo models loaded", elem_classes="model-status")
+            
+            # Model management buttons
+            with gr.Row():
+                unload_model_btn = gr.Button("🗑️ Unload Current Model", variant="secondary", size="sm")
+                unload_all_models_btn = gr.Button("🗑️ Unload All Models", variant="stop", size="sm")
+            model_unload_status = gr.Markdown("", visible=False)
             
             # Timer for periodic model status updates
             model_status_timer = gr.Timer(value=2.0, active=False)  # Update every 2 seconds when active
@@ -362,6 +380,11 @@ def seedvr2_tab(
                 precision=0,
                 info="Overlap during decoding. Higher overlap = smoother seams but slower. Must be < tile size."
             )
+            
+            # Tile validation warnings
+            tile_encode_warning = gr.Markdown("", visible=False)
+            tile_decode_warning = gr.Markdown("", visible=False)
+            
             tile_debug = gr.Dropdown(
                 label="Tile Debug",
                 choices=["false", "encode", "decode"],
@@ -431,6 +454,10 @@ def seedvr2_tab(
                 value=values[47],
                 info="Keep VAE model in CUDA graphs cache. Single GPU only. Faster encoding/decoding at cost of higher baseline VRAM usage."
             )
+            
+            # Cache warning for multi-GPU
+            cache_warning = gr.Markdown("", visible=False)
+            
             debug = gr.Checkbox(
                 label="Debug Logging",
                 value=values[48],
@@ -663,6 +690,39 @@ def seedvr2_tab(
         fn=update_model_status,
         outputs=model_status
     )
+    
+    # Model unloading callbacks
+    def unload_current_model():
+        """Unload the current SeedVR2 model"""
+        from shared.model_manager import get_model_manager
+        
+        try:
+            model_manager = get_model_manager()
+            model_manager.unload_all_models()  # Unload all for simplicity
+            return gr.Markdown.update(value="✅ Model unloaded successfully. VRAM cleared.", visible=True), service["get_model_loading_status"]()
+        except Exception as e:
+            return gr.Markdown.update(value=f"❌ Error unloading model: {str(e)}", visible=True), service["get_model_loading_status"]()
+    
+    def unload_all_models():
+        """Unload all models from all pipelines"""
+        from shared.model_manager import get_model_manager
+        
+        try:
+            model_manager = get_model_manager()
+            model_manager.unload_all_models()
+            return gr.Markdown.update(value="✅ All models unloaded. VRAM fully cleared.", visible=True), service["get_model_loading_status"]()
+        except Exception as e:
+            return gr.Markdown.update(value=f"❌ Error unloading models: {str(e)}", visible=True), service["get_model_loading_status"]()
+    
+    unload_model_btn.click(
+        fn=unload_current_model,
+        outputs=[model_unload_status, model_status]
+    )
+    
+    unload_all_models_btn.click(
+        fn=unload_all_models,
+        outputs=[model_unload_status, model_status]
+    )
 
     # Resume status checking
     check_resume_btn.click(
@@ -789,6 +849,65 @@ def seedvr2_tab(
         outputs=fps_warn
     )
 
+    # Tile validation helpers
+    def validate_tile_encode(tile_size, overlap):
+        if tile_size > 0 and overlap >= tile_size:
+            return gr.Markdown.update(value=f"⚠️ Encode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
+        return gr.Markdown.update(value="", visible=False)
+    
+    def validate_tile_decode(tile_size, overlap):
+        if tile_size > 0 and overlap >= tile_size:
+            return gr.Markdown.update(value=f"⚠️ Decode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
+        return gr.Markdown.update(value="", visible=False)
+    
+    # Wire up tile validation
+    vae_encode_tile_overlap.change(
+        fn=validate_tile_encode,
+        inputs=[vae_encode_tile_size, vae_encode_tile_overlap],
+        outputs=tile_encode_warning
+    )
+    vae_encode_tile_size.change(
+        fn=validate_tile_encode,
+        inputs=[vae_encode_tile_size, vae_encode_tile_overlap],
+        outputs=tile_encode_warning
+    )
+    vae_decode_tile_overlap.change(
+        fn=validate_tile_decode,
+        inputs=[vae_decode_tile_size, vae_decode_tile_overlap],
+        outputs=tile_decode_warning
+    )
+    vae_decode_tile_size.change(
+        fn=validate_tile_decode,
+        inputs=[vae_decode_tile_size, vae_decode_tile_overlap],
+        outputs=tile_decode_warning
+    )
+    
+    # Cache + GPU validation
+    def validate_cache_gpu(cache_dit_val, cache_vae_val, cuda_device_val):
+        if not cuda_device_val:
+            return gr.Markdown.update(value="", visible=False)
+        devices = [d.strip() for d in str(cuda_device_val).split(",") if d.strip()]
+        if len(devices) > 1 and (cache_dit_val or cache_vae_val):
+            return gr.Markdown.update(value="⚠️ Model caching (cache_dit/cache_vae) only works with single GPU. Multi-GPU detected - caching will be auto-disabled.", visible=True)
+        return gr.Markdown.update(value="", visible=False)
+    
+    # Wire up cache validation
+    cache_dit.change(
+        fn=validate_cache_gpu,
+        inputs=[cache_dit, cache_vae, gpu_device],
+        outputs=cache_warning
+    )
+    cache_vae.change(
+        fn=validate_cache_gpu,
+        inputs=[cache_dit, cache_vae, gpu_device],
+        outputs=cache_warning
+    )
+    gpu_device.change(
+        fn=validate_cache_gpu,
+        inputs=[cache_dit, cache_vae, gpu_device],
+        outputs=cache_warning
+    )
+    
     # Input detection callback
     def detect_input_type(input_path_val):
         """Detect and display input type information"""

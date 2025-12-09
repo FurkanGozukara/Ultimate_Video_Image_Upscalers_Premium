@@ -102,6 +102,25 @@ class PresetManager:
             # Apply tab-specific constraints
             validated = self.validate_preset_constraints(cleaned, tab, model)
             
+            # Tab-specific validation on load
+            if tab == "seedvr2":
+                # Validate batch_size 4n+1 formula
+                batch_size = validated.get("batch_size", 5)
+                if (batch_size - 1) % 4 != 0:
+                    corrected = max(5, (batch_size // 4) * 4 + 1)
+                    validated["batch_size"] = corrected
+                    print(f"⚠️ Preset '{preset_name}' had invalid batch_size {batch_size}, auto-corrected to {corrected}")
+                
+                # Check cache + multi-GPU conflict
+                cache_enabled = validated.get("cache_dit") or validated.get("cache_vae")
+                cuda_device = str(validated.get("cuda_device", ""))
+                if cache_enabled and cuda_device:
+                    devices = [d.strip() for d in cuda_device.split(",") if d.strip()]
+                    if len(devices) > 1:
+                        validated["cache_dit"] = False
+                        validated["cache_vae"] = False
+                        print(f"⚠️ Preset '{preset_name}' had cache enabled with multi-GPU, auto-disabled caching")
+            
             return validated
         except Exception as e:
             print(f"Error loading preset {preset_name} for {tab}/{model}: {e}")

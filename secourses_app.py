@@ -155,6 +155,11 @@ def main():
 
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
+            gr.Markdown("""
+            **Subprocess Mode** (Recommended): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but slower model loading.
+            
+            **In-App Mode** (Advanced): Processes run in-app with model caching. Faster but may have memory leaks. **⚠️ Once selected, cannot switch back until app restart.**
+            """)
             mode_radio = gr.Radio(
                 choices=["subprocess", "in_app"],
                 value=runner.get_mode(),
