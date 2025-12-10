@@ -295,9 +295,10 @@ def seedvr2_tab(
             # Device configuration
             gr.Markdown("#### 💻 Device & Offload")
             cuda_device = gr.Textbox(
-                label="CUDA Devices (e.g., 0 or 0,1,2)",
+                label="CUDA Devices (e.g., 0 or 0,1,2 or 'all')",
                 value=values[21] if not is_macos else "",  # Was 24, now 21 (shift -3)
-                info=f"{gpu_hint} | Multi-GPU: Use comma-separated IDs (0,1,2) to distribute work across GPUs automatically. Single GPU recommended for caching.",
+                info=f"{gpu_hint} | Single GPU: 0, 1, etc. | Multi-GPU: 0,1,2 or 'all' to use all available GPUs. Single GPU recommended for caching.",
+                placeholder="0 or all",
                 visible=not is_macos
             )
             dit_offload_device = gr.Textbox(

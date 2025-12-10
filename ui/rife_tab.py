@@ -219,8 +219,8 @@ def rife_tab(
                 rife_gpu = gr.Textbox(
                     label="GPU Device",
                     value=values[24],
-                    placeholder="0 or 0,1",
-                    info="GPU to use for RIFE interpolation. Single GPU recommended. Multi-GPU support limited. Leave empty for default GPU (0)."
+                    placeholder="0 or all",
+                    info="GPU to use for RIFE interpolation. Single GPU recommended. Use 'all' for all available GPUs (support limited). Leave empty for default GPU (0)."
                 )
 
         # Video Editing

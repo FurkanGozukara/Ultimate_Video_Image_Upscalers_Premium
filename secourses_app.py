@@ -177,38 +177,36 @@ def main():
             gr.Markdown("""
             **Subprocess Mode** (Default & Recommended & ONLY WORKING MODE): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but model reloads each time.
             
-            **⚠️ In-App Mode** (CURRENTLY NOT IMPLEMENTED - STUB ONLY): 
-            - **Status**: This mode is a placeholder that currently **falls back to subprocess execution**.
+            **⚠️ In-App Mode** (CURRENTLY NOT IMPLEMENTED): 
+            - **Status**: This mode is **NOT YET IMPLEMENTED** and is disabled for safety.
             - **Planned Features** (not yet implemented):
               - Direct model loading and caching (models stay in VRAM between runs)
               - Faster repeated processing (no model reload overhead)
               - Higher VRAM/RAM usage (models persist until app restart)
               - Requires app restart to return to subprocess mode
-            - **Current Behavior**: Selecting "in-app" still uses subprocess mode with full VRAM cleanup.
-            - **Implementation Status**: Awaiting direct SeedVR2/GAN/RIFE module integration (bypass CLI wrappers).
+            - **Current Status**: DISABLED until full implementation complete
+            - **Implementation Blockers**:
+              1. Requires direct imports of model inference code (not just CLI wrappers)
+              2. Needs ModelManager integration for persistent VRAM caching across runs
+              3. Must handle proper cleanup without subprocess termination guarantees
+              4. Requires UI controls for manual model unloading when VRAM fills up
             
-            💡 **Current Recommendation**: Use subprocess mode (only functional option). Ignore "in-app" toggle until implemented.
-            
-            **Why In-App Mode Isn't Implemented Yet:**
-            1. Requires direct imports of model inference code (not just CLI wrappers)
-            2. Needs ModelManager integration for persistent VRAM caching across runs
-            3. Must handle proper cleanup without subprocess termination guarantees
-            4. Requires UI controls for manual model unloading when VRAM fills up
+            💡 **Current Mode**: Subprocess only (the toggle below is disabled until in-app mode is ready)
             """)
             mode_radio = gr.Radio(
-                choices=["subprocess", "in_app"],
-                value=global_settings.get("mode", "subprocess"),
+                choices=["subprocess"],  # Only subprocess available
+                value="subprocess",  # Force subprocess
                 label="Processing Mode",
-                info="Choose execution mode. Subprocess = clean memory, In-app = faster repeats but uses more memory.",
-                interactive=True
+                info="Subprocess mode: Each run is isolated with full VRAM cleanup. In-app mode coming soon.",
+                interactive=False  # Disable until in-app implemented
             )
             mode_confirm = gr.Checkbox(
-                label="⚠️ I understand in-app mode requires restart to return to subprocess",
+                label="⚠️ Mode switching disabled (in-app not implemented)",
                 value=False,
-                visible=True,
-                info="Enable this checkbox to confirm mode change to in-app (required for safety)"
+                visible=False,  # Hide since mode can't be changed
+                info="This will be enabled when in-app mode is implemented"
             )
-            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
+            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg", visible=False)  # Hide button
 
             # Wire up global settings events
             def save_global_settings(od, td, tel, face, state):
@@ -262,7 +260,8 @@ def main():
             face_tab(
                 preset_manager=preset_manager,
                 global_settings=global_settings,
-                shared_state=shared_state
+                shared_state=shared_state,
+                base_dir=BASE_DIR
             )
 
         with gr.Tab("⏱️ RIFE / FPS / Edit Videos"):

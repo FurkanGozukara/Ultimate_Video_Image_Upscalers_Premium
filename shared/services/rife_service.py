@@ -506,6 +506,21 @@ def build_rife_callbacks(
             settings["input_path"] = input_path
             settings["output_override"] = settings.get("output_override") or None
 
+            # Expand "all" to device list if specified
+            cuda_device_raw = settings.get("cuda_device", "")
+            if cuda_device_raw:
+                # Define _expand_cuda_spec for RIFE service
+                def _expand_cuda_spec_local(cuda_spec: str) -> str:
+                    try:
+                        import torch
+                        if str(cuda_spec).strip().lower() == "all" and torch.cuda.is_available():
+                            return ",".join(str(i) for i in range(torch.cuda.device_count()))
+                    except Exception:
+                        pass
+                    return cuda_spec
+                
+                settings["cuda_device"] = _expand_cuda_spec_local(cuda_device_raw)
+
             # Validate CUDA devices
             cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
             if cuda_warning:

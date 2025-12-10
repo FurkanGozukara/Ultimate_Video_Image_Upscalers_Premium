@@ -233,8 +233,8 @@ def gan_tab(
                 gpu_device = gr.Textbox(
                     label="GPU Device",
                     value=values[15],
-                    placeholder="0 or 0,1",
-                    info="GPU device ID(s) to use. Single ID (0) for one GPU. Multi-GPU support model-dependent. Check CUDA availability in Health tab."
+                    placeholder="0 or all",
+                    info="GPU device ID(s) to use. Single ID (0) for one GPU, 'all' for all available GPUs (model-dependent). Multi-GPU support limited. Check CUDA availability in Health tab."
                 )
 
         # Output Settings
@@ -319,20 +319,20 @@ def gan_tab(
             variant="primary",
             size="lg"
         )
-        cancel_confirm = gr.Checkbox(
-            label="Confirm cancel",
-            value=False,
-            visible=False
-        )
         cancel_btn = gr.Button(
             "⏹️ Cancel",
-            variant="stop",
-            visible=False
+            variant="stop"
         )
         preview_btn = gr.Button(
             "👁️ Preview First Frame",
             size="lg"
         )
+    
+    cancel_confirm = gr.Checkbox(
+        label="⚠️ Confirm cancel (required for safety)",
+        value=False,
+        info="Enable this checkbox to confirm cancellation of processing"
+    )
 
     # Utility buttons
     with gr.Row():

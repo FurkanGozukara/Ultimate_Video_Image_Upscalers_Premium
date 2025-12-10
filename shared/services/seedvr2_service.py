@@ -743,11 +743,23 @@ def _process_single_file(
     return status, "\n".join(local_logs), output_video, output_image, chunk_info_msg, chunk_summary, chunk_progress_msg
 
 
-# Comparison fallback ----------------------------------------------------------
+# Comparison initialization ---------------------------------------------------
 def comparison_html_slider():
-    """Get comparison slider HTML fallback."""
+    """
+    Initialize comparison note with helpful instructions.
+    
+    The actual video comparison slider is created dynamically during processing
+    using create_video_comparison_html from shared.video_comparison_slider.
+    """
     return gr.HTML.update(
-        value="<p>Comparison fallback: use native slider where available; custom HTML slider assets can be loaded if deployed.</p>"
+        value="""
+        <div style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+            <p style="color: #495057; font-size: 14px; margin: 0;">
+                📊 <strong>Comparison View:</strong> Process a video or image to see before/after comparison.<br>
+                Videos use interactive HTML5 slider with fullscreen support. Images use Gradio's ImageSlider.
+            </p>
+        </div>
+        """
     )
 
 
@@ -1041,6 +1053,11 @@ def build_seedvr2_callbacks(
                 )
                 return
 
+            # Expand "all" to device list if specified
+            cuda_device_raw = settings.get("cuda_device", "")
+            if cuda_device_raw:
+                settings["cuda_device"] = _expand_cuda_spec(cuda_device_raw)
+            
             # Validate CUDA devices
             cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
             if cuda_warning:

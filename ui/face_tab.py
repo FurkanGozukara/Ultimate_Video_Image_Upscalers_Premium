@@ -24,15 +24,37 @@ def _get_gan_model_names(base_dir) -> list:
     return sorted(choices)
 
 
-def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.State):
+def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.State, base_dir=None):
     """
     Self-contained Face Restoration tab.
     Handles face restoration settings shared across models.
+    
+    Args:
+        base_dir: Base directory for the application (required for GAN model discovery)
     """
+    
+    # Derive base_dir from global settings if not provided
+    if base_dir is None:
+        from pathlib import Path
+        output_dir_path = Path(global_settings.get("output_dir", "./outputs"))
+        # Navigate up from outputs to project root
+        if output_dir_path.name == "outputs":
+            base_dir = output_dir_path.parent
+        else:
+            # Fallback: try to find Image_Upscale_Models in parent directories
+            current = output_dir_path
+            for _ in range(3):  # Search up to 3 levels
+                if (current / "Image_Upscale_Models").exists():
+                    base_dir = current
+                    break
+                current = current.parent
+            else:
+                # Last resort: use current working directory
+                base_dir = Path.cwd()
 
     # Get available models
     seedvr2_models = get_seedvr2_model_names()
-    gan_models = _get_gan_model_names(global_settings.get("output_dir", "").replace("outputs", ""))
+    gan_models = _get_gan_model_names(base_dir)
     combined_models = sorted(list({*seedvr2_models, *gan_models}))
 
     # Build service callbacks

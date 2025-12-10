@@ -235,6 +235,12 @@ def flashvsr_tab(
                     variant="stop"
                 )
             
+            cancel_confirm = gr.Checkbox(
+                label="⚠️ Confirm cancel (required for safety)",
+                value=False,
+                info="Enable this checkbox to confirm cancellation of processing"
+            )
+            
             # Utility buttons
             with gr.Row():
                 open_outputs_btn = gr.Button("📂 Open Outputs")
@@ -320,7 +326,8 @@ def flashvsr_tab(
     )
     
     cancel_btn.click(
-        fn=lambda: service["cancel_action"](),
+        fn=lambda ok: service["cancel_action"]() if ok else (gr.Markdown.update(value="⚠️ Enable 'Confirm cancel' to stop."), ""),
+        inputs=[cancel_confirm],
         outputs=[status_box, log_box]
     )
     
