@@ -141,9 +141,8 @@ def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
         "batch_enable": False,
         "batch_input_path": "",
         "batch_output_path": "",
-        "chunk_enable": False,
-        "scene_threshold": 27.0,
-        "scene_min_len": 2.0,
+        # PySceneDetect chunking removed - now configured in Resolution tab
+        # Legacy chunk_enable, scene_threshold, scene_min_len removed from ORDER
         "chunk_size": 0,  # SeedVR2 native chunking (frames per chunk, 0=disabled)
         "resolution": 1080,
         "max_resolution": max_res_cap,  # Apply model-specific cap
@@ -188,18 +187,21 @@ def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
 
 
 SEEDVR2_ORDER: List[str] = [
+    # Input/Output
     "input_path",
     "output_override",
     "output_format",
     "model_dir",
     "dit_model",
+    # Batch processing (internal, not exposed as batch UI in SeedVR2 - use directory input instead)
     "batch_enable",
     "batch_input_path",
     "batch_output_path",
-    "chunk_enable",
-    "scene_threshold",
-    "scene_min_len",
+    # PySceneDetect chunking - REMOVED LEGACY CONTROLS (use Resolution tab instead)
+    # Former: "chunk_enable", "scene_threshold", "scene_min_len" - now managed by Resolution tab
+    # SeedVR2 native streaming (CLI --chunk_size, works WITH PySceneDetect)
     "chunk_size",
+    # Resolution and processing
     "resolution",
     "max_resolution",
     "batch_size",
@@ -209,15 +211,19 @@ SEEDVR2_ORDER: List[str] = [
     "load_cap",
     "prepend_frames",
     "temporal_overlap",
+    # Quality controls
     "color_correction",
     "input_noise_scale",
     "latent_noise_scale",
+    # Device configuration
     "cuda_device",
     "dit_offload_device",
     "vae_offload_device",
     "tensor_offload_device",
+    # BlockSwap memory optimization
     "blocks_to_swap",
     "swap_io_components",
+    # VAE tiling
     "vae_encode_tiled",
     "vae_encode_tile_size",
     "vae_encode_tile_overlap",
@@ -225,6 +231,7 @@ SEEDVR2_ORDER: List[str] = [
     "vae_decode_tile_size",
     "vae_decode_tile_overlap",
     "tile_debug",
+    # Performance and compilation
     "attention_mode",
     "compile_dit",
     "compile_vae",
@@ -234,8 +241,10 @@ SEEDVR2_ORDER: List[str] = [
     "compile_dynamic",
     "compile_dynamo_cache_size_limit",
     "compile_dynamo_recompile_limit",
+    # Model caching (batch processing optimization)
     "cache_dit",
     "cache_vae",
+    # Debug and resume
     "debug",
     "resume_chunking",
 ]
@@ -296,9 +305,8 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], s
             cfg["resolution"] = int(seed_controls["resolution_val"])
         if "max_resolution_val" in seed_controls and seed_controls["max_resolution_val"]:
             cfg["max_resolution"] = int(seed_controls["max_resolution_val"])
-        if "chunk_size_sec" in seed_controls and seed_controls["chunk_size_sec"] > 0:
-            cfg["chunk_enable"] = True
-            cfg["scene_threshold"] = 27.0  # Use scene detection if chunking enabled
+        # PySceneDetect chunking now ONLY controlled by Resolution tab
+        # No more chunk_enable - chunking triggers automatically when chunk_size_sec > 0
         if "chunk_overlap_sec" in seed_controls:
             cfg["chunk_overlap"] = float(seed_controls["chunk_overlap_sec"])
 
@@ -551,12 +559,13 @@ def _process_single_file(
         # Priority: PySceneDetect chunking happens FIRST (external), then native streaming
         # is applied within each chunk if enabled (settings["chunk_size"] > 0 passed to CLI).
         
-        # Check if chunking should be enabled: either legacy checkbox OR Resolution tab settings
-        chunk_enabled_legacy = settings.get("chunk_enable", False)
+        # Check if PySceneDetect chunking should be enabled (ONLY from Resolution tab now)
+        # Legacy chunk_enable removed - chunking is now purely controlled by Resolution tab
+        chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
         chunk_enabled_resolution_tab = chunk_size_sec > 0
         
         should_chunk = (
-            (chunk_enabled_legacy or chunk_enabled_resolution_tab)
+            chunk_enabled_resolution_tab
             and not preview_only
             and detect_input_type(settings["input_path"]) == "video"
         )
@@ -585,16 +594,21 @@ def _process_single_file(
                 if progress_cb:
                     progress_cb(f"Chunk {completed_chunks}/{total_chunks_estimate}: {desc}\n")
 
+            # Get ALL chunking params from Resolution tab (via seed_controls)
+            # PySceneDetect parameters now managed centrally in Resolution tab
+            scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
+            min_scene_len = float(seed_controls.get("min_scene_len", 2.0))
+            
             rc, clog, final_out, chunk_count = chunk_and_process(
                 runner,
                 settings,
-                scene_threshold=settings.get("scene_threshold", 27.0),
-                min_scene_len=settings.get("scene_min_len", 2.0),
+                scene_threshold=scene_threshold,
+                min_scene_len=min_scene_len,
                 temp_dir=Path(global_settings["temp_dir"]),
                 on_progress=lambda msg: progress_cb(msg) if progress_cb else None,
-                chunk_seconds=float(settings.get("chunk_size_sec") or 0),
-                chunk_overlap=float(settings.get("chunk_overlap_sec") or 0),
-                per_chunk_cleanup=bool(settings.get("per_chunk_cleanup")),
+                chunk_seconds=chunk_size_sec,
+                chunk_overlap=float(seed_controls.get("chunk_overlap_sec", 0) or 0),
+                per_chunk_cleanup=bool(seed_controls.get("per_chunk_cleanup", False)),
                 resume_from_partial=bool(settings.get("resume_chunking", False)),
                 allow_partial=True,
                 global_output_dir=str(runner.output_dir) if hasattr(runner, "output_dir") else None,

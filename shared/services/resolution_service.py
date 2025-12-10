@@ -21,6 +21,8 @@ def resolution_defaults(models: List[str]) -> Dict[str, Any]:
         "chunk_overlap": 0.5,
         "ratio_downscale_then_upscale": False,
         "per_chunk_cleanup": False,
+        "scene_threshold": 27.0,  # PySceneDetect sensitivity
+        "min_scene_len": 2.0,  # Minimum scene length in seconds
     }
 
 
@@ -34,6 +36,8 @@ RESOLUTION_ORDER: List[str] = [
     "chunk_overlap",
     "ratio_downscale_then_upscale",
     "per_chunk_cleanup",
+    "scene_threshold",  # PySceneDetect sensitivity (for chunking)
+    "min_scene_len",    # Minimum scene length for PySceneDetect
 ]
 
 
@@ -276,17 +280,17 @@ def build_resolution_callbacks(
             return f"❌ Error estimating chunks: {str(e)}", state
     
     def apply_to_seed(*args):
-        """Apply resolution settings to SeedVR2 pipeline via shared state"""
+        """Apply resolution settings to ALL upscaler pipelines via shared state"""
         state = args[-1]
         values = list(args[:-1])
         
         # Extract resolution settings from inputs
         settings_dict = _res_dict_from_args(values)
         
-        # Update shared state with resolution settings for SeedVR2
+        # Update shared state with resolution settings for all pipelines
         seed_controls = state.get("seed_controls", {})
         
-        # Cache resolution values for SeedVR2 to use
+        # Cache resolution values for all upscalers to use
         seed_controls["resolution_val"] = settings_dict.get("target_resolution", 1080)
         seed_controls["max_resolution_val"] = settings_dict.get("max_target_resolution", 0)
         seed_controls["enable_max_target"] = settings_dict.get("enable_max_target", True)
@@ -295,15 +299,18 @@ def build_resolution_callbacks(
         seed_controls["chunk_overlap_sec"] = settings_dict.get("chunk_overlap", 0)
         seed_controls["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", False)
         seed_controls["per_chunk_cleanup"] = settings_dict.get("per_chunk_cleanup", False)
+        seed_controls["scene_threshold"] = settings_dict.get("scene_threshold", 27.0)
+        seed_controls["min_scene_len"] = settings_dict.get("min_scene_len", 2.0)
         
         state["seed_controls"] = seed_controls
         
-        status_msg = f"✅ Applied resolution settings to pipeline:\n"
+        status_msg = f"✅ Applied resolution settings to ALL upscalers:\n"
         status_msg += f"- Target Resolution: {seed_controls['resolution_val']}px\n"
         status_msg += f"- Max Resolution: {seed_controls['max_resolution_val']}px\n"
         status_msg += f"- Auto-Resolution: {seed_controls['auto_resolution']}\n"
         if seed_controls['chunk_size_sec'] > 0:
             status_msg += f"- Chunking: {seed_controls['chunk_size_sec']}s (overlap: {seed_controls['chunk_overlap_sec']}s)\n"
+            status_msg += f"- Scene Detection: threshold={seed_controls['scene_threshold']}, min_len={seed_controls['min_scene_len']}s\n"
         
         return gr.Markdown.update(value=status_msg), state
 
@@ -330,7 +337,7 @@ def build_resolution_callbacks(
         model_cache["max_resolution_val"] = m_res
         return gr.Markdown.update(value=f"Resolution cached for {model}."), state
 
-    def cache_resolution_flags(auto_res, enable_max, chunk_sz, chunk_ov, ratio_down, per_cleanup, model, state):
+    def cache_resolution_flags(auto_res, enable_max, chunk_sz, chunk_ov, ratio_down, per_cleanup, scene_thresh, min_scene, model, state):
         model_cache = _ensure_model_cache(model, state)
         model_cache["auto_resolution"] = auto_res
         model_cache["enable_max_target"] = enable_max
@@ -338,6 +345,8 @@ def build_resolution_callbacks(
         model_cache["chunk_overlap_sec"] = float(chunk_ov or 0)
         model_cache["ratio_downscale"] = ratio_down
         model_cache["per_chunk_cleanup"] = per_cleanup
+        model_cache["scene_threshold"] = float(scene_thresh or 27.0)
+        model_cache["min_scene_len"] = float(min_scene or 2.0)
         return gr.Markdown.update(value=f"Resolution options cached for {model}."), state
 
     return {

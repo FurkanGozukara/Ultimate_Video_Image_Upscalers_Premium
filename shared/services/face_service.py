@@ -12,14 +12,12 @@ def face_defaults(models: List[str]) -> Dict[str, Any]:
     
     return {
         "model": models[0] if models else "",
-        "backend": default_backend,
-        "face_strength": 0.5,
         "face_detector": "retinaface",
         "detection_confidence": 0.7,
         "min_face_size": 64,
         "max_faces": 0,
         "restoration_model": "auto",
-        "restore_strength": 0.5,
+        "face_strength": 0.5,
         "restore_blindly": False,
         "upscale_faces": False,
         "face_padding": 0.3,
@@ -27,28 +25,35 @@ def face_defaults(models: List[str]) -> Dict[str, Any]:
         "color_correction": True,
         "gpu_acceleration": True,
         "batch_faces": True,
-        "apply_globally": False,
+        "output_quality": 0.8,
+        "preserve_original": True,
+        "artifact_reduction": False,
+        "save_face_masks": False,
+        "backend": default_backend,  # Keep for backward compatibility with old presets
     }
 
 
 FACE_ORDER: List[str] = [
-    "model",
-    "backend",
-    "face_strength",
-    "face_detector",
-    "detection_confidence",
-    "min_face_size",
-    "max_faces",
-    "restoration_model",
-    "restore_strength",
-    "restore_blindly",
-    "upscale_faces",
-    "face_padding",
-    "use_landmarks",
-    "color_correction",
-    "gpu_acceleration",
-    "batch_faces",
-    "apply_globally",
+    # IMPORTANT: This order MUST match inputs_list in ui/face_tab.py exactly!
+    # The UI creates components in this exact sequence (lines 344-349 in face_tab.py)
+    "model",                  # 0: model_selector
+    "face_detector",          # 1: face_detector (Face Detection tab)
+    "detection_confidence",   # 2: detection_confidence
+    "min_face_size",          # 3: min_face_size
+    "max_faces",              # 4: max_faces
+    "restoration_model",      # 5: restoration_model (Restoration tab)
+    "face_strength",          # 6: face_strength (Restoration tab)
+    "restore_blindly",        # 7: restore_blindly
+    "upscale_faces",          # 8: upscale_faces
+    "face_padding",           # 9: face_padding (Advanced tab)
+    "use_landmarks",          # 10: face_landmarks (UI name differs)
+    "color_correction",       # 11: color_correction
+    "gpu_acceleration",       # 12: gpu_acceleration
+    "batch_faces",            # 13: batch_face_processing (UI name differs)
+    "output_quality",         # 14: output_quality (Quality tab)
+    "preserve_original",      # 15: preserve_original
+    "artifact_reduction",     # 16: artifact_reduction
+    "save_face_masks",        # 17: save_face_masks
 ]
 
 

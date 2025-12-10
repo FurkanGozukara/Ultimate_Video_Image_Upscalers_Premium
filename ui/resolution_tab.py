@@ -124,7 +124,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     label="Chunk Size (seconds, 0=disabled)",
                     minimum=0, maximum=600, step=10,
                     value=values[5],
-                    info="Split long videos into chunks. 0=off, 60=1min chunks, 300=5min chunks"
+                    info="Split long videos into chunks. 0=off, 60=1min chunks, 300=5min chunks. Uses PySceneDetect for intelligent scene detection."
                 )
 
                 chunk_overlap = gr.Slider(
@@ -132,6 +132,20 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     minimum=0.0, maximum=5.0, step=0.1,
                     value=values[6],
                     info="Overlap between chunks for smooth transitions. 0.5-2s recommended"
+                )
+                
+                scene_threshold = gr.Slider(
+                    label="Scene Detection Sensitivity",
+                    minimum=5.0, maximum=50.0, step=1.0,
+                    value=values[9],
+                    info="PySceneDetect threshold. Lower = more scene cuts (sensitive), higher = fewer cuts. 27 = default balanced setting."
+                )
+                
+                min_scene_len = gr.Slider(
+                    label="Minimum Scene Length (seconds)",
+                    minimum=0.5, maximum=10.0, step=0.5,
+                    value=values[10],
+                    info="Minimum duration for a detected scene. Prevents very short chunks. 2.0s recommended."
                 )
 
                 per_chunk_cleanup = gr.Checkbox(
@@ -207,11 +221,11 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     )
     apply_status = gr.Markdown("")
 
-    # Collect inputs
+    # Collect inputs - MUST match RESOLUTION_ORDER exactly
     inputs_list = [
         model_selector, auto_resolution, enable_max_target, target_resolution,
         max_target_resolution, chunk_size, chunk_overlap, ratio_downscale_then_upscale,
-        per_chunk_cleanup
+        per_chunk_cleanup, scene_threshold, min_scene_len
     ]
 
     # Wire up callbacks
