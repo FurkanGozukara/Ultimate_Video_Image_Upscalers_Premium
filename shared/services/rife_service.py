@@ -465,7 +465,7 @@ def build_rife_callbacks(
         try:
             state = state or {"seed_controls": {}, "operation_status": "ready"}
             state["operation_status"] = "running"
-            seed_controls = state.get("seed_controls", {}}
+            seed_controls = state.get("seed_controls", {})
             
             settings_dict = _rife_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}

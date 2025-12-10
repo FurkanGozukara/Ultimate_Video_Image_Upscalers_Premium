@@ -3,7 +3,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # Supported extensions match SeedVR2 CLI
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
