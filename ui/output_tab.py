@@ -100,13 +100,14 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     label="PNG Frame Number Padding",
                     minimum=1, maximum=10, step=1,
                     value=values[2],
-                    info="Digits in frame filenames (e.g., 000001.png for 6-digit padding). Default 6 matches SeedVR2 CLI."
+                    info="⚠️ NOTE: SeedVR2 CLI hardcodes 6-digit padding - this setting only affects other models (GAN, RIFE). SeedVR2 always uses 6 digits.",
+                    interactive=True
                 )
 
                 png_keep_basename = gr.Checkbox(
                     label="Keep Original Basename in PNG Names",
                     value=values[3],
-                    info="Include original filename in PNG sequence names"
+                    info="⚠️ NOTE: SeedVR2 CLI ignores this - always uses input basename. This setting only affects other models (GAN, RIFE)."
                 )
 
         # Video Settings

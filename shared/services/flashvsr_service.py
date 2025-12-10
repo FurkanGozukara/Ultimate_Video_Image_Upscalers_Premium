@@ -153,7 +153,7 @@ def build_flashvsr_callbacks(
         return [defaults[key] for key in FLASHVSR_ORDER]
 
     def run_action(upload, *args, preview_only: bool = False, state=None, progress=None):
-        """Main processing action with gr.Progress integration."""
+        """Main processing action with gr.Progress integration and pre-flight checks."""
         try:
             state = state or {"seed_controls": {}}
             settings_dict = _flashvsr_dict_from_args(list(args))
@@ -165,6 +165,38 @@ def build_flashvsr_callbacks(
             # Initialize progress
             if progress:
                 progress(0, desc="Initializing FlashVSR+...")
+            
+            # PRE-FLIGHT CHECKS (mirrors SeedVR2/GAN for consistency)
+            from shared.error_handling import check_ffmpeg_available, check_disk_space
+            
+            # Check ffmpeg availability
+            ffmpeg_ok, ffmpeg_msg = check_ffmpeg_available()
+            if not ffmpeg_ok:
+                yield (
+                    "❌ ffmpeg not found in PATH",
+                    ffmpeg_msg or "Install ffmpeg and add to PATH before processing",
+                    None,
+                    None,
+                    gr.ImageSlider.update(visible=False),
+                    gr.HTML.update(value="", visible=False),
+                    state
+                )
+                return
+            
+            # Check disk space (require at least 5GB free)
+            output_path_check = Path(global_settings.get("output_dir", output_dir))
+            has_space, space_warning = check_disk_space(output_path_check, required_mb=5000)
+            if not has_space:
+                yield (
+                    "❌ Insufficient disk space",
+                    space_warning or "Free up at least 5GB disk space before processing",
+                    None,
+                    None,
+                    gr.ImageSlider.update(visible=False),
+                    gr.HTML.update(value="", visible=False),
+                    state
+                )
+                return
             
             # Resolve input
             input_path = normalize_path(upload if upload else settings["input_path"])

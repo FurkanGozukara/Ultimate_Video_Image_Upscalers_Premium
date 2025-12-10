@@ -400,6 +400,47 @@ def build_gan_callbacks(
         if progress:
             progress(0, desc="Initializing GAN upscaling...")
 
+        # PRE-FLIGHT CHECKS (mirrors SeedVR2 for consistency)
+        # Check ffmpeg availability
+        from shared.error_handling import check_ffmpeg_available, check_disk_space
+        ffmpeg_ok, ffmpeg_msg = check_ffmpeg_available()
+        if not ffmpeg_ok:
+            yield (
+                "❌ ffmpeg not found in PATH",
+                ffmpeg_msg or "Install ffmpeg and add to PATH before processing",
+                gr.Markdown.update(value="", visible=False),
+                None,
+                None,
+                "ffmpeg missing",
+                gr.ImageSlider.update(value=None),
+                gr.HTML.update(value="", visible=False),
+                gr.Gallery.update(visible=False),
+                state or {}
+            )
+            return
+        
+        # Check disk space (require at least 5GB free)
+        output_path_check = Path(global_settings.get("output_dir", output_dir))
+        has_space, space_warning = check_disk_space(output_path_check, required_mb=5000)
+        if not has_space:
+            yield (
+                "❌ Insufficient disk space",
+                space_warning or f"Free up disk space before processing. Required: 5GB+, Available: {output_path_check}",
+                gr.Markdown.update(value="", visible=False),
+                None,
+                None,
+                "Low disk space",
+                gr.ImageSlider.update(value=None),
+                gr.HTML.update(value="", visible=False),
+                gr.Gallery.update(visible=False),
+                state or {}
+            )
+            return
+        elif space_warning:
+            # Low space warning - continue but warn user
+            if progress:
+                progress(0, desc="⚠️ Low disk space detected")
+
         # Define worker functions (moved outside try block)
         def worker_single(prepped_settings):
             status, lg, outp, cmp_html, slider_upd = run_single(prepped_settings, progress_cb=progress_q.put)
@@ -865,8 +906,60 @@ def build_gan_callbacks(
             )
 
     def cancel_action(state=None):
+        """
+        Cancel GAN processing and attempt to compile partial outputs if available.
+        Mirrors SeedVR2 cancel behavior for consistency.
+        """
         cancel_event.set()
-        return gr.Markdown.update(value="⏹️ Cancel requested"), "", state or {}
+        
+        # Check for partial outputs from chunked processing
+        temp_chunks_dir = Path(global_settings.get("temp_dir", temp_dir)) / "chunks"
+        if temp_chunks_dir.exists():
+            try:
+                from shared.chunking import detect_resume_state, concat_videos
+                from shared.path_utils import collision_safe_path
+                
+                # Check for completed video chunks
+                partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
+                partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
+                
+                compiled_output = None
+                
+                # Try to compile video chunks
+                if completed_chunks and len(completed_chunks) > 0:
+                    partial_target = collision_safe_path(temp_chunks_dir / "cancelled_gan_partial.mp4")
+                    if concat_videos(completed_chunks, partial_target):
+                        compiled_output = str(partial_target)
+                        # Copy to outputs folder
+                        final_output = Path(output_dir) / f"cancelled_gan_partial_upscaled.mp4"
+                        final_output = collision_safe_path(final_output)
+                        shutil.copy2(partial_target, final_output)
+                        compiled_output = str(final_output)
+                
+                # Or compile PNG chunks
+                elif completed_png_chunks and len(completed_png_chunks) > 0:
+                    from shared.path_utils import collision_safe_dir
+                    partial_target = collision_safe_dir(temp_chunks_dir / "cancelled_gan_partial_png")
+                    partial_target.mkdir(parents=True, exist_ok=True)
+                    
+                    for i, chunk_path in enumerate(completed_png_chunks, 1):
+                        dest = partial_target / f"chunk_{i:04d}"
+                        if Path(chunk_path).is_dir():
+                            shutil.copytree(chunk_path, dest, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(chunk_path, dest)
+                    
+                    compiled_output = str(partial_target)
+                
+                if compiled_output:
+                    return gr.Markdown.update(value=f"⏹️ Cancelled - Partial GAN output compiled: {Path(compiled_output).name}"), f"Partial results saved to: {compiled_output}", state or {}
+                else:
+                    return gr.Markdown.update(value="⏹️ Cancelled - No partial outputs to compile"), "Processing was cancelled before any chunks were completed", state or {}
+                    
+            except Exception as e:
+                return gr.Markdown.update(value=f"⏹️ Cancelled - Error compiling partials: {str(e)}"), "Cancellation successful but partial compilation failed", state or {}
+        
+        return gr.Markdown.update(value="⏹️ GAN processing cancelled"), "No partial outputs found to compile", state or {}
 
     def get_model_scale(model_name: str) -> int:
         """Get the scale factor for a specific model"""

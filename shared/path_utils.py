@@ -329,6 +329,55 @@ def read_png_settings(output_dir: Path) -> Dict[str, Any]:
     }
 
 
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename to be filesystem-safe while preserving readability.
+    
+    Removes/replaces problematic characters but keeps spaces, hyphens, underscores.
+    Handles Windows reserved names (CON, PRN, AUX, etc.).
+    
+    Args:
+        filename: Original filename (with or without extension)
+        
+    Returns:
+        Sanitized filename safe for Windows and Linux
+    """
+    import re
+    
+    # Remove path separators and null bytes
+    filename = filename.replace('/', '_').replace('\\', '_').replace('\0', '')
+    
+    # Remove or replace problematic characters
+    # Keep: letters, digits, spaces, hyphens, underscores, dots, parentheses
+    filename = re.sub(r'[<>:"|?*]', '_', filename)
+    
+    # Remove leading/trailing dots and spaces (Windows restriction)
+    filename = filename.strip('. ')
+    
+    # Handle Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    windows_reserved = {
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+    }
+    
+    name_upper = filename.upper()
+    # Check both with and without extension
+    base_name = name_upper.split('.')[0] if '.' in name_upper else name_upper
+    if base_name in windows_reserved:
+        filename = f"file_{filename}"
+    
+    # Ensure not empty
+    if not filename:
+        filename = "unnamed"
+    
+    # Limit length (Windows MAX_PATH is 260, leave room for directory and extension)
+    if len(filename) > 200:
+        filename = filename[:200]
+    
+    return filename
+
+
 def generate_output_path(
     input_path: str,
     output_format: str,
@@ -337,6 +386,7 @@ def generate_output_path(
     from_directory: bool = False,
     png_padding: Optional[int] = None,
     png_keep_basename: bool = False,
+    original_filename: Optional[str] = None,
 ) -> Path:
     """
     Mirror SeedVR2 CLI generate_output_path behavior, then apply collision safety.
@@ -350,9 +400,21 @@ def generate_output_path(
     - Individual frames are named by the CLI: {base_name}_{frame_num:0Nd}.png
     - png_padding controls N (default 6 to match SeedVR2 CLI)
     - SeedVR2 CLI handles actual frame file creation with padding
+    
+    Args:
+        original_filename: Original user filename from upload (e.g., FileData.orig_name)
+                          If provided, this is used for output naming instead of temp path
     """
     input_path_obj = Path(input_path)
-    input_name = input_path_obj.stem
+    
+    # Use original filename if provided (from Gradio upload), otherwise use input path stem
+    if original_filename:
+        # Sanitize the original filename
+        sanitized = sanitize_filename(original_filename)
+        # Remove extension to get stem
+        input_name = Path(sanitized).stem
+    else:
+        input_name = input_path_obj.stem
 
     if input_type is None:
         input_type = detect_input_type(input_path)
@@ -417,10 +479,14 @@ def resolve_output_location(
     batch_mode: bool,
     png_padding: Optional[int] = None,
     png_keep_basename: bool = False,
+    original_filename: Optional[str] = None,
 ) -> Path:
     """
     Resolve where outputs should go respecting CLI semantics first, then applying
     global overrides when provided.
+    
+    Args:
+        original_filename: Original user filename from Gradio upload (preserves user's filename)
     """
     target_dir = global_output_dir if global_output_dir else None
     return generate_output_path(
@@ -431,6 +497,7 @@ def resolve_output_location(
         from_directory=batch_mode,
         png_padding=png_padding,
         png_keep_basename=png_keep_basename,
+        original_filename=original_filename,
     )
 
 

@@ -235,6 +235,7 @@ class Runner:
                     batch_mode=batch_mode,
                     png_padding=settings.get("png_padding"),
                     png_keep_basename=settings.get("png_keep_basename", False),
+                    original_filename=settings.get("_original_filename"),  # Preserve user's filename
                 )
         else:
             global_override = str(self.output_dir)
@@ -245,6 +246,7 @@ class Runner:
                 batch_mode=batch_mode,
                 png_padding=settings.get("png_padding"),
                 png_keep_basename=settings.get("png_keep_basename", False),
+                original_filename=settings.get("_original_filename"),  # Preserve user's filename
             )
 
         cmd = self._build_seedvr2_cmd(cli_path, settings, format_for_cli, preview_only, output_override=effective_output_override)

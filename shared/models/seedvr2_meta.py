@@ -25,16 +25,17 @@ class SeedVR2Model:
 
 def _built_ins() -> List[SeedVR2Model]:
     return [
-        SeedVR2Model(name="seedvr2_ema_3b_fp8_e4m3fn.safetensors", size="3B", precision="fp8_e4m3fn", variant="standard", preferred_attention="flash_attn"),
-        SeedVR2Model(name="seedvr2_ema_3b_fp16.safetensors", size="3B", precision="fp16", variant="standard", preferred_attention="flash_attn"),
-        SeedVR2Model(name="seedvr2_ema_3b-Q8_0.gguf", size="3B", precision="Q8_0", variant="standard", compile_compatible=False),
-        SeedVR2Model(name="seedvr2_ema_3b-Q4_K_M.gguf", size="3B", precision="Q4_K_M", variant="standard", compile_compatible=False),
-        SeedVR2Model(name="seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="standard", preferred_attention="flash_attn"),
-        SeedVR2Model(name="seedvr2_ema_7b_fp16.safetensors", size="7B", precision="fp16", variant="standard", preferred_attention="flash_attn"),
-        SeedVR2Model(name="seedvr2_ema_7b-Q4_K_M.gguf", size="7B", precision="Q4_K_M", variant="standard", compile_compatible=False),
-        SeedVR2Model(name="seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="sharp", preferred_attention="flash_attn"),
-        SeedVR2Model(name="seedvr2_ema_7b_sharp_fp16.safetensors", size="7B", precision="fp16", variant="sharp", preferred_attention="flash_attn"),
-        SeedVR2Model(name="seedvr2_ema_7b_sharp-Q4_K_M.gguf", size="7B", precision="Q4_K_M", variant="sharp", compile_compatible=False),
+        SeedVR2Model(name="seedvr2_ema_3b_fp8_e4m3fn.safetensors", size="3B", precision="fp8_e4m3fn", variant="standard", preferred_attention="flash_attn", supports_multi_gpu=True),
+        SeedVR2Model(name="seedvr2_ema_3b_fp16.safetensors", size="3B", precision="fp16", variant="standard", preferred_attention="flash_attn", supports_multi_gpu=True),
+        # GGUF models don't support multi-GPU well due to quantization overhead
+        SeedVR2Model(name="seedvr2_ema_3b-Q8_0.gguf", size="3B", precision="Q8_0", variant="standard", compile_compatible=False, supports_multi_gpu=False),
+        SeedVR2Model(name="seedvr2_ema_3b-Q4_K_M.gguf", size="3B", precision="Q4_K_M", variant="standard", compile_compatible=False, supports_multi_gpu=False),
+        SeedVR2Model(name="seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="standard", preferred_attention="flash_attn", supports_multi_gpu=True),
+        SeedVR2Model(name="seedvr2_ema_7b_fp16.safetensors", size="7B", precision="fp16", variant="standard", preferred_attention="flash_attn", supports_multi_gpu=True),
+        SeedVR2Model(name="seedvr2_ema_7b-Q4_K_M.gguf", size="7B", precision="Q4_K_M", variant="standard", compile_compatible=False, supports_multi_gpu=False),
+        SeedVR2Model(name="seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="sharp", preferred_attention="flash_attn", supports_multi_gpu=True),
+        SeedVR2Model(name="seedvr2_ema_7b_sharp_fp16.safetensors", size="7B", precision="fp16", variant="sharp", preferred_attention="flash_attn", supports_multi_gpu=True),
+        SeedVR2Model(name="seedvr2_ema_7b_sharp-Q4_K_M.gguf", size="7B", precision="Q4_K_M", variant="sharp", compile_compatible=False, supports_multi_gpu=False),
     ]
 
 

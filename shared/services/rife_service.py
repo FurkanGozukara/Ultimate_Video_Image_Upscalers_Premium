@@ -461,14 +461,30 @@ def build_rife_callbacks(
         return [defaults[k] for k in RIFE_ORDER]
 
     def run_action(uploaded_file, img_folder, *args, state=None):
-        """Main RIFE processing action."""
+        """Main RIFE processing action with pre-flight checks."""
         try:
             state = state or {"seed_controls": {}, "operation_status": "ready"}
             state["operation_status"] = "running"
-            seed_controls = state.get("seed_controls", {})
+            seed_controls = state.get("seed_controls", {}}
             
             settings_dict = _rife_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
+
+            # PRE-FLIGHT CHECKS (mirrors SeedVR2/GAN for consistency)
+            from shared.error_handling import check_ffmpeg_available, check_disk_space
+            
+            # Check ffmpeg availability
+            ffmpeg_ok, ffmpeg_msg = check_ffmpeg_available()
+            if not ffmpeg_ok:
+                yield ("❌ ffmpeg not found in PATH", ffmpeg_msg or "Install ffmpeg and add to PATH before processing", None, "ffmpeg missing")
+                return
+            
+            # Check disk space (require at least 5GB free)
+            output_path_check = Path(global_settings.get("output_dir", output_dir))
+            has_space, space_warning = check_disk_space(output_path_check, required_mb=5000)
+            if not has_space:
+                yield ("❌ Insufficient disk space", space_warning or "Free up at least 5GB disk space before processing", None, "Low disk space")
+                return
 
             input_path = normalize_path(uploaded_file if uploaded_file else img_folder)
             if not input_path or not Path(input_path).exists():

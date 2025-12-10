@@ -48,8 +48,14 @@ def _get_default_attention_mode() -> str:
     """
     Get default attention mode with actual runtime testing.
     
+    DEFAULT PRIORITY: flash_attn > sdpa
+    
     Attempts to use flash_attn if available and working, otherwise falls back to sdpa.
     This is more robust than just checking import - actually tests CUDA compatibility.
+    
+    Returns:
+        "flash_attn" if available and CUDA compatible
+        "sdpa" as fallback (always available in PyTorch 2.0+)
     """
     try:
         import flash_attn
@@ -59,19 +65,37 @@ def _get_default_attention_mode() -> str:
         if not torch.cuda.is_available():
             return "sdpa"
         
-        # Actually test if flash_attn works on current GPU
-        # Some GPUs support the import but not execution
+        # Test flash_attn compatibility with actual CUDA device
         try:
-            # Quick compatibility check without full model load
-            _ = flash_attn.__version__
-            return "flash_attn"
-        except (AttributeError, RuntimeError):
+            # Verify flash_attn has minimum required version
+            version = getattr(flash_attn, '__version__', '')
+            if not version:
+                # No version attribute, try import test
+                from flash_attn import flash_attn_func
+                
+            # Check GPU compute capability (flash_attn requires 8.0+ for optimal performance)
+            # But will work on 7.5+ (Turing) with reduced performance
+            device_props = torch.cuda.get_device_properties(0)
+            compute_cap = (device_props.major, device_props.minor)
+            
+            # Flash attention works best on Ampere (8.0+) and Ada/Hopper (8.9+, 9.0+)
+            # But also functional on Turing (7.5)
+            if compute_cap[0] >= 7 and compute_cap[1] >= 5:
+                # GPU supports flash attention
+                return "flash_attn"
+            else:
+                # Older GPU, use sdpa
+                return "sdpa"
+                
+        except (AttributeError, ImportError, RuntimeError):
+            # Flash attention import succeeded but functionality test failed
             return "sdpa"
             
     except ImportError:
+        # Flash attention not installed
         return "sdpa"
     except Exception:
-        # Any other error, fall back safely
+        # Any other error, fall back safely to sdpa
         return "sdpa"
 
 
@@ -230,13 +254,24 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], s
         model_meta = meta_map.get(model_name)
         
         if model_meta:
-            # Disable compile if model doesn't support it
+            # Disable compile if model doesn't support it (e.g., GGUF quantized models)
             compile_compatible = getattr(model_meta, 'compile_compatible', True)
             if not compile_compatible:
                 if cfg.get("compile_dit") or cfg.get("compile_vae"):
                     error_logger.warning(f"Model {model_name} doesn't support torch.compile - disabling compile flags")
                     cfg["compile_dit"] = False
                     cfg["compile_vae"] = False
+                    cfg["_compile_disabled_reason"] = f"Model {model_name} is not compile-compatible"
+            
+            # Enforce multi-GPU support check
+            supports_multi_gpu = getattr(model_meta, 'supports_multi_gpu', True)
+            cuda_device_str = str(cfg.get("cuda_device", ""))
+            devices = [d.strip() for d in cuda_device_str.replace(" ", "").split(",") if d.strip() and d.strip().isdigit()]
+            
+            if not supports_multi_gpu and len(devices) > 1:
+                error_logger.warning(f"Model {model_name} doesn't support multi-GPU - forcing single GPU (using first: {devices[0]})")
+                cfg["cuda_device"] = devices[0]
+                cfg["_multi_gpu_disabled_reason"] = f"Model {model_name} doesn't support multi-GPU"
             
             # Apply model max resolution cap if set
             model_max_res = getattr(model_meta, 'max_resolution', 0)
@@ -245,8 +280,9 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], s
                 if current_res > model_max_res:
                     error_logger.warning(f"Model {model_name} max resolution is {model_max_res}, clamping from {current_res}")
                     cfg["resolution"] = model_max_res
+                    cfg["_resolution_clamped_reason"] = f"Model max resolution: {model_max_res}"
             
-            # Set preferred attention mode if not explicitly set
+            # Set preferred attention mode if not explicitly set by user
             preferred_attention = getattr(model_meta, 'preferred_attention', None)
             if preferred_attention and cfg.get("attention_mode") == _get_default_attention_mode():
                 cfg["attention_mode"] = preferred_attention
@@ -327,18 +363,35 @@ def _ffmpeg_available() -> bool:
     return is_available
 
 
-def _resolve_input_path(file_upload: Optional[str], manual_path: str, batch_enable: bool, batch_input: str) -> str:
+def _resolve_input_path(file_upload: Optional[str], manual_path: str, batch_enable: bool, batch_input: str) -> Tuple[str, Optional[str]]:
     """
     Resolve the input path from various sources with priority order:
     1. Batch input (if batch enabled)
     2. File upload (highest priority for single files)
     3. Manual path entry (fallback)
+    
+    Returns:
+        Tuple of (input_path, original_filename)
+        - input_path: Actual file path to process
+        - original_filename: User's original filename (if from upload), None otherwise
     """
     if batch_enable and batch_input and batch_input.strip():
-        return batch_input.strip()
-    if file_upload and str(file_upload).strip():
-        return str(file_upload).strip()
-    return manual_path.strip() if manual_path else ""
+        return batch_input.strip(), None
+    
+    # Check if file_upload is a FileData dict or path string
+    original_filename = None
+    if file_upload:
+        # Gradio can pass FileData as dict with orig_name
+        if isinstance(file_upload, dict) and 'orig_name' in file_upload:
+            original_filename = file_upload.get('orig_name')
+            input_path = file_upload.get('path', '')
+        else:
+            input_path = str(file_upload).strip()
+        
+        if input_path:
+            return input_path, original_filename
+    
+    return manual_path.strip() if manual_path else "", None
 
 
 def _list_media_files(folder: str, video_exts: set, image_exts: set) -> List[str]:
@@ -392,16 +445,17 @@ def _process_single_file(
     output_dir: Path,
     preview_only: bool = False,
     progress_cb: Optional[Callable[[str], None]] = None
-) -> Tuple[str, str, Optional[str], Optional[str], str, str]:
+) -> Tuple[str, str, Optional[str], Optional[str], str, str, str]:
     """
     Process a single file with SeedVR2.
-    Returns: (status, logs, output_video, output_image, chunk_info, chunk_summary)
+    Returns: (status, logs, output_video, output_image, chunk_info, chunk_summary, chunk_progress)
     """
     local_logs = []
     output_video = None
     output_image = None
     chunk_info_msg = "No chunking performed."
     chunk_summary = "Single pass (no chunking)."
+    chunk_progress_msg = ""
     status = "⚠️ Processing exited unexpectedly"
 
     try:
@@ -445,11 +499,13 @@ def _process_single_file(
                     local_logs.append("Preview mode: Processed first frame only")
                     chunk_info_msg = "Preview: First frame extracted and upscaled"
                     chunk_summary = f"Preview output: {output_image}"
+                    chunk_progress_msg = "Preview mode: 1/1 frames"
                 else:
                     status = "❌ Preview upscaling failed"
                     local_logs.append(result.log)
+                    chunk_progress_msg = "Preview failed"
                     
-                return status, "\n".join(local_logs), None, output_image, chunk_info_msg, chunk_summary
+                return status, "\n".join(local_logs), None, output_image, chunk_info_msg, chunk_summary, chunk_progress_msg
                 
             else:
                 # For images, just process normally with load_cap=1
@@ -471,7 +527,7 @@ def _process_single_file(
             if progress_cb:
                 progress_cb("Model loaded successfully!\n")
 
-        # 🎬 CHUNKING SYSTEM ARCHITECTURE - Two Complementary Methods:
+            # 🎬 CHUNKING SYSTEM ARCHITECTURE - Two Complementary Methods:
         # 
         # METHOD 1: PySceneDetect Chunking (PREFERRED, UNIVERSAL)
         # --------------------------------------------------------
@@ -509,13 +565,25 @@ def _process_single_file(
             # Process with external PySceneDetect chunking
             # This splits video into scenes, processes each, then concatenates
             completed_chunks = 0
+            total_chunks_estimate = 1
+            chunk_progress_updates = []
 
             def chunk_progress_callback(progress_val, desc=""):
-                nonlocal completed_chunks
-                if "Completed chunk" in desc:
+                nonlocal completed_chunks, total_chunks_estimate
+                
+                # Extract total chunks from description if available
+                import re
+                total_match = re.search(r'(\d+)/(\d+)', desc)
+                if total_match:
+                    completed_chunks = int(total_match.group(1))
+                    total_chunks_estimate = int(total_match.group(2))
+                elif "Completed chunk" in desc or "chunk" in desc.lower():
                     completed_chunks += 1
-                    if progress_cb:
-                        progress_cb(f"Completed {completed_chunks} chunks\n")
+                
+                chunk_progress_updates.append(f"[Chunk {completed_chunks}/{total_chunks_estimate}] {desc}")
+                
+                if progress_cb:
+                    progress_cb(f"Chunk {completed_chunks}/{total_chunks_estimate}: {desc}\n")
 
             rc, clog, final_out, chunk_count = chunk_and_process(
                 runner,
@@ -523,7 +591,7 @@ def _process_single_file(
                 scene_threshold=settings.get("scene_threshold", 27.0),
                 min_scene_len=settings.get("scene_min_len", 2.0),
                 temp_dir=Path(global_settings["temp_dir"]),
-                on_progress=lambda msg: None,
+                on_progress=lambda msg: progress_cb(msg) if progress_cb else None,
                 chunk_seconds=float(settings.get("chunk_size_sec") or 0),
                 chunk_overlap=float(settings.get("chunk_overlap_sec") or 0),
                 per_chunk_cleanup=bool(settings.get("per_chunk_cleanup")),
@@ -546,7 +614,12 @@ def _process_single_file(
             if settings.get("chunk_size", 0) > 0:
                 native_streaming_info = f" + native streaming ({settings['chunk_size']} frames/chunk)"
             chunk_summary = f"Processed {chunk_count} scene chunks{native_streaming_info}. Final: {output_path}"
-            chunk_info_msg = f"Chunks: {chunk_count}\nNative streaming: {'Yes' if settings.get('chunk_size', 0) > 0 else 'No'}\nOutput: {output_path}\n{clog}"
+            
+            # Build detailed chunk info with live progress updates
+            chunk_progress_detailed = "\n".join(chunk_progress_updates[-10:]) if chunk_progress_updates else "Chunking in progress..."
+            chunk_info_msg = f"**Chunks Completed:** {completed_chunks}/{total_chunks_estimate}\n**Native Streaming:** {'Yes' if settings.get('chunk_size', 0) > 0 else 'No'}\n**Latest Progress:**\n{chunk_progress_detailed}"
+            chunk_progress_msg = f"Chunks: {completed_chunks}/{total_chunks_estimate}"
+            
             result = RunResult(rc, output_path, clog)
         else:
             # Process without external chunking
@@ -565,10 +638,12 @@ def _process_single_file(
                 status = "✅ Upscale complete (SeedVR2 native streaming)" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
                 chunk_summary = f"SeedVR2 native streaming: {native_chunk_size} frames/chunk (CLI-internal, memory-efficient)"
                 chunk_info_msg = f"Native streaming enabled: {native_chunk_size} frames/chunk\nTemporal overlap: {settings.get('temporal_overlap', 0)}\nMemory-bounded processing for long videos."
+                chunk_progress_msg = "Native streaming: CLI-internal chunking"
             else:
                 status = "✅ Upscale complete" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
                 chunk_summary = "Single pass (entire video loaded at once)"
                 chunk_info_msg = "Single-pass processing (entire video in memory)"
+                chunk_progress_msg = "Single pass: no chunking"
 
         # Extract output paths
         if result.output_path:
@@ -649,8 +724,9 @@ def _process_single_file(
         status = "❌ Processing failed"
         chunk_summary = "Failed"
         chunk_info_msg = f"Error: {error_msg}"
+        chunk_progress_msg = "Error occurred"
 
-    return status, "\n".join(local_logs), output_video, output_image, chunk_info_msg, chunk_summary
+    return status, "\n".join(local_logs), output_video, output_image, chunk_info_msg, chunk_summary, chunk_progress_msg
 
 
 # Comparison fallback ----------------------------------------------------------
@@ -921,15 +997,17 @@ def build_seedvr2_callbacks(
             settings = dict(zip(SEEDVR2_ORDER, list(args)))
             settings = _enforce_seedvr2_guardrails(settings, defaults, state=state)  # Pass state for resolution tab integration
 
-            # Validate inputs
-            input_path = _resolve_input_path(
+            # Validate inputs - now extracts original filename from upload
+            input_path, original_filename = _resolve_input_path(
                 uploaded_file,
                 settings["input_path"],
                 settings["batch_enable"],
                 settings["batch_input_path"]
             )
             settings["input_path"] = normalize_path(input_path)
+            settings["_original_filename"] = original_filename  # Store for output naming
             state["seed_controls"]["last_input_path"] = settings["input_path"]
+            state["seed_controls"]["_original_filename"] = original_filename
 
             if not settings["input_path"] or not Path(settings["input_path"]).exists():
                 yield (
@@ -1246,7 +1324,7 @@ def build_seedvr2_callbacks(
                             unique_output = collision_safe_path(batch_output_folder / output_name)
                             single_settings["output_override"] = str(unique_output)
 
-                        status, logs, output_video, output_image, chunk_info, chunk_summary = _process_single_file(
+                        status, logs, output_video, output_image, chunk_info, chunk_summary, chunk_progress = _process_single_file(
                             runner,
                             single_settings,
                             job.metadata["global_settings"],
@@ -1395,7 +1473,7 @@ def build_seedvr2_callbacks(
 
             def processing_thread():
                 try:
-                    status, logs, output_video, output_image, chunk_info, chunk_summary = _process_single_file(
+                    status, logs, output_video, output_image, chunk_info, chunk_summary, chunk_progress = _process_single_file(
                         runner,
                         settings,
                         global_settings,
@@ -1407,7 +1485,7 @@ def build_seedvr2_callbacks(
                         preview_only,
                         lambda msg: progress_queue.put(("progress", msg))
                     )
-                    progress_queue.put(("complete", (status, logs, output_video, output_image, chunk_info, chunk_summary)))
+                    progress_queue.put(("complete", (status, logs, output_video, output_image, chunk_info, chunk_summary, chunk_progress)))
                 except Exception as e:
                     progress_queue.put(("error", str(e)))
 
@@ -1480,7 +1558,7 @@ def build_seedvr2_callbacks(
                             state
                         )
                     elif update_type == "complete":
-                        status, logs, output_video, output_image, chunk_info, chunk_summary = data
+                        status, logs, output_video, output_image, chunk_info, chunk_summary, chunk_progress = data
                         processing_complete = True
                         if progress:
                             progress(1.0, desc="Complete!")
@@ -1599,7 +1677,7 @@ def build_seedvr2_callbacks(
                 output_image,
                 chunk_info,
                 "",  # resume_status
-                "",  # chunk_progress
+                chunk_progress,  # NOW POPULATED with actual chunk progress
                 comparison_html if comparison_html else gr.HTML.update(value="", visible=False),
                 image_slider_update,
                 video_comparison_html_update,

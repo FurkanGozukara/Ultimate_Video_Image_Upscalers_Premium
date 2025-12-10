@@ -25,13 +25,26 @@ APP_TITLE = "SECourses Ultimate Video and Image Upscaler Pro V1.0 – https://ww
 
 
 # --------------------------------------------------------------------- #
-# Global setup
+# Global setup - Honor launcher BAT file environment variables
 # --------------------------------------------------------------------- #
 preset_manager = PresetManager(PRESET_DIR)
 
+# Read TEMP/TMP from launcher BAT file if set, otherwise use defaults
+# This ensures user-configured paths from Windows_Run_SECourses_Upscaler_Pro.bat are respected
+launcher_temp = os.environ.get("TEMP") or os.environ.get("TMP")
+launcher_output = None  # BAT doesn't set OUTPUT_DIR, but we check for future compatibility
+
+# If BAT file set a custom temp that's NOT the system temp, use it
+# This detects if user modified the BAT file's TEMP/TMP settings
+system_temp = os.environ.get("SystemRoot", "C:\\Windows") + "\\Temp" if os.name == "nt" else "/tmp"
+if launcher_temp and launcher_temp.lower() != system_temp.lower():
+    default_temp = launcher_temp
+else:
+    default_temp = str(BASE_DIR / "temp")
+
 GLOBAL_DEFAULTS = {
-    "output_dir": str(BASE_DIR / "outputs"),
-    "temp_dir": os.environ.get("TEMP") or str(BASE_DIR / "temp"),
+    "output_dir": launcher_output or str(BASE_DIR / "outputs"),
+    "temp_dir": default_temp,
     "telemetry": True,
     "face_global": False,
     "face_strength": 0.5,
@@ -162,11 +175,25 @@ def main():
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
             gr.Markdown("""
-            **Subprocess Mode** (Default & Recommended): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but slower model loading.
+            **Subprocess Mode** (Default & Recommended & ONLY WORKING MODE): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but model reloads each time.
             
-            **In-App Mode** (Advanced - CURRENTLY EXPERIMENTAL): ⚠️ **NOTE**: In-app mode is currently a stub and falls back to subprocess execution. This mode is planned for future implementation to enable model caching and faster repeated processing. When fully implemented, it will use more VRAM/RAM and may have memory leaks, requiring app restart to return to subprocess mode.
+            **⚠️ In-App Mode** (CURRENTLY NOT IMPLEMENTED - STUB ONLY): 
+            - **Status**: This mode is a placeholder that currently **falls back to subprocess execution**.
+            - **Planned Features** (not yet implemented):
+              - Direct model loading and caching (models stay in VRAM between runs)
+              - Faster repeated processing (no model reload overhead)
+              - Higher VRAM/RAM usage (models persist until app restart)
+              - Requires app restart to return to subprocess mode
+            - **Current Behavior**: Selecting "in-app" still uses subprocess mode with full VRAM cleanup.
+            - **Implementation Status**: Awaiting direct SeedVR2/GAN/RIFE module integration (bypass CLI wrappers).
             
-            💡 **Current Recommendation**: Use subprocess mode (only option currently active). In-app mode will be implemented in a future update.
+            💡 **Current Recommendation**: Use subprocess mode (only functional option). Ignore "in-app" toggle until implemented.
+            
+            **Why In-App Mode Isn't Implemented Yet:**
+            1. Requires direct imports of model inference code (not just CLI wrappers)
+            2. Needs ModelManager integration for persistent VRAM caching across runs
+            3. Must handle proper cleanup without subprocess termination guarantees
+            4. Requires UI controls for manual model unloading when VRAM fills up
             """)
             mode_radio = gr.Radio(
                 choices=["subprocess", "in_app"],
