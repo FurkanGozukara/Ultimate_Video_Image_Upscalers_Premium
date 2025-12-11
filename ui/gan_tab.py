@@ -531,7 +531,7 @@ def gan_tab(
     save_preset_btn.click(
         fn=lambda name, model, *vals: service["save_preset"](name, model, list(vals)),
         inputs=[preset_name, preset_model_selector] + inputs_list,
-        outputs=[preset_dropdown, preset_status]
+        outputs=[preset_dropdown, preset_status] + inputs_list  # FIXED: Capture reapplied validated values
     )
 
     load_preset_btn.click(

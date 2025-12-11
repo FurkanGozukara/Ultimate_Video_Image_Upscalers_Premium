@@ -170,6 +170,14 @@ def seedvr2_tab(
                     precision=0,
                     info="Process video in N-frame chunks via CLI --chunk_size. Recommended: 300-1000 frames/chunk for videos >10 min. 0 = disabled (use PySceneDetect only). Works TOGETHER with PySceneDetect chunking."
                 )
+                
+                # Automatic chunk estimation display
+                chunk_estimate_display = gr.Markdown(
+                    "",
+                    visible=False,
+                    label="📊 Chunk Estimation"
+                )
+                
                 resume_chunking = gr.Checkbox(
                     label="Resume from partial chunks",
                     value=values[46] if len(values) > 46 else False,  # Now index 46 (was 49, removed 3 items)
@@ -681,9 +689,13 @@ def seedvr2_tab(
                 "**Current Mode:** Check Global Settings tab to view/change execution mode\n\n"
                 "**Available Modes:**\n"
                 "- **Subprocess (Default & RECOMMENDED):** Each run is isolated with full VRAM cleanup and **cancellation support**\n"
-                "- **⚠️ In-app (EXPERIMENTAL - NOT RECOMMENDED):** Partially implemented. **Cannot cancel**, no model caching benefits yet, models reload each run\n\n"
+                "- **⚠️ In-app (EXPERIMENTAL - NOT RECOMMENDED FOR SEEDVR2):**\n"
+                "  - **SeedVR2 Limitation**: Models reload each run (CLI design) - **NO speed benefit**\n"
+                "  - **Cannot cancel** mid-process (no subprocess to kill)\n"
+                "  - **No automatic vcvars wrapper** (torch.compile may fail on Windows)\n"
+                "  - **May work for GAN/RIFE** but SeedVR2 gains nothing from in-app mode\n\n"
                 "**⚠️ IMPORTANT:** Cancel button only works in **subprocess mode**. In-app mode runs cannot be cancelled mid-process.\n\n"
-                "**Note:** Always use subprocess mode until in-app caching is fully implemented. Switch modes in Global Settings tab."
+                "**💡 SeedVR2 Recommendation:** **Always use subprocess mode**. In-app provides no benefits for SeedVR2 due to CLI architecture (models reload each run). Switch modes in Global Settings tab."
             )
             gr.Markdown("**Comparison:** Enhanced ImageSlider with fullscreen and download support for images. Custom HTML5 slider for videos.")
 
@@ -1237,6 +1249,69 @@ def seedvr2_tab(
         fn=validate_resolution_ui,
         inputs=resolution,
         outputs=[resolution, resolution_warning]
+    )
+
+    # Automatic chunk estimation when input or chunk settings change
+    def auto_estimate_chunks(input_path_val, state):
+        """Automatically estimate chunks based on Resolution tab settings and current input"""
+        if not input_path_val or not input_path_val.strip():
+            return gr.Markdown.update(value="", visible=False), state
+        
+        # Get chunk settings from Resolution tab (via shared state)
+        seed_controls = state.get("seed_controls", {})
+        chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
+        
+        if chunk_size_sec <= 0:
+            # PySceneDetect chunking disabled
+            return gr.Markdown.update(value="", visible=False), state
+        
+        # Calculate chunk estimate
+        try:
+            from shared.path_utils import get_media_duration_seconds, detect_input_type
+            
+            input_type = detect_input_type(input_path_val)
+            if input_type != "video":
+                return gr.Markdown.update(value="", visible=False), state
+            
+            duration = get_media_duration_seconds(input_path_val)
+            if not duration or duration <= 0:
+                return gr.Markdown.update(value="⚠️ Could not detect video duration for chunk estimation", visible=True), state
+            
+            chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0.5) or 0.5)
+            
+            # Estimate number of chunks
+            import math
+            effective_chunk_size = max(0.001, chunk_size_sec - chunk_overlap_sec)
+            estimated_chunks = math.ceil(duration / effective_chunk_size)
+            
+            # Build info message
+            info_lines = [
+                "### 📊 PySceneDetect Chunking Estimate",
+                f"**Video Duration:** {duration:.1f}s ({duration/60:.1f} min)",
+                f"**Chunk Size:** {chunk_size_sec}s with {chunk_overlap_sec}s overlap",
+                f"**Estimated Chunks:** ~{estimated_chunks} scenes/chunks",
+                f"**Processing:** Each chunk processed independently, then merged with frame blending",
+                "",
+                "💡 *Actual chunk count may vary based on scene detection (cuts, transitions)*"
+            ]
+            
+            return gr.Markdown.update(value="\n".join(info_lines), visible=True), state
+            
+        except Exception as e:
+            return gr.Markdown.update(value=f"⚠️ Estimation error: {str(e)[:100]}", visible=True), state
+    
+    # Wire up automatic chunk estimation
+    input_path.change(
+        fn=auto_estimate_chunks,
+        inputs=[input_path, shared_state],
+        outputs=[chunk_estimate_display, shared_state]
+    )
+    
+    # Also update when shared state changes (Resolution tab updates chunk settings)
+    shared_state.change(
+        fn=auto_estimate_chunks,
+        inputs=[input_path, shared_state],
+        outputs=[chunk_estimate_display, shared_state]
     )
 
     # Initialize comparison slider and model status

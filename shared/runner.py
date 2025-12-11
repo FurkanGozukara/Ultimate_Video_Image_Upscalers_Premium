@@ -59,6 +59,20 @@ class Runner:
     # Mode management
     # ------------------------------------------------------------------ #
     def set_mode(self, mode: str):
+        """
+        Set execution mode: 'subprocess' or 'in_app'.
+        
+        MODEL-SPECIFIC BEHAVIOR:
+        - SeedVR2: Always uses subprocess for CLI execution (even in 'in_app' mode).
+                   CLI architecture prevents persistent model caching.
+        - GAN: Can benefit from in-app mode (models can persist between runs).
+        - RIFE: Can benefit from in-app mode (models can persist between runs).
+        - FlashVSR+: Similar to SeedVR2, CLI-based (limited in-app benefit).
+        
+        IMPORTANT: In-app mode has NO cancellation support and requires manual
+        vcvars activation on Windows for torch.compile. Subprocess mode is
+        STRONGLY RECOMMENDED for all use cases.
+        """
         if mode not in ("subprocess", "in_app"):
             raise ValueError("Invalid mode")
         self._active_mode = mode
@@ -468,7 +482,7 @@ class Runner:
         LIMITATIONS (CURRENT):
         - ❌ Cannot cancel mid-run (no subprocess to kill)
         - ❌ Models still reload each run (no speed benefit yet)
-        - ⚠️ VS Build Tools wrapper not applied (C++ toolchain must be pre-activated)
+        - ⚠️ VS Build Tools must be pre-activated (vcvars wrapper not applied in-app)
         - ⚠️ May have memory leaks without subprocess isolation
         
         PLANNED (FUTURE):
@@ -485,12 +499,27 @@ class Runner:
         - Low VRAM systems (<12GB)
         - First-time testing
         - Need cancellation support
+        - Need torch.compile (requires vcvars pre-activation on Windows)
         - Need speed (no caching benefit yet)
         """
         if on_progress:
             on_progress("⚙️ In-app mode (EXPERIMENTAL): Running CLI directly without subprocess\n")
             on_progress("⚠️ LIMITATIONS: Cannot cancel mid-run. No model caching benefits yet (models reload each run).\n")
             on_progress("ℹ️ For best results, use subprocess mode (default) until in-app caching is fully implemented.\n")
+        
+        # Check for compile + Windows without vcvars pre-activation
+        if platform.system() == "Windows" and (settings.get("compile_dit") or settings.get("compile_vae")):
+            from .health import is_vs_build_tools_available
+            if not is_vs_build_tools_available():
+                if on_progress:
+                    on_progress("⚠️ WARNING: torch.compile requested but VS Build Tools not detected.\n")
+                    on_progress("⚠️ In-app mode cannot wrap vcvars automatically. Compile will likely fail.\n")
+                    on_progress("💡 SOLUTION: Either (1) use subprocess mode, or (2) activate vcvars before starting app.\n")
+                # Disable compile flags to prevent cryptic errors
+                settings["compile_dit"] = False
+                settings["compile_vae"] = False
+                if on_progress:
+                    on_progress("✅ Auto-disabled compile flags for compatibility.\n")
 
         log_lines: List[str] = []
         returncode = -1

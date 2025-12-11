@@ -369,9 +369,13 @@ def _run_gan_video(
         if on_progress:
             on_progress("Extracting frames...\n")
 
+        # Respect user's PNG padding setting (default 6 for consistency with SeedVR2)
+        png_padding = int(settings.get("png_padding", 6))
+        frame_pattern = f"frame_%0{png_padding}d.png"
+        
         extract_cmd = [
             "ffmpeg", "-y", "-i", str(input_path),
-            str(frames_dir / "frame_%05d.png")
+            str(frames_dir / frame_pattern)
         ]
         subprocess.run(extract_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
@@ -409,6 +413,12 @@ def _run_gan_video(
                 frame_settings = settings.copy()
                 frame_settings["input_path"] = str(frame_path)
                 
+                # CRITICAL: Override output directory to frames_up_dir for video reconstruction
+                # This ensures upscaled frames are saved with correct naming pattern for ffmpeg
+                frame_settings["_video_frame_output_dir"] = str(frames_up_dir)
+                frame_settings["_video_frame_index"] = int(re.search(r'(\d+)', frame_path.stem).group(1))
+                frame_settings["_video_frame_padding"] = png_padding
+                
                 result = _run_gan_image(
                     frame_path, model_name, frame_settings, base_dir, temp_dir,
                     output_dir, metadata, None, cancel_event
@@ -438,10 +448,14 @@ def _run_gan_video(
             batch_mode=False
         )
 
+        # Use same padding as extraction (respect user's PNG padding setting)
+        png_padding = int(settings.get("png_padding", 6))
+        upscaled_frame_pattern = f"frame_%0{png_padding}d_out.png"
+        
         encode_cmd = [
             "ffmpeg", "-y",
             "-framerate", str(target_fps),
-            "-i", str(frames_up_dir / "frame_%05d_out.png"),
+            "-i", str(frames_up_dir / upscaled_frame_pattern),
             "-c:v", settings.get("video_codec", "libx264"),
             "-crf", str(settings.get("video_quality", 18)),
             "-pix_fmt", "yuv420p",
@@ -509,9 +523,23 @@ def _run_with_spandrel_image(
         output_array = np.clip(output_array * 255.0, 0, 255).astype(np.uint8)
         output_img = Image.fromarray(output_array)
         
-        # Save output
+        # Save output with proper directory and naming based on context
         output_format = settings.get("output_format", "png")
-        output_path = collision_safe_path(input_path.with_stem(f"{input_path.stem}_upscaled").with_suffix(f".{output_format}"))
+        
+        # Check if this is video frame processing (requires specific output dir/naming)
+        video_frame_dir = settings.get("_video_frame_output_dir")
+        if video_frame_dir:
+            # Video frame processing - save to specified directory with indexed naming
+            # This ensures upscaled frames are in correct location for ffmpeg video reconstruction
+            frame_index = settings.get("_video_frame_index", 0)
+            padding = settings.get("_video_frame_padding", 6)
+            output_filename = f"frame_{frame_index:0{padding}d}_out.png"
+            output_path = Path(video_frame_dir) / output_filename
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            # Single image processing - save next to input with _upscaled suffix and collision safety
+            output_path = collision_safe_path(input_path.with_stem(f"{input_path.stem}_upscaled").with_suffix(f".{output_format}"))
+        
         output_img.save(output_path, quality=settings.get("output_quality", 95))
         
         return GanResult(0, str(output_path), f"Upscaled with spandrel to {output_path}")
@@ -590,12 +618,32 @@ def _run_with_realesrgan_image(
             "output_format": settings.get("output_format", "png"),
             "cuda_device": settings.get("gpu_device", "0"),
         }
+        
+        # Pass through video frame settings if present (for correct output location/naming)
+        if "_video_frame_output_dir" in settings:
+            realesrgan_settings["_video_frame_output_dir"] = settings["_video_frame_output_dir"]
+            realesrgan_settings["_video_frame_index"] = settings["_video_frame_index"]
+            realesrgan_settings["_video_frame_padding"] = settings["_video_frame_padding"]
 
         result = run_realesrgan(
             settings=realesrgan_settings,
             apply_face=False,  # We handle face restoration separately
             cancel_event=cancel_event
         )
+        
+        # Handle video frame output relocation (if needed)
+        if result.output_path and "_video_frame_output_dir" in settings:
+            # This is a video frame - move output to correct directory with proper naming
+            video_frame_dir = Path(settings["_video_frame_output_dir"])
+            frame_index = settings.get("_video_frame_index", 0)
+            padding = settings.get("_video_frame_padding", 6)
+            target_filename = f"frame_{frame_index:0{padding}d}_out.png"
+            target_path = video_frame_dir / target_filename
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Move the Real-ESRGAN output to correct location
+            shutil.copy2(result.output_path, target_path)
+            result.output_path = str(target_path)
         
         # Cleanup temporary downscaled file
         if temp_downscaled and temp_downscaled.exists():

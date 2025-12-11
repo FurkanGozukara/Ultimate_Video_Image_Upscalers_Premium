@@ -100,14 +100,22 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     label="PNG Frame Number Padding",
                     minimum=1, maximum=10, step=1,
                     value=values[2],
-                    info="✅ Number of digits for frame numbers (e.g., 5 = 00001.png, 6 = 000001.png). NOTE: SeedVR2 CLI hardcodes 6 digits internally - this setting affects GAN and RIFE models only. SeedVR2 always uses 6-digit padding regardless of this setting.",
+                    info="✅ Number of digits for frame numbers (e.g., 5 = 00001.png, 6 = 000001.png).\n"
+                         "⚠️ **MODEL-SPECIFIC BEHAVIOR:**\n"
+                         "• **SeedVR2**: Hardcoded 6-digit padding (CLI limitation - cannot be changed)\n"
+                         "• **GAN/RIFE**: Fully respects this setting\n"
+                         "Recommendation: Keep at 6 for consistency across all models.",
                     interactive=True
                 )
 
                 png_keep_basename = gr.Checkbox(
                     label="Keep Original Basename in PNG Names",
                     value=values[3],
-                    info="✅ Preserve input filename as base for PNG frames (e.g., 'video.mp4' → 'video_00001.png'). NOTE: SeedVR2 CLI always uses input basename - this setting affects GAN and RIFE models only. All models respect collision-safe naming."
+                    info="✅ Preserve input filename as base for PNG frames (e.g., 'video.mp4' → 'video_00001.png').\n"
+                         "⚠️ **MODEL-SPECIFIC BEHAVIOR:**\n"
+                         "• **SeedVR2**: Always preserves input basename (CLI limitation - cannot be changed)\n"
+                         "• **GAN/RIFE**: Fully respects this setting\n"
+                         "All models respect collision-safe naming to prevent overwrites."
                 )
 
         # Video Settings
@@ -373,7 +381,7 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     save_preset_btn.click(
         fn=lambda name, model, *vals: service["save_preset"](name, model, list(vals)),
         inputs=[preset_name, model_selector] + inputs_list,
-        outputs=[preset_dropdown, preset_status]
+        outputs=[preset_dropdown, preset_status] + inputs_list  # FIXED: Capture reapplied validated values
     )
 
     load_preset_btn.click(

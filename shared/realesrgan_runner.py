@@ -65,7 +65,11 @@ def _run_realesrgan_video(
     if cancel_event and cancel_event.is_set():
         return 1, "Canceled before processing", None, frames_up
 
-    subprocess.run(["ffmpeg", "-y", "-i", str(inp), str(frames / "frame_%05d.png")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Extract PNG padding from settings (default 6 for consistency)
+    png_padding = 6  # Default padding for Real-ESRGAN (will be configurable)
+    frame_pattern = f"frame_%0{png_padding}d.png"
+    
+    subprocess.run(["ffmpeg", "-y", "-i", str(inp), str(frames / frame_pattern)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     rc, log = _run_realesrgan_image(model_name, frames, frames_up, face_enhance, outscale, model_path=model_path, gpu_id=gpu_id)
     if rc != 0:
@@ -76,8 +80,12 @@ def _run_realesrgan_video(
 
     out_path = collision_safe_path(inp.with_name(f"{inp.stem}_realESR.mp4"))
     source_fps = get_media_fps(str(inp)) or 30.0
+    
+    # Use same padding pattern for upscaled frames
+    upscaled_pattern = f"frame_%0{png_padding}d_out.png"
+    
     subprocess.run(
-        ["ffmpeg", "-y", "-framerate", "30", "-i", str(frames_up / "frame_%05d_out.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)],
+        ["ffmpeg", "-y", "-framerate", "30", "-i", str(frames_up / upscaled_pattern), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
