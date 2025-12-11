@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Dict, Any
 
 from shared.health import collect_health_report
+from shared.gradio_compat import get_compatibility_report
+from shared.repo_scanner import generate_repo_scan_report
 
 
 def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir: Path, output_dir: Path):
@@ -15,7 +17,7 @@ def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir
     All logic internal to this function.
     """
 
-    def run_health_check(state):
+    def run_health_check(state, base_dir):
         """Run comprehensive health check"""
         report = collect_health_report(temp_dir=temp_dir, output_dir=output_dir)
         lines = []
@@ -41,6 +43,20 @@ def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir
 
         report_text = "\n".join(lines)
         return report_text, health_text, state
+    
+    def run_gradio_scan():
+        """Run Gradio compatibility check with source scan"""
+        try:
+            return get_compatibility_report()
+        except Exception as e:
+            return f"❌ Gradio scan failed: {str(e)}"
+    
+    def run_repo_scan(base_dir):
+        """Scan external repositories for recent changes"""
+        try:
+            return generate_repo_scan_report(base_dir)
+        except Exception as e:
+            return f"❌ Repository scan failed: {str(e)}"
 
     # Layout
     gr.Markdown("### 🏥 System Health Check")
@@ -93,12 +109,48 @@ def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir
     # Health status message (shows what changed)
     health_status = gr.Markdown("", visible=False)
     
+    # Additional scans
+    with gr.Accordion("🔍 Gradio Source Scan", open=False):
+        gr.Markdown("Scan installed Gradio package for components and features")
+        
+        gradio_scan_btn = gr.Button("🔍 Scan Gradio Installation", variant="secondary")
+        gradio_scan_report = gr.Markdown("Click button to scan Gradio source...", show_copy_button=True)
+    
+    with gr.Accordion("📦 Repository Scan (SeedVR2, Real-ESRGAN, OMDB)", open=False):
+        gr.Markdown("Scan external repositories for recent commits and features")
+        
+        repo_scan_btn = gr.Button("🔍 Scan Repositories", variant="secondary")
+        repo_scan_report = gr.Markdown("Click button to scan repositories...", show_copy_button=True)
+    
     # Wire up the health check
     # The banner updates automatically via shared_state.change() in main app
+    
+    # Get base_dir from parent context
+    from pathlib import Path as PathLib
+    import sys
+    
+    # Derive base_dir from module path
+    def get_base_dir():
+        try:
+            # Navigate up from ui/ to get base directory
+            return PathLib(__file__).parent.parent.resolve()
+        except:
+            return PathLib.cwd()
+    
     health_btn.click(
-        fn=run_health_check,
+        fn=lambda state: run_health_check(state, get_base_dir()),
         inputs=shared_state,
         outputs=[health_report, health_status, shared_state]
+    )
+    
+    gradio_scan_btn.click(
+        fn=run_gradio_scan,
+        outputs=gradio_scan_report
+    )
+    
+    repo_scan_btn.click(
+        fn=lambda: run_repo_scan(get_base_dir()),
+        outputs=repo_scan_report
     )
 
     # Auto-run health check on tab load would require tab-level load event

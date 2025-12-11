@@ -69,398 +69,401 @@ def rife_tab(
         gpu_hint = f"❌ CUDA detection failed: {str(e)}"
         cuda_available = False
 
-    # Layout
+    # Layout: Two-column design (left=controls, right=output)
     gr.Markdown("### ⏱️ RIFE / FPS / Edit Videos")
     gr.Markdown("*Frame interpolation, FPS adjustment, and video editing tools*")
     
+    # Import shared layout helpers
+    from ui.shared_layouts import create_gpu_warning_banner
+    
     # Show GPU warning if not available
-    if not cuda_available:
-        gr.Markdown(
-            f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
-            f'<strong>⚠️ GPU Acceleration Unavailable</strong><br>'
-            f'{gpu_hint}<br><br>'
-            f'RIFE frame interpolation requires GPU acceleration. CPU fallback is extremely slow (10-100x).<br>'
-            f'Install CUDA-enabled PyTorch for optimal performance.'
-            f'</div>',
-            elem_classes="warning-text"
-        )
+    create_gpu_warning_banner(cuda_available, gpu_hint, "RIFE")
 
-    # Input section
-    with gr.Accordion("📁 Input Configuration", open=True):
-        input_file = gr.File(
-            label="Upload Video or Image",
-            type="filepath",
-            file_types=["video", "image"],
-            info="Select video file or image sequence for processing"
-        )
-        input_path = gr.Textbox(
-            label="Input Path",
-            value=values[0],
-            placeholder="C:/path/to/video.mp4 or C:/path/to/images/",
-            info="Direct path to video file or image folder"
-        )
-        input_cache_msg = gr.Markdown("", visible=False)
+    # Two-column layout
+    with gr.Row():
+        # ===== LEFT COLUMN: Input & Controls =====
+        with gr.Column(scale=3):
+            gr.Markdown("### 📥 Input / Controls")
+            
+            # Input section
+            with gr.Accordion("📁 Input Configuration", open=True):
+                input_file = gr.File(
+                    label="Upload Video or Image",
+                    type="filepath",
+                    file_types=["video", "image"],
+                    info="Select video file or image sequence for processing"
+                )
+                input_path = gr.Textbox(
+                    label="Input Path",
+                    value=values[0],
+                    placeholder="C:/path/to/video.mp4 or C:/path/to/images/",
+                    info="Direct path to video file or image folder"
+                )
+                input_cache_msg = gr.Markdown("", visible=False)
+                
+                # Batch processing controls
+                batch_enable = gr.Checkbox(
+                    label="Enable Batch Processing",
+                    value=values[19],
+                    info="Process multiple files from directory"
+                )
+                batch_input = gr.Textbox(
+                    label="Batch Input Folder",
+                    value=values[20],
+                    placeholder="Folder containing videos",
+                    info="Directory with files to process in batch mode"
+                )
+                batch_output = gr.Textbox(
+                    label="Batch Output Folder Override",
+                    value=values[21],
+                    placeholder="Optional override for batch outputs",
+                    info="Custom output directory for batch results"
+                )
+
+            # Processing settings
+            with gr.Tabs():
+                # Frame Interpolation (RIFE)
+                with gr.TabItem("🎬 Frame Interpolation"):
+                    gr.Markdown("#### RIFE - Real-Time Intermediate Flow Estimation")
+
+                    # Output controls at top (more important than RIFE toggle for workflow)
+                    with gr.Group():
+                        gr.Markdown("#### 📁 Output Configuration")
+                        
+                        output_override = gr.Textbox(
+                            label="Output Override (custom path)",
+                            value=values[2],
+                            placeholder="Leave empty for auto naming",
+                            info="Specify custom output path. Auto-naming creates files in output folder."
+                        )
+                        
+                        output_format_rife = gr.Dropdown(
+                            label="Output Format",
+                            choices=["auto", "mp4", "avi", "mov", "webm"],
+                            value=values[3],
+                            info="Container format for output video"
+                        )
+                        
+                        png_output = gr.Checkbox(
+                            label="Export as PNG Sequence",
+                            value=values[11],
+                            info="Save output as numbered PNG frames instead of video file. Useful for further editing."
+                        )
+                    
+                    with gr.Group():
+                        gr.Markdown("#### ⏱️ RIFE Interpolation")
+                        
+                        rife_enabled = gr.Checkbox(
+                            label="Enable Frame Interpolation",
+                            value=values[1],
+                            info="Use RIFE AI model to generate smooth intermediate frames. Creates slow-motion or higher FPS videos. Essential for fluid motion."
+                        )
+
+                        def _discover_rife_models():
+                            """Dynamically discover available RIFE models."""
+                            # Default fallback models
+                            default_models = ["rife-v4.6", "rife-v4.13", "rife-v4.14", "rife-v4.15", "rife-v4.16", "rife-v4.17", "rife-anime"]
+                            
+                            # Try to scan train_log for actual models
+                            rife_dir = base_dir / "RIFE" / "train_log"
+                            discovered_models = []
+                            if rife_dir.exists():
+                                for item in rife_dir.iterdir():
+                                    if item.is_dir() and not item.name.startswith("_"):
+                                        discovered_models.append(item.name)
+                            
+                            # Return discovered models if found, else default list
+                            return discovered_models if discovered_models else default_models
+                        
+                        model_dir = gr.Textbox(
+                            label="Model Directory Override",
+                            value=values[4],
+                            placeholder="Leave empty for default (RIFE/train_log)",
+                            info="Custom path to RIFE model directory. Only needed if models are in non-standard location."
+                        )
+                        
+                        rife_model = gr.Dropdown(
+                            label="RIFE Model",
+                            choices=_discover_rife_models(),
+                            value=values[5],
+                            info="RIFE model version. v4.6 = fastest. v4.15+ = best quality. 'anime' optimized for animation. Newer versions slower but smoother."
+                        )
+                        
+                        # Model info display with metadata
+                        rife_model_info = gr.Markdown("")
+                        
+                        def update_rife_model_info(model_name_val):
+                            """Display RIFE model metadata information"""
+                            from shared.models.rife_meta import get_rife_metadata
+                            
+                            metadata = get_rife_metadata(model_name_val)
+                            
+                            if metadata:
+                                info_lines = [
+                                    f"**📊 Model: {metadata.name}**",
+                                    f"**Version:** {metadata.version} | **Variant:** {metadata.variant.title()}",
+                                    f"**VRAM Estimate:** ~{metadata.estimated_vram_gb:.1f}GB",
+                                    f"**Multi-GPU:** {'❌ Not supported (single GPU only)' if not metadata.supports_multi_gpu else '✅ Supported'}",
+                                    f"**Max FPS Multiplier:** {metadata.max_fps_multiplier}x",
+                                    f"**UHD Mode:** {'✅ Supported (recommended for 4K+)' if metadata.supports_uhd else '❌ Not available'}",
+                                ]
+                                if metadata.notes:
+                                    info_lines.append(f"\n💡 {metadata.notes}")
+                                
+                                return gr.Markdown.update(value="\n".join(info_lines), visible=True)
+                            else:
+                                return gr.Markdown.update(value="Model metadata not available", visible=False)
+                        
+                        # Wire up model info update
+                        rife_model.change(
+                            fn=update_rife_model_info,
+                            inputs=rife_model,
+                            outputs=rife_model_info
+                        )
+
+                        fps_multiplier = gr.Dropdown(
+                            label="FPS Multiplier",
+                            choices=["x1", "x2", "x4", "x8"],
+                            value=values[6],
+                            info="Multiply original FPS. x2 = double smoothness (30→60fps). x4 = 4x smoother. x8 = extreme slow-mo. Higher = more processing time."
+                        )
+                        
+                        target_fps = gr.Number(
+                            label="Target FPS Override",
+                            value=values[7],
+                            precision=1,
+                            info="Desired output frame rate. 0 = use multiplier instead. 60 = smooth 60fps. 120 = ultra-smooth. Higher FPS = larger file size."
+                        )
+                        
+                        scale = gr.Slider(
+                            label="Spatial Scale Factor",
+                            minimum=0.5, maximum=4.0, step=0.1,
+                            value=values[8],
+                            info="Scale video resolution. 1.0 = original size, 2.0 = double resolution. Can combine with interpolation. >1.0 significantly increases processing time."
+                        )
+                        
+                        uhd_mode = gr.Checkbox(
+                            label="UHD Mode (4K+ Processing)",
+                            value=values[9] if cuda_available else False,  # Force False if no CUDA
+                            info=f"{gpu_hint} | Enable optimizations for 4K/8K videos. Uses more memory. Enable for 3840x2160+ inputs.",
+                            interactive=cuda_available  # Disable if no CUDA
+                        )
+
+                        rife_precision = gr.Dropdown(
+                            label="Precision",
+                            choices=["fp16", "fp32"],
+                            value=values[10] if cuda_available else "fp32",  # Force fp32 if no CUDA
+                            info=f"fp16 = half precision, 2x faster, less VRAM. fp32 = full precision. {'(fp16 requires GPU)' if not cuda_available else 'Use fp16 for speed.'}",
+                            interactive=cuda_available  # Disable if no CUDA (CPU uses fp32 only)
+                        )
+                        
+                        montage = gr.Checkbox(
+                            label="📊 Create Montage (Side-by-Side Comparison)",
+                            value=values[14],
+                            info="Generate side-by-side comparison video showing original vs interpolated. Useful for quality checking."
+                        )
+                        
+                        img_mode = gr.Checkbox(
+                            label="🖼️ Image Sequence Mode",
+                            value=values[15],
+                            info="Process image sequence instead of video. Automatically enabled when input is folder of images."
+                        )
+                        
+                        skip_static_frames = gr.Checkbox(
+                            label="Skip Static Frames (Auto-Detect)",
+                            value=values[16],
+                            info="Automatically skip static/duplicate frames. Saves processing time for videos with static scenes. May miss subtle motion."
+                        )
+                        
+                        exp = gr.Number(
+                            label="Temporal Recursion Depth",
+                            value=values[17],
+                            precision=0,
+                            info="Exponential frame generation depth. 1 = direct interpolation, 2+ = recursive. Higher = smoother but exponentially slower. Use 1 for most cases."
+                        )
+
+                        rife_gpu = gr.Textbox(
+                            label="GPU Device (Single GPU Only)",
+                            value=values[24] if cuda_available else "",
+                            placeholder="0" if cuda_available else "CPU only (no CUDA)",
+                            info=f"{gpu_hint}\n⚠️ RIFE uses SINGLE GPU only. Multi-GPU not supported. Enter single GPU ID (e.g., 0, 1, 2). Leave empty for default (GPU 0).",
+                            interactive=cuda_available
+                        )
+
+                # Video Editing
+                with gr.TabItem("✂️ Video Editing"):
+                    gr.Markdown("#### Video Trimming & Effects")
+
+                    with gr.Group():
+                        edit_mode = gr.Dropdown(
+                            label="Edit Mode",
+                            choices=["none", "trim", "concatenate", "speed_change", "effects"],
+                            value=values[25],
+                            info="Type of video editing to perform"
+                        )
+
+                        start_time = gr.Textbox(
+                            label="Start Time (HH:MM:SS or seconds)",
+                            value=values[26],
+                            placeholder="00:00:30 or 30",
+                            info="Where to start the edit"
+                        )
+
+                        end_time = gr.Textbox(
+                            label="End Time (HH:MM:SS or seconds)",
+                            value=values[27],
+                            placeholder="00:01:30 or 90",
+                            info="Where to end the edit"
+                        )
+
+                        speed_factor = gr.Slider(
+                            label="Speed Factor",
+                            minimum=0.25, maximum=4.0, step=0.25,
+                            value=values[28],
+                            info="1.0 = normal speed, 2.0 = 2x faster, 0.5 = 2x slower"
+                        )
+
+                        concat_videos = gr.Textbox(
+                            label="Additional Videos for Concatenation",
+                            value=values[33],  # Updated index for concat_videos
+                            placeholder="C:/path/to/video1.mp4, C:/path/to/video2.mp4",
+                            info="Comma-separated list of video files to concatenate with the main input",
+                            lines=2
+                        )
+
+                # Frame Control & Advanced
+                with gr.TabItem("🎞️ Frame Control"):
+                    gr.Markdown("#### Advanced Frame Processing")
+
+                    with gr.Group():
+                        skip_first_frames = gr.Number(
+                            label="Skip First Frames",
+                            value=values[22],
+                            precision=0,
+                            info="Skip N frames from start of video. Useful to skip intros/logos. 0 = process from beginning."
+                        )
+
+                        load_cap = gr.Number(
+                            label="Frame Load Cap (0 = all)",
+                            value=values[23],
+                            precision=0,
+                            info="Process only first N frames. Useful for quick tests. 0 = process entire video. Combine with skip for specific range."
+                        )
+
+                # Output Settings
+                with gr.TabItem("📤 Output Settings"):
+                    gr.Markdown("#### Video Export Configuration")
+
+                    with gr.Group():
+                        video_codec_rife = gr.Dropdown(
+                            label="Video Codec",
+                            choices=["libx264", "libx265", "libvpx-vp9"],
+                            value=values[29],
+                            info="Compression codec"
+                        )
+
+                        output_quality_rife = gr.Slider(
+                            label="Quality (CRF)",
+                            minimum=0, maximum=51, step=1,
+                            value=values[30],
+                            info="Lower = higher quality, larger file"
+                        )
+
+                        no_audio = gr.Checkbox(
+                            label="Remove Audio",
+                            value=values[12],
+                            info="Strip audio track from output"
+                        )
+
+                        show_ffmpeg_output = gr.Checkbox(
+                            label="Show FFmpeg Output",
+                            value=values[13],
+                            info="Display detailed processing logs"
+                        )
         
-        # Batch processing controls
-        batch_enable = gr.Checkbox(
-            label="Enable Batch Processing",
-            value=values[19],
-            info="Process multiple files from directory"
-        )
-        batch_input = gr.Textbox(
-            label="Batch Input Folder",
-            value=values[20],
-            placeholder="Folder containing videos",
-            info="Directory with files to process in batch mode"
-        )
-        batch_output = gr.Textbox(
-            label="Batch Output Folder Override",
-            value=values[21],
-            placeholder="Optional override for batch outputs",
-            info="Custom output directory for batch results"
-        )
+        # ===== RIGHT COLUMN: Output & Actions =====
+        with gr.Column(scale=2):
+            gr.Markdown("### 🎯 Output / Actions")
+            
+            # Status and progress
+            status_box = gr.Markdown(value="Ready for processing.")
+            progress_indicator = gr.Markdown(value="", visible=False)
+            log_box = gr.Textbox(
+                label="📋 Processing Log",
+                value="",
+                lines=10,
+                show_copy_button=True
+            )
 
-    with gr.Tabs():
-        # Frame Interpolation (RIFE)
-        with gr.TabItem("🎬 Frame Interpolation"):
-            gr.Markdown("#### RIFE - Real-Time Intermediate Flow Estimation")
+            # Output displays
+            output_video = gr.Video(
+                label="🎬 Processed Video",
+                interactive=False,
+                show_download_button=True
+            )
+            
+            # Comparison outputs (matching SeedVR2/GAN tabs)
+            image_slider = gr.ImageSlider(
+                label="🔍 Before/After Comparison",
+                interactive=False,
+                height=500,
+                slider_position=50,
+                max_height=600,
+                buttons=["download", "fullscreen"]
+            )
+            
+            video_comparison_html = gr.HTML(
+                label="🎬 Video Comparison Slider",
+                value="",
+                visible=False
+            )
 
-            # Output controls at top (more important than RIFE toggle for workflow)
-            with gr.Group():
-                gr.Markdown("#### 📁 Output Configuration")
-                
-                output_override = gr.Textbox(
-                    label="Output Override (custom path)",
-                    value=values[2],
-                    placeholder="Leave empty for auto naming",
-                    info="Specify custom output path. Auto-naming creates files in output folder."
+            # Action buttons
+            with gr.Row():
+                process_btn = gr.Button(
+                    "🚀 Process Video",
+                    variant="primary",
+                    size="lg"
                 )
-                
-                output_format_rife = gr.Dropdown(
-                    label="Output Format",
-                    choices=["auto", "mp4", "avi", "mov", "webm"],
-                    value=values[3],
-                    info="Container format for output video"
-                )
-                
-                png_output = gr.Checkbox(
-                    label="Export as PNG Sequence",
-                    value=values[11],
-                    info="Save output as numbered PNG frames instead of video file. Useful for further editing."
+                cancel_btn = gr.Button(
+                    "⏹️ Cancel",
+                    variant="stop",
+                    size="lg"
                 )
             
-            with gr.Group():
-                gr.Markdown("#### ⏱️ RIFE Interpolation")
-                
-                rife_enabled = gr.Checkbox(
-                    label="Enable Frame Interpolation",
-                    value=values[1],
-                    info="Use RIFE AI model to generate smooth intermediate frames. Creates slow-motion or higher FPS videos. Essential for fluid motion."
-                )
-
-                def _discover_rife_models():
-                    """Dynamically discover available RIFE models."""
-                    # Default fallback models
-                    default_models = ["rife-v4.6", "rife-v4.13", "rife-v4.14", "rife-v4.15", "rife-v4.16", "rife-v4.17", "rife-anime"]
-                    
-                    # Try to scan train_log for actual models
-                    rife_dir = base_dir / "RIFE" / "train_log"
-                    discovered_models = []
-                    if rife_dir.exists():
-                        for item in rife_dir.iterdir():
-                            if item.is_dir() and not item.name.startswith("_"):
-                                discovered_models.append(item.name)
-                    
-                    # Return discovered models if found, else default list
-                    return discovered_models if discovered_models else default_models
-                
-                model_dir = gr.Textbox(
-                    label="Model Directory Override",
-                    value=values[4],
-                    placeholder="Leave empty for default (RIFE/train_log)",
-                    info="Custom path to RIFE model directory. Only needed if models are in non-standard location."
-                )
-                
-                rife_model = gr.Dropdown(
-                    label="RIFE Model",
-                    choices=_discover_rife_models(),
-                    value=values[5],
-                    info="RIFE model version. v4.6 = fastest. v4.15+ = best quality. 'anime' optimized for animation. Newer versions slower but smoother."
-                )
-                
-                # Model info display with metadata
-                rife_model_info = gr.Markdown("")
-                
-                def update_rife_model_info(model_name_val):
-                    """Display RIFE model metadata information"""
-                    from shared.models.rife_meta import get_rife_metadata
-                    
-                    metadata = get_rife_metadata(model_name_val)
-                    
-                    if metadata:
-                        info_lines = [
-                            f"**📊 Model: {metadata.name}**",
-                            f"**Version:** {metadata.version} | **Variant:** {metadata.variant.title()}",
-                            f"**VRAM Estimate:** ~{metadata.estimated_vram_gb:.1f}GB",
-                            f"**Multi-GPU:** {'❌ Not supported (single GPU only)' if not metadata.supports_multi_gpu else '✅ Supported'}",
-                            f"**Max FPS Multiplier:** {metadata.max_fps_multiplier}x",
-                            f"**UHD Mode:** {'✅ Supported (recommended for 4K+)' if metadata.supports_uhd else '❌ Not available'}",
-                        ]
-                        if metadata.notes:
-                            info_lines.append(f"\n💡 {metadata.notes}")
-                        
-                        return gr.Markdown.update(value="\n".join(info_lines), visible=True)
-                    else:
-                        return gr.Markdown.update(value="Model metadata not available", visible=False)
-                
-                # Wire up model info update
-                rife_model.change(
-                    fn=update_rife_model_info,
-                    inputs=rife_model,
-                    outputs=rife_model_info
-                )
-
-                fps_multiplier = gr.Dropdown(
-                    label="FPS Multiplier",
-                    choices=["x1", "x2", "x4", "x8"],
-                    value=values[6],
-                    info="Multiply original FPS. x2 = double smoothness (30→60fps). x4 = 4x smoother. x8 = extreme slow-mo. Higher = more processing time."
-                )
-                
-                target_fps = gr.Number(
-                    label="Target FPS Override",
-                    value=values[7],
-                    precision=1,
-                    info="Desired output frame rate. 0 = use multiplier instead. 60 = smooth 60fps. 120 = ultra-smooth. Higher FPS = larger file size."
-                )
-                
-                scale = gr.Slider(
-                    label="Spatial Scale Factor",
-                    minimum=0.5, maximum=4.0, step=0.1,
-                    value=values[8],
-                    info="Scale video resolution. 1.0 = original size, 2.0 = double resolution. Can combine with interpolation. >1.0 significantly increases processing time."
-                )
-                
-                uhd_mode = gr.Checkbox(
-                    label="UHD Mode (4K+ Processing)",
-                    value=values[9] if cuda_available else False,  # Force False if no CUDA
-                    info=f"{gpu_hint} | Enable optimizations for 4K/8K videos. Uses more memory. Enable for 3840x2160+ inputs.",
-                    interactive=cuda_available  # Disable if no CUDA
-                )
-
-                rife_precision = gr.Dropdown(
-                    label="Precision",
-                    choices=["fp16", "fp32"],
-                    value=values[10] if cuda_available else "fp32",  # Force fp32 if no CUDA
-                    info=f"fp16 = half precision, 2x faster, less VRAM. fp32 = full precision. {'(fp16 requires GPU)' if not cuda_available else 'Use fp16 for speed.'}",
-                    interactive=cuda_available  # Disable if no CUDA (CPU uses fp32 only)
-                )
-                
-                montage = gr.Checkbox(
-                    label="📊 Create Montage (Side-by-Side Comparison)",
-                    value=values[14],
-                    info="Generate side-by-side comparison video showing original vs interpolated. Useful for quality checking."
-                )
-                
-                img_mode = gr.Checkbox(
-                    label="🖼️ Image Sequence Mode",
-                    value=values[15],
-                    info="Process image sequence instead of video. Automatically enabled when input is folder of images."
-                )
-                
-                skip_static_frames = gr.Checkbox(
-                    label="Skip Static Frames (Auto-Detect)",
-                    value=values[16],
-                    info="Automatically skip static/duplicate frames. Saves processing time for videos with static scenes. May miss subtle motion."
-                )
-                
-                exp = gr.Number(
-                    label="Temporal Recursion Depth",
-                    value=values[17],
-                    precision=0,
-                    info="Exponential frame generation depth. 1 = direct interpolation, 2+ = recursive. Higher = smoother but exponentially slower. Use 1 for most cases."
-                )
-
-                rife_gpu = gr.Textbox(
-                    label="GPU Device (Single GPU Only)",
-                    value=values[24] if cuda_available else "",
-                    placeholder="0" if cuda_available else "CPU only (no CUDA)",
-                    info=f"{gpu_hint}\n⚠️ RIFE uses SINGLE GPU only. Multi-GPU not supported. Enter single GPU ID (e.g., 0, 1, 2). Leave empty for default (GPU 0).",
-                    interactive=cuda_available
-                )
-
-        # Video Editing
-        with gr.TabItem("✂️ Video Editing"):
-            gr.Markdown("#### Video Trimming & Effects")
-
-            with gr.Group():
-                edit_mode = gr.Dropdown(
-                    label="Edit Mode",
-                    choices=["none", "trim", "concatenate", "speed_change", "effects"],
-                    value=values[25],
-                    info="Type of video editing to perform"
-                )
-
-                start_time = gr.Textbox(
-                    label="Start Time (HH:MM:SS or seconds)",
-                    value=values[26],
-                    placeholder="00:00:30 or 30",
-                    info="Where to start the edit"
-                )
-
-                end_time = gr.Textbox(
-                    label="End Time (HH:MM:SS or seconds)",
-                    value=values[27],
-                    placeholder="00:01:30 or 90",
-                    info="Where to end the edit"
-                )
-
-                speed_factor = gr.Slider(
-                    label="Speed Factor",
-                    minimum=0.25, maximum=4.0, step=0.25,
-                    value=values[28],
-                    info="1.0 = normal speed, 2.0 = 2x faster, 0.5 = 2x slower"
-                )
-
-                concat_videos = gr.Textbox(
-                    label="Additional Videos for Concatenation",
-                    value=values[33],  # Updated index for concat_videos
-                    placeholder="C:/path/to/video1.mp4, C:/path/to/video2.mp4",
-                    info="Comma-separated list of video files to concatenate with the main input",
-                    lines=2
-                )
-
-        # Frame Control & Advanced
-        with gr.TabItem("🎞️ Frame Control"):
-            gr.Markdown("#### Advanced Frame Processing")
-
-            with gr.Group():
-                skip_first_frames = gr.Number(
-                    label="Skip First Frames",
-                    value=values[22],
-                    precision=0,
-                    info="Skip N frames from start of video. Useful to skip intros/logos. 0 = process from beginning."
-                )
-
-                load_cap = gr.Number(
-                    label="Frame Load Cap (0 = all)",
-                    value=values[23],
-                    precision=0,
-                    info="Process only first N frames. Useful for quick tests. 0 = process entire video. Combine with skip for specific range."
-                )
-
-        # Output Settings
-        with gr.TabItem("📤 Output Settings"):
-            gr.Markdown("#### Video Export Configuration")
-
-            with gr.Group():
-                video_codec_rife = gr.Dropdown(
-                    label="Video Codec",
-                    choices=["libx264", "libx265", "libvpx-vp9"],
-                    value=values[29],
-                    info="Compression codec"
-                )
-
-                output_quality_rife = gr.Slider(
-                    label="Quality (CRF)",
-                    minimum=0, maximum=51, step=1,
-                    value=values[30],
-                    info="Lower = higher quality, larger file"
-                )
-
-                no_audio = gr.Checkbox(
-                    label="Remove Audio",
-                    value=values[12],
-                    info="Strip audio track from output"
-                )
-
-                show_ffmpeg_output = gr.Checkbox(
-                    label="Show FFmpeg Output",
-                    value=values[13],
-                    info="Display detailed processing logs"
-                )
-
-    # Output section
-    with gr.Accordion("🎯 Output & Results", open=True):
-        gr.Markdown("#### Processing Results")
-
-        status_box = gr.Markdown(value="Ready for processing.")
-        progress_indicator = gr.Markdown(value="", visible=False)
-        log_box = gr.Textbox(
-            label="📋 Processing Log",
-            value="",
-            lines=10,
-            show_copy_button=True
-        )
-
-        output_video = gr.Video(
-            label="🎬 Processed Video",
-            interactive=False,
-            show_download_button=True
-        )
-        
-        # Comparison outputs (matching SeedVR2/GAN tabs)
-        image_slider = gr.ImageSlider(
-            label="🔍 Before/After Comparison",
-            interactive=False,
-            height=500,
-            slider_position=50,
-            max_height=600,
-            buttons=["download", "fullscreen"]
-        )
-        
-        video_comparison_html = gr.HTML(
-            label="🎬 Video Comparison Slider",
-            value="",
-            visible=False
-        )
-
-    # Action buttons
-    with gr.Row():
-        process_btn = gr.Button(
-            "🚀 Process Video",
-            variant="primary",
-            size="lg"
-        )
-        cancel_btn = gr.Button(
-            "⏹️ Cancel",
-            variant="stop",
-            size="lg"
-        )
-    
-    cancel_confirm = gr.Checkbox(
-        label="⚠️ Confirm cancel (required for safety)",
-        value=False,
-        info="Enable this checkbox to confirm cancellation"
-    )
-
-    # Utility buttons
-    with gr.Row():
-        open_outputs_btn = gr.Button("📂 Open Outputs Folder")
-        clear_temp_btn = gr.Button("🗑️ Clear Temp Files")
-
-    # Preset management
-    with gr.Accordion("💾 Preset Management", open=True):
-        preset_dropdown = gr.Dropdown(
-            label="RIFE Presets",
-            choices=preset_manager.list_presets("rife", "default"),
-            value=last_used_name or "",
-        )
-
-        with gr.Row():
-            preset_name = gr.Textbox(
-                label="Preset Name",
-                placeholder="my_rife_preset"
+            cancel_confirm = gr.Checkbox(
+                label="⚠️ Confirm cancel (required for safety)",
+                value=False,
+                info="Enable this checkbox to confirm cancellation"
             )
-            save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
 
-        with gr.Row():
-            load_preset_btn = gr.Button("📂 Load Preset")
-            safe_defaults_btn = gr.Button("🔄 Safe Defaults")
+            # Utility buttons
+            with gr.Row():
+                open_outputs_btn = gr.Button("📂 Open Outputs Folder")
+                clear_temp_btn = gr.Button("🗑️ Clear Temp Files")
 
-        preset_status = gr.Markdown("")
+            # Preset management (in right column)
+            with gr.Accordion("💾 Preset Management", open=True):
+                preset_dropdown = gr.Dropdown(
+                    label="RIFE Presets",
+                    choices=preset_manager.list_presets("rife", "default"),
+                    value=last_used_name or "",
+                )
 
-    # Info section
+                with gr.Row():
+                    preset_name = gr.Textbox(
+                        label="Preset Name",
+                        placeholder="my_rife_preset"
+                    )
+                    save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
+
+                with gr.Row():
+                    load_preset_btn = gr.Button("📂 Load Preset")
+                    safe_defaults_btn = gr.Button("🔄 Safe Defaults")
+
+                preset_status = gr.Markdown("")
+
+    # Info section (outside columns, full width)
     with gr.Accordion("ℹ️ About RIFE & FPS", open=False):
         gr.Markdown("""
         #### RIFE (Real-Time Intermediate Flow Estimation)

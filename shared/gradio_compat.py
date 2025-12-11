@@ -3,17 +3,82 @@ Gradio Compatibility Check and Feature Detection
 
 Verifies installed Gradio version and feature availability to prevent runtime errors.
 Provides graceful fallbacks for missing features.
+
+Scans actual installed Gradio source to discover latest features and components.
 """
 
 import logging
-from typing import Dict, Any, Tuple
+import os
+import sys
+from pathlib import Path
+from typing import Dict, Any, Tuple, List, Optional
 
 logger = logging.getLogger("GradioCompat")
+
+
+def scan_gradio_source() -> Dict[str, Any]:
+    """
+    Scan actual installed Gradio source directory to discover all available components.
+    
+    This goes beyond hasattr checks - inspects the actual package structure to find
+    latest features, components, and modules that may not be well-documented.
+    
+    Returns:
+        Dict with discovered components, modules, and metadata
+    """
+    discovered = {
+        "components": [],
+        "modules": [],
+        "themes": [],
+        "install_path": None,
+        "has_custom_components": False,
+        "source_files": [],
+    }
+    
+    try:
+        import gradio as gr
+        
+        # Find actual Gradio installation path
+        gradio_path = Path(gr.__file__).parent
+        discovered["install_path"] = str(gradio_path)
+        
+        # Scan components directory if it exists
+        components_dir = gradio_path / "components"
+        if components_dir.exists() and components_dir.is_dir():
+            for item in components_dir.iterdir():
+                if item.suffix == ".py" and not item.name.startswith("_"):
+                    component_name = item.stem
+                    discovered["components"].append(component_name)
+                    discovered["source_files"].append(str(item))
+        
+        # Scan for themes
+        themes_dir = gradio_path / "themes"
+        if themes_dir.exists() and themes_dir.is_dir():
+            for item in themes_dir.iterdir():
+                if item.suffix == ".py" and not item.name.startswith("_"):
+                    discovered["themes"].append(item.stem)
+        
+        # Scan top-level modules
+        for item in gradio_path.iterdir():
+            if item.suffix == ".py" and not item.name.startswith("_"):
+                discovered["modules"].append(item.stem)
+        
+        # Check for custom components support
+        discovered["has_custom_components"] = hasattr(gr, 'mount_gradio_app') or hasattr(gr, 'custom_component')
+        
+        logger.info(f"Gradio source scan: Found {len(discovered['components'])} components, {len(discovered['themes'])} themes")
+        
+    except Exception as e:
+        logger.warning(f"Failed to scan Gradio source: {e}")
+    
+    return discovered
 
 
 def check_gradio_version() -> Tuple[bool, str, Dict[str, Any]]:
     """
     Check installed Gradio version and feature availability.
+    
+    Now includes actual source scanning to discover latest features.
     
     Returns:
         (is_compatible, message, features_dict)
@@ -36,10 +101,14 @@ def check_gradio_version() -> Tuple[bool, str, Dict[str, Any]]:
         
         is_compatible = version_tuple >= min_version
         
-        # Feature detection
+        # ENHANCED: Scan actual Gradio source for components
+        source_scan = scan_gradio_source()
+        
+        # Feature detection (runtime + source scan)
         features = {
             "version": version,
             "version_tuple": version_tuple,
+            "install_path": source_scan.get("install_path"),
             "ImageSlider": hasattr(gr, 'ImageSlider'),
             "Timer": hasattr(gr, 'Timer'),
             "themes": hasattr(gr, 'themes'),
@@ -49,14 +118,20 @@ def check_gradio_version() -> Tuple[bool, str, Dict[str, Any]]:
             "File": hasattr(gr, 'File'),
             "State": hasattr(gr, 'State'),
             "Progress": hasattr(gr, 'Progress'),
+            # Additional discovered components from source scan
+            "discovered_components": source_scan.get("components", []),
+            "discovered_themes": source_scan.get("themes", []),
+            "custom_components_support": source_scan.get("has_custom_components", False),
         }
         
-        # Build message
+        # Build message with source scan results
         if is_compatible:
             msg = f"✅ Gradio {version} is compatible (minimum: 4.0.0)"
+            msg += f"\n📦 Installed at: {source_scan.get('install_path', 'unknown')}"
+            msg += f"\n🔍 Discovered {len(source_scan.get('components', []))} components in source"
             
             # Check for missing optional features
-            missing = [k for k, v in features.items() if k not in ("version", "version_tuple") and not v]
+            missing = [k for k, v in features.items() if k not in ("version", "version_tuple", "install_path", "discovered_components", "discovered_themes", "custom_components_support") and not v]
             if missing:
                 msg += f"\n⚠️ Missing optional features: {', '.join(missing)}"
         else:
@@ -186,7 +261,7 @@ def warn_deprecated_features():
 
 def get_compatibility_report() -> str:
     """
-    Generate a comprehensive compatibility report.
+    Generate a comprehensive compatibility report with source scan results.
     
     Returns:
         Multi-line compatibility report string
@@ -200,10 +275,32 @@ def get_compatibility_report() -> str:
     report.append(version_msg)
     report.append(features_msg)
     
+    # Add source scan results
+    if "discovered_components" in features:
+        discovered_comps = features.get("discovered_components", [])
+        if discovered_comps:
+            report.append(f"\n🔍 Source Scan Results:")
+            report.append(f"  📦 Installation Path: {features.get('install_path', 'unknown')}")
+            report.append(f"  🧩 Components Found: {len(discovered_comps)}")
+            
+            # Show some discovered components (limit to avoid spam)
+            if len(discovered_comps) > 0:
+                sample = discovered_comps[:10]
+                report.append(f"  📋 Sample Components: {', '.join(sample)}")
+                if len(discovered_comps) > 10:
+                    report.append(f"     ... and {len(discovered_comps) - 10} more")
+            
+            discovered_themes = features.get("discovered_themes", [])
+            if discovered_themes:
+                report.append(f"  🎨 Themes Found: {', '.join(discovered_themes)}")
+            
+            custom_support = features.get("custom_components_support", False)
+            report.append(f"  🔧 Custom Components: {'✅ Supported' if custom_support else '❌ Not available'}")
+    
     if features:
-        report.append("\nFeature Availability:")
+        report.append("\nRuntime Feature Availability:")
         for feature, available in features.items():
-            if feature not in ("version", "version_tuple"):
+            if feature not in ("version", "version_tuple", "install_path", "discovered_components", "discovered_themes", "custom_components_support"):
                 status = "✅" if available else "❌"
                 report.append(f"  {status} {feature}")
     

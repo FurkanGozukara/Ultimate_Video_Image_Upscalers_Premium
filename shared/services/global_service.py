@@ -134,13 +134,21 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         if mode_choice == "in_app":
             success_msg = (
                 "✅ **Switched to in-app mode**\n\n"
-                "Models will now persist in VRAM between runs for faster processing.\n\n"
-                "**Reminder:** You must restart the app to switch back to subprocess mode.\n\n"
-                "**Next steps:**\n"
-                "1. Run your first upscale - model will load and stay in VRAM\n"
-                "2. Subsequent runs will be faster (no reload)\n"
-                "3. Monitor VRAM usage in GPU tools\n"
-                "4. Use 'Clear CUDA Cache' buttons if VRAM fills up"
+                "**⚠️ MODEL-SPECIFIC BEHAVIOR:**\n"
+                "- **GAN Models:** ✅ Models may persist in VRAM (faster reruns possible)\n"
+                "- **RIFE:** ✅ Models may persist in VRAM (faster reruns possible)\n"
+                "- **SeedVR2:** ❌ NO benefit - models reload each run (use subprocess instead)\n"
+                "- **FlashVSR+:** ❌ NO benefit - models reload each run (use subprocess instead)\n\n"
+                "**⚠️ LIMITATIONS (ALL MODELS):**\n"
+                "- ❌ **Cannot cancel** processing mid-run (no subprocess to kill)\n"
+                "- ⚠️ **Memory leaks** possible without subprocess isolation\n"
+                "- ⚠️ **Requires restart** to switch back to subprocess mode\n\n"
+                "**💡 RECOMMENDATION:** Use subprocess mode for reliability and cancellation support.\n\n"
+                "**If proceeding with in-app mode:**\n"
+                "1. Only use for GAN/RIFE models (not SeedVR2/FlashVSR+)\n"
+                "2. Monitor VRAM usage in GPU tools\n"
+                "3. Use 'Clear CUDA Cache' if VRAM fills up\n"
+                "4. Restart app if you encounter issues"
             )
         else:
             success_msg = f"✅ Switched to {actual_mode} mode"

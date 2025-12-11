@@ -84,315 +84,319 @@ def gan_tab(
         gpu_hint = f"❌ CUDA detection failed: {str(e)}"
         cuda_available = False
 
-    # Layout
+    # Layout: Two-column design (left=controls, right=output)
     gr.Markdown("### 🖼️ Image-Based (GAN) Upscaling")
     gr.Markdown("*High-quality image upscaling using GAN models with fixed scale factors (2x, 4x, etc.)*")
     
-    # Show GPU warning if not available
-    if not cuda_available:
-        gr.Markdown(
-            f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
-            f'<strong>⚠️ GPU Acceleration Unavailable</strong><br>'
-            f'{gpu_hint}<br><br>'
-            f'GAN upscaling will use CPU fallback (10-100x slower). Install CUDA-enabled PyTorch for GPU acceleration.'
-            f'</div>',
-            elem_classes="warning-text"
-        )
-
-    # Input section
-    with gr.Accordion("📁 Input Configuration", open=True):
-        input_file = gr.File(
-            label="Upload Image or Video",
-            type="filepath",
-            file_types=["image", "video"],
-            info="Upload single image or video (videos processed frame-by-frame)"
-        )
-        input_path = gr.Textbox(
-            label="Image/Video Path",
-            value=values[0],
-            placeholder="C:/path/to/image.jpg or C:/path/to/video.mp4",
-            info="Direct path to file or folder of images"
-        )
-        input_cache_msg = gr.Markdown("", visible=False)
-
-    # Batch processing
-    with gr.Accordion("📦 Batch Processing", open=False):
-        batch_enable = gr.Checkbox(
-            label="Enable Batch Processing",
-            value=values[1],
-            info="Process multiple files from directory"
-        )
-        batch_input = gr.Textbox(
-            label="Batch Input Folder",
-            value=values[2],
-            placeholder="Folder containing images/videos",
-            info="Directory with files to process"
-        )
-        batch_output = gr.Textbox(
-            label="Batch Output Folder",
-            value=values[3],
-            placeholder="Output directory for batch results"
-        )
-
-    with gr.Tabs():
-        # Model Selection
-        with gr.TabItem("🤖 Model Selection"):
-            gr.Markdown("#### GAN Model Configuration")
-
-            with gr.Group():
-                gan_model = gr.Dropdown(
-                    label="GAN Model",
-                    choices=service["model_scanner"](),
-                    value=values[4],
-                    info="Pre-trained GAN models with fixed scale factors (2x, 4x, etc.). Models auto-detected from Image_Upscale_Models folder."
-                )
-
-                model_info = gr.Markdown("Select a model to see details...")
-
-                def update_model_info(model_name):
-                    if not model_name:
-                        return "Select a model to see details..."
-
-                    try:
-                        from shared.gan_runner import get_gan_model_metadata
-                        metadata = get_gan_model_metadata(model_name, base_dir)
-
-                        info_lines = [f"**{model_name}**"]
-                        info_lines.append(f"- **Scale**: {metadata.scale}x")
-                        info_lines.append(f"- **Architecture**: {metadata.architecture}")
-                        if metadata.description and metadata.description != f"{model_name}":
-                            info_lines.append(f"- **Description**: {metadata.description}")
-                        if metadata.author and metadata.author != "unknown":
-                            info_lines.append(f"- **Author**: {metadata.author}")
-                        if metadata.tags:
-                            info_lines.append(f"- **Tags**: {', '.join(metadata.tags)}")
-
-                        return "\n".join(info_lines)
-                    except Exception as e:
-                        return f"**{model_name}**\n\nUnable to load metadata: {str(e)}"
-
-                gan_model.change(
-                    fn=update_model_info,
-                    inputs=gan_model,
-                    outputs=model_info
-                )
-
-        # Processing Settings
-        with gr.TabItem("⚙️ Processing Settings"):
-            gr.Markdown("#### Upscaling Parameters")
-
-            with gr.Group():
-                target_resolution = gr.Slider(
-                    label="Target Resolution (longest side)",
-                    minimum=512, maximum=4096, step=64,
-                    value=values[5],
-                    info="Desired output resolution (will be adjusted based on model scale)"
-                )
-                target_res_warning = gr.Markdown("", visible=False)
-
-                downscale_first = gr.Checkbox(
-                    label="Downscale First if Needed",
-                    value=values[6],
-                    info="GAN models have fixed scales (2x/4x). Enable to downscale input first, then upscale to reach arbitrary target resolutions. E.g., 4x model → 3x effective by downscaling 133% first."
-                )
-
-                auto_calculate_input = gr.Checkbox(
-                    label="Auto-Calculate Input Resolution",
-                    value=values[7],
-                    info="Automatically calculate optimal input resolution based on target output and model scale. Recommended ON for best results with Resolution & Scene Split tab."
-                )
-
-                use_resolution_tab = gr.Checkbox(
-                    label="🔗 Use Resolution & Scene Split Tab Settings",
-                    value=values[8],
-                    info="Apply target resolution, max resolution, and downscale-then-upscale settings from Resolution tab. Enables universal resolution control across all models. Recommended ON."
-                )
-
-                tile_size = gr.Number(
-                    label="Tile Size",
-                    value=values[9],
-                    precision=0,
-                    info="Process image in tiles to reduce VRAM usage. 0 = process whole image. Try 512 for 8GB GPUs, 1024 for 12GB+. May cause subtle seams."
-                )
-
-                overlap = gr.Number(
-                    label="Tile Overlap",
-                    value=values[10],
-                    precision=0,
-                    info="Pixels of overlap between tiles to prevent seam artifacts. Higher = smoother but slower. Try 32-128. Must be less than tile size."
-                )
-
-                batch_size = gr.Slider(
-                    label="Batch Size (Frames per Iteration)",
-                    minimum=1, maximum=16, step=1,
-                    value=values[16],
-                    info="Frames processed simultaneously for videos. Higher = faster but more VRAM. 1 = safest, 4-8 = balanced, 16 = max speed if VRAM allows."
-                )
-
-        # Quality & Performance
-        with gr.TabItem("🎨 Quality & Performance"):
-            gr.Markdown("#### Output Quality Settings")
-
-            with gr.Group():
-                denoising_strength = gr.Slider(
-                    label="Denoising Strength",
-                    minimum=0.0, maximum=1.0, step=0.05,
-                    value=values[11],
-                    info="Reduce noise/compression artifacts. 0 = no denoising, 1 = maximum. Try 0.3-0.7 for compressed videos. May reduce fine detail at high values."
-                )
-
-                sharpening = gr.Slider(
-                    label="Output Sharpening",
-                    minimum=0.0, maximum=2.0, step=0.1,
-                    value=values[12],
-                    info="Post-process sharpening. 0 = none, 1 = moderate, 2 = strong. Over-sharpening causes halos. Try 0.5-1.0 for balanced results."
-                )
-
-                color_correction = gr.Checkbox(
-                    label="Color Correction",
-                    value=values[13],
-                    info="Maintain color accuracy by matching output colors to input. Prevents color shifts. Recommended ON for most content."
-                )
-
-                gpu_acceleration = gr.Checkbox(
-                    label="GPU Acceleration",
-                    value=values[14] if cuda_available else False,  # Force False if no CUDA
-                    info=f"{gpu_hint} | Use GPU for processing. HIGHLY RECOMMENDED for speed. CPU fallback is 10-100x slower.",
-                    interactive=cuda_available  # Disable if no CUDA
-                )
-
-                gpu_device = gr.Textbox(
-                    label="GPU Device",
-                    value=values[15] if cuda_available else "",  # Clear if no CUDA
-                    placeholder="0 or all" if cuda_available else "CUDA not available",
-                    info=f"GPU device ID(s). {cuda_count} GPU(s) detected. Single ID (0) for one GPU, 'all' for all available. Multi-GPU support model-dependent.",
-                    interactive=cuda_available  # Disable if no CUDA
-                )
-
-        # Output Settings
-        with gr.TabItem("📤 Output Settings"):
-            gr.Markdown("#### File Output Configuration")
-
-            with gr.Group():
-                output_format_gan = gr.Dropdown(
-                    label="Output Format",
-                    choices=["auto", "png", "jpg", "webp"],
-                    value=values[17],
-                    info="'auto' matches input format"
-                )
-
-                output_quality_gan = gr.Slider(
-                    label="Output Quality",
-                    minimum=70, maximum=100, step=5,
-                    value=values[18],
-                    info="Quality for lossy formats (JPG/WebP)"
-                )
-
-                save_metadata = gr.Checkbox(
-                    label="Save Processing Metadata",
-                    value=values[19],
-                    info="Embed processing information in output files"
-                )
-
-                create_subfolders = gr.Checkbox(
-                    label="Create Subfolders by Model",
-                    value=values[20],
-                    info="Organize outputs in model-named subdirectories"
-                )
-
-    # Output section
-    with gr.Accordion("🎯 Output & Results", open=True):
-        gr.Markdown("#### Processing Results")
-
-        status_box = gr.Markdown(value="Ready for processing.")
-        progress_indicator = gr.Markdown(value="", visible=False)
-        log_box = gr.Textbox(
-            label="📋 Processing Log",
-            value="",
-            lines=10,
-            show_copy_button=True
-        )
-
-        output_image = gr.Image(
-            label="🖼️ Upscaled Image",
-            interactive=False,
-            show_download_button=True
-        )
-        output_video = gr.Video(
-            label="🎬 Upscaled Video",
-            interactive=False,
-            show_download_button=True
-        )
-
-        # Enhanced comparison
-        image_slider = gr.ImageSlider(
-            label="🔍 Before/After Comparison",
-            interactive=False,
-            height=500,
-            slider_position=50,
-            max_height=600,
-            buttons=["download", "fullscreen"]
-        )
-        
-        # Video Comparison with custom HTML5 slider
-        video_comparison_html = gr.HTML(
-            label="🎬 Video Comparison Slider",
-            value="",
-            visible=False
-        )
-
-    # Last processed info
-    last_processed = gr.Markdown("Batch processing results will appear here.")
-
-    # Action buttons
-    with gr.Row():
-        upscale_btn = gr.Button(
-            "🚀 Start Upscaling",
-            variant="primary",
-            size="lg"
-        )
-        cancel_btn = gr.Button(
-            "⏹️ Cancel",
-            variant="stop"
-        )
-        preview_btn = gr.Button(
-            "👁️ Preview First Frame",
-            size="lg"
-        )
+    # Import shared layout helpers
+    from ui.shared_layouts import create_gpu_warning_banner
     
-    cancel_confirm = gr.Checkbox(
-        label="⚠️ Confirm cancel (required for safety)",
-        value=False,
-        info="Enable this checkbox to confirm cancellation of processing"
-    )
+    # Show GPU warning if not available
+    create_gpu_warning_banner(cuda_available, gpu_hint, "GAN")
 
-    # Utility buttons
+    # Two-column layout
     with gr.Row():
-        open_outputs_btn = gr.Button("📂 Open Outputs Folder")
-        clear_temp_btn = gr.Button("🗑️ Clear Temp Files")
+        # ===== LEFT COLUMN: Input & Controls =====
+        with gr.Column(scale=3):
+            gr.Markdown("### 📥 Input / Controls")
+            
+            # Input section
+            with gr.Accordion("📁 Input Configuration", open=True):
+                input_file = gr.File(
+                    label="Upload Image or Video",
+                    type="filepath",
+                    file_types=["image", "video"],
+                    info="Upload single image or video (videos processed frame-by-frame)"
+                )
+                input_path = gr.Textbox(
+                    label="Image/Video Path",
+                    value=values[0],
+                    placeholder="C:/path/to/image.jpg or C:/path/to/video.mp4",
+                    info="Direct path to file or folder of images"
+                )
+                input_cache_msg = gr.Markdown("", visible=False)
 
-    # Preset management
-    with gr.Accordion("💾 Preset Management", open=True):
-        preset_dropdown = gr.Dropdown(
-            label="GAN Presets",
-            choices=preset_manager.list_presets("gan", "default"),
-            value=last_used_name or "",
-        )
+            # Batch processing
+            with gr.Accordion("📦 Batch Processing", open=False):
+                batch_enable = gr.Checkbox(
+                    label="Enable Batch Processing",
+                    value=values[1],
+                    info="Process multiple files from directory"
+                )
+                batch_input = gr.Textbox(
+                    label="Batch Input Folder",
+                    value=values[2],
+                    placeholder="Folder containing images/videos",
+                    info="Directory with files to process"
+                )
+                batch_output = gr.Textbox(
+                    label="Batch Output Folder",
+                    value=values[3],
+                    placeholder="Output directory for batch results"
+                )
 
-        with gr.Row():
-            preset_name = gr.Textbox(
-                label="Preset Name",
-                placeholder="my_gan_preset"
+            # Model and processing settings
+            with gr.Tabs():
+                # Model Selection
+                with gr.TabItem("🤖 Model Selection"):
+                    gr.Markdown("#### GAN Model Configuration")
+
+                    with gr.Group():
+                        gan_model = gr.Dropdown(
+                            label="GAN Model",
+                            choices=service["model_scanner"](),
+                            value=values[4],
+                            info="Pre-trained GAN models with fixed scale factors (2x, 4x, etc.). Models auto-detected from Image_Upscale_Models folder."
+                        )
+
+                        model_info = gr.Markdown("Select a model to see details...")
+
+                        def update_model_info(model_name):
+                            if not model_name:
+                                return "Select a model to see details..."
+
+                            try:
+                                from shared.gan_runner import get_gan_model_metadata
+                                metadata = get_gan_model_metadata(model_name, base_dir)
+
+                                info_lines = [f"**{model_name}**"]
+                                info_lines.append(f"- **Scale**: {metadata.scale}x")
+                                info_lines.append(f"- **Architecture**: {metadata.architecture}")
+                                if metadata.description and metadata.description != f"{model_name}":
+                                    info_lines.append(f"- **Description**: {metadata.description}")
+                                if metadata.author and metadata.author != "unknown":
+                                    info_lines.append(f"- **Author**: {metadata.author}")
+                                if metadata.tags:
+                                    info_lines.append(f"- **Tags**: {', '.join(metadata.tags)}")
+
+                                return "\n".join(info_lines)
+                            except Exception as e:
+                                return f"**{model_name}**\n\nUnable to load metadata: {str(e)}"
+
+                        gan_model.change(
+                            fn=update_model_info,
+                            inputs=gan_model,
+                            outputs=model_info
+                        )
+
+                # Processing Settings
+                with gr.TabItem("⚙️ Processing Settings"):
+                    gr.Markdown("#### Upscaling Parameters")
+
+                    with gr.Group():
+                        target_resolution = gr.Slider(
+                            label="Target Resolution (longest side)",
+                            minimum=512, maximum=4096, step=64,
+                            value=values[5],
+                            info="Desired output resolution (will be adjusted based on model scale)"
+                        )
+                        target_res_warning = gr.Markdown("", visible=False)
+
+                        downscale_first = gr.Checkbox(
+                            label="Downscale First if Needed",
+                            value=values[6],
+                            info="GAN models have fixed scales (2x/4x). Enable to downscale input first, then upscale to reach arbitrary target resolutions. E.g., 4x model → 3x effective by downscaling 133% first."
+                        )
+
+                        auto_calculate_input = gr.Checkbox(
+                            label="Auto-Calculate Input Resolution",
+                            value=values[7],
+                            info="Automatically calculate optimal input resolution based on target output and model scale. Recommended ON for best results with Resolution & Scene Split tab."
+                        )
+
+                        use_resolution_tab = gr.Checkbox(
+                            label="🔗 Use Resolution & Scene Split Tab Settings",
+                            value=values[8],
+                            info="Apply target resolution, max resolution, and downscale-then-upscale settings from Resolution tab. Enables universal resolution control across all models. Recommended ON."
+                        )
+
+                        tile_size = gr.Number(
+                            label="Tile Size",
+                            value=values[9],
+                            precision=0,
+                            info="Process image in tiles to reduce VRAM usage. 0 = process whole image. Try 512 for 8GB GPUs, 1024 for 12GB+. May cause subtle seams."
+                        )
+
+                        overlap = gr.Number(
+                            label="Tile Overlap",
+                            value=values[10],
+                            precision=0,
+                            info="Pixels of overlap between tiles to prevent seam artifacts. Higher = smoother but slower. Try 32-128. Must be less than tile size."
+                        )
+
+                    batch_size = gr.Slider(
+                        label="Batch Size (Frames per Iteration)",
+                        minimum=1, maximum=16, step=1,
+                        value=values[16],
+                        info="Frames processed simultaneously for videos. Higher = faster but more VRAM. 1 = safest, 4-8 = balanced, 16 = max speed if VRAM allows."
+                    )
+
+                # Quality & Performance
+                with gr.TabItem("🎨 Quality & Performance"):
+                    gr.Markdown("#### Output Quality Settings")
+
+                    with gr.Group():
+                        denoising_strength = gr.Slider(
+                            label="Denoising Strength",
+                            minimum=0.0, maximum=1.0, step=0.05,
+                            value=values[11],
+                            info="Reduce noise/compression artifacts. 0 = no denoising, 1 = maximum. Try 0.3-0.7 for compressed videos. May reduce fine detail at high values."
+                        )
+
+                        sharpening = gr.Slider(
+                            label="Output Sharpening",
+                            minimum=0.0, maximum=2.0, step=0.1,
+                            value=values[12],
+                            info="Post-process sharpening. 0 = none, 1 = moderate, 2 = strong. Over-sharpening causes halos. Try 0.5-1.0 for balanced results."
+                        )
+
+                        color_correction = gr.Checkbox(
+                            label="Color Correction",
+                            value=values[13],
+                            info="Maintain color accuracy by matching output colors to input. Prevents color shifts. Recommended ON for most content."
+                        )
+
+                        gpu_acceleration = gr.Checkbox(
+                            label="GPU Acceleration",
+                            value=values[14] if cuda_available else False,  # Force False if no CUDA
+                            info=f"{gpu_hint} | Use GPU for processing. HIGHLY RECOMMENDED for speed. CPU fallback is 10-100x slower.",
+                            interactive=cuda_available  # Disable if no CUDA
+                        )
+
+                        gpu_device = gr.Textbox(
+                            label="GPU Device",
+                            value=values[15] if cuda_available else "",  # Clear if no CUDA
+                            placeholder="0 or all" if cuda_available else "CUDA not available",
+                            info=f"GPU device ID(s). {cuda_count} GPU(s) detected. Single ID (0) for one GPU, 'all' for all available. Multi-GPU support model-dependent.",
+                            interactive=cuda_available  # Disable if no CUDA
+                        )
+
+                # Output Settings
+                with gr.TabItem("📤 Output Settings"):
+                    gr.Markdown("#### File Output Configuration")
+
+                    with gr.Group():
+                        output_format_gan = gr.Dropdown(
+                            label="Output Format",
+                            choices=["auto", "png", "jpg", "webp"],
+                            value=values[17],
+                            info="'auto' matches input format"
+                        )
+
+                        output_quality_gan = gr.Slider(
+                            label="Output Quality",
+                            minimum=70, maximum=100, step=5,
+                            value=values[18],
+                            info="Quality for lossy formats (JPG/WebP)"
+                        )
+
+                        save_metadata = gr.Checkbox(
+                            label="Save Processing Metadata",
+                            value=values[19],
+                            info="Embed processing information in output files"
+                        )
+
+                        create_subfolders = gr.Checkbox(
+                            label="Create Subfolders by Model",
+                            value=values[20],
+                            info="Organize outputs in model-named subdirectories"
+                        )
+        
+        # ===== RIGHT COLUMN: Output & Actions =====
+        with gr.Column(scale=2):
+            gr.Markdown("### 🎯 Output / Actions")
+            
+            # Status and progress
+            status_box = gr.Markdown(value="Ready for processing.")
+            progress_indicator = gr.Markdown(value="", visible=False)
+            log_box = gr.Textbox(
+                label="📋 Processing Log",
+                value="",
+                lines=10,
+                show_copy_button=True
             )
-            save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
 
-        with gr.Row():
-            load_preset_btn = gr.Button("📂 Load Preset")
-            safe_defaults_btn = gr.Button("🔄 Safe Defaults")
+            # Output displays
+            output_image = gr.Image(
+                label="🖼️ Upscaled Image",
+                interactive=False,
+                show_download_button=True
+            )
+            output_video = gr.Video(
+                label="🎬 Upscaled Video",
+                interactive=False,
+                show_download_button=True
+            )
 
-        preset_status = gr.Markdown("")
+            # Enhanced comparison
+            image_slider = gr.ImageSlider(
+                label="🔍 Before/After Comparison",
+                interactive=False,
+                height=500,
+                slider_position=50,
+                max_height=600,
+                buttons=["download", "fullscreen"]
+            )
+            
+            # Video Comparison with custom HTML5 slider
+            video_comparison_html = gr.HTML(
+                label="🎬 Video Comparison Slider",
+                value="",
+                visible=False
+            )
 
-    # Model information
+            # Last processed info
+            last_processed = gr.Markdown("Batch processing results will appear here.")
+
+            # Action buttons
+            with gr.Row():
+                upscale_btn = gr.Button(
+                    "🚀 Start Upscaling",
+                    variant="primary",
+                    size="lg"
+                )
+                cancel_btn = gr.Button(
+                    "⏹️ Cancel",
+                    variant="stop"
+                )
+                preview_btn = gr.Button(
+                    "👁️ Preview First Frame",
+                    size="lg"
+                )
+            
+            cancel_confirm = gr.Checkbox(
+                label="⚠️ Confirm cancel (required for safety)",
+                value=False,
+                info="Enable this checkbox to confirm cancellation of processing"
+            )
+
+            # Utility buttons
+            with gr.Row():
+                open_outputs_btn = gr.Button("📂 Open Outputs Folder")
+                clear_temp_btn = gr.Button("🗑️ Clear Temp Files")
+
+            # Preset management (in right column)
+            with gr.Accordion("💾 Preset Management", open=True):
+                preset_dropdown = gr.Dropdown(
+                    label="GAN Presets",
+                    choices=preset_manager.list_presets("gan", "default"),
+                    value=last_used_name or "",
+                )
+
+                with gr.Row():
+                    preset_name = gr.Textbox(
+                        label="Preset Name",
+                        placeholder="my_gan_preset"
+                    )
+                    save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
+
+                with gr.Row():
+                    load_preset_btn = gr.Button("📂 Load Preset")
+                    safe_defaults_btn = gr.Button("🔄 Safe Defaults")
+
+                preset_status = gr.Markdown("")
+
+    # Model information (outside columns, full width)
     with gr.Accordion("ℹ️ About GAN Upscaling", open=False):
         gr.Markdown("""
         #### GAN-Based Image Upscaling

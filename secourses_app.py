@@ -129,50 +129,75 @@ def main():
     .model-status { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 12px; margin: 8px 0; font-family: 'Courier New', monospace; font-size: 14px; }
     """
 
-    # Auto-apply last-used resolution presets on startup (for all models)
+    # Auto-apply last-used resolution presets on startup (for ALL models)
     # This ensures resolution/chunking settings are loaded automatically without manual "Apply"
-    def load_default_resolution_settings():
-        """Load last-used resolution settings for default models into shared state"""
-        from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names
+    def load_all_model_resolution_settings():
+        """
+        Load last-used resolution settings for ALL available models into shared state.
         
-        # Get primary models for each pipeline
+        Creates a resolution_cache dictionary keyed by model name, so each model's
+        resolution/chunking settings are restored on startup and available when user
+        switches models.
+        """
+        from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names
+        from shared.services.resolution_service import resolution_defaults
+        
+        # Get all models for each pipeline
         seedvr2_models = get_seedvr2_model_names()
         gan_models = scan_gan_models(BASE_DIR)
         flashvsr_models = get_flashvsr_model_names()
         
-        # Pick first model from each as default
-        default_model = seedvr2_models[0] if seedvr2_models else (gan_models[0] if gan_models else (flashvsr_models[0] if flashvsr_models else "default"))
+        all_models = []
+        all_models.extend(seedvr2_models)
+        all_models.extend(gan_models)
+        all_models.extend(flashvsr_models)
         
-        # Load last-used resolution preset for default model
-        last_used_res = preset_manager.load_last_used("resolution", default_model)
+        if not all_models:
+            all_models = ["default"]
         
-        # Extract resolution settings (fall back to defaults if no preset)
-        from shared.services.resolution_service import resolution_defaults
-        res_defaults = resolution_defaults([default_model])
+        # Pick first available model as primary default
+        primary_model = all_models[0]
         
-        if last_used_res:
-            res_settings = preset_manager.merge_config(res_defaults, last_used_res)
+        # Load resolution settings for PRIMARY model (used for initial UI values)
+        primary_last_used = preset_manager.load_last_used("resolution", primary_model)
+        res_defaults = resolution_defaults([primary_model])
+        
+        if primary_last_used:
+            primary_settings = preset_manager.merge_config(res_defaults, primary_last_used)
         else:
-            res_settings = res_defaults
+            primary_settings = res_defaults
         
-        return res_settings
+        # Build resolution_cache for ALL models (per-model settings duplication)
+        resolution_cache = {}
+        for model in all_models:
+            model_last_used = preset_manager.load_last_used("resolution", model)
+            model_defaults = resolution_defaults([model])
+            
+            if model_last_used:
+                resolution_cache[model] = preset_manager.merge_config(model_defaults, model_last_used)
+            else:
+                resolution_cache[model] = model_defaults
+        
+        # Return both primary settings (for UI) and full cache (for model switching)
+        return primary_settings, resolution_cache
 
-    # Load resolution settings on startup
-    startup_res_settings = load_default_resolution_settings()
+    # Load resolution settings on startup for all models
+    startup_res_settings, startup_res_cache = load_all_model_resolution_settings()
     
     with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=css_overrides) as demo:
         # Shared state for cross-tab communication
-        # AUTO-POPULATED with last-used resolution settings on startup
+        # AUTO-POPULATED with last-used resolution settings for ALL models on startup
         shared_state = gr.State({
             "health_banner": {"text": health_text},
             "seed_controls": {
-                # AUTO-LOADED from Resolution tab last-used presets
+                # AUTO-LOADED from Resolution tab last-used presets (primary model UI values)
                 "resolution_val": startup_res_settings.get("target_resolution", 1080),
                 "max_resolution_val": startup_res_settings.get("max_target_resolution", 0),
                 "current_model": None,
                 "last_input_path": "",
                 "last_output_dir": "",
-                "resolution_cache": {},
+                # AUTO-LOADED per-model resolution cache (all models restored at startup)
+                "resolution_cache": startup_res_cache,
                 "png_padding_val": 5,
                 "png_keep_basename_val": True,
                 "skip_first_frames_val": None,
@@ -183,7 +208,7 @@ def main():
                 "pin_reference_val": False,
                 "fullscreen_val": False,
                 "face_strength_val": 0.5,
-                # AUTO-LOADED chunking settings from Resolution tab
+                # AUTO-LOADED chunking settings from Resolution tab (primary model)
                 "chunk_size_sec": startup_res_settings.get("chunk_size", 0),
                 "chunk_overlap_sec": startup_res_settings.get("chunk_overlap", 0.5),
                 "ratio_downscale": startup_res_settings.get("ratio_downscale_then_upscale", False),

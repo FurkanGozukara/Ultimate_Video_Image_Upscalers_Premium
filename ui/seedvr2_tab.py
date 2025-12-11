@@ -847,10 +847,35 @@ def seedvr2_tab(
         outputs=[input_cache_msg, shared_state, resolution, max_resolution, auto_res_msg]
     )
 
-    # Model caching and status updates with preset reload
+    # Model caching and status updates with preset reload + dynamic UI updates
     def cache_model_and_reload_preset(m, state, *current_vals):
-        """Cache model selection and reload that model's last-used preset"""
+        """
+        Cache model selection, reload preset, and update UI based on model metadata.
+        
+        Dynamically disables incompatible options (e.g., compile for GGUF models).
+        """
         state["seed_controls"]["current_model"] = m
+        
+        # Get model metadata to check compatibility
+        from shared.models.seedvr2_meta import model_meta_map
+        meta_map = model_meta_map()
+        model_meta = meta_map.get(m)
+        
+        # Determine if compile should be disabled for this model
+        compile_supported = True
+        multi_gpu_supported = True
+        compile_warning = ""
+        multi_gpu_warning = ""
+        
+        if model_meta:
+            compile_supported = getattr(model_meta, 'compile_compatible', True)
+            multi_gpu_supported = getattr(model_meta, 'supports_multi_gpu', True)
+            
+            if not compile_supported:
+                compile_warning = f"⚠️ Model '{m}' doesn't support torch.compile (e.g., GGUF quantized models). Compile options will be auto-disabled at runtime."
+            
+            if not multi_gpu_supported:
+                multi_gpu_warning = f"⚠️ Model '{m}' is single-GPU only. Multi-GPU device specs will be reduced to first GPU."
         
         # Load last-used preset for this model
         last_used_preset = preset_manager.load_last_used("seedvr2", m)
@@ -860,6 +885,16 @@ def seedvr2_tab(
             from shared.model_manager import get_model_manager
             model_manager = get_model_manager()
             status_text = service.get("get_model_loading_status", lambda: "Model status unavailable")()
+            
+            # Add metadata warnings to status
+            if compile_warning or multi_gpu_warning:
+                warnings = []
+                if compile_warning:
+                    warnings.append(compile_warning)
+                if multi_gpu_warning:
+                    warnings.append(multi_gpu_warning)
+                status_text += "\n\n" + "\n".join(warnings)
+            
             model_status_update = gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
         except Exception as e:
             model_status_update = gr.Markdown.update(value=f"### 🔧 Model Status\nError: {str(e)}")
@@ -868,16 +903,32 @@ def seedvr2_tab(
         if last_used_preset:
             current_dict = dict(zip(SEEDVR2_ORDER, current_vals))
             merged = preset_manager.merge_config(current_dict, last_used_preset)
+            
+            # Apply model constraints to merged preset
+            if not compile_supported:
+                merged["compile_dit"] = False
+                merged["compile_vae"] = False
+            
             new_vals = [merged[k] for k in SEEDVR2_ORDER]
             cache_msg = gr.Markdown.update(
-                value=f"✅ Model '{m}' selected - loaded last-used preset", 
+                value=f"✅ Model '{m}' selected - loaded last-used preset\n{compile_warning}\n{multi_gpu_warning}", 
                 visible=True
             )
             return [cache_msg, model_status_update] + new_vals
         else:
-            # No last-used preset, keep current values
-            cache_msg = gr.Markdown.update(value=f"✅ Model '{m}' selected (no saved preset)", visible=True)
-            return [cache_msg, model_status_update] + list(current_vals)
+            # No last-used preset, keep current values but apply constraints
+            current_dict = dict(zip(SEEDVR2_ORDER, current_vals))
+            if not compile_supported:
+                current_dict["compile_dit"] = False
+                current_dict["compile_vae"] = False
+            
+            new_vals = [current_dict[k] for k in SEEDVR2_ORDER]
+            
+            cache_msg = gr.Markdown.update(
+                value=f"✅ Model '{m}' selected (no saved preset)\n{compile_warning}\n{multi_gpu_warning}", 
+                visible=True
+            )
+            return [cache_msg, model_status_update] + new_vals
 
     dit_model.change(
         fn=cache_model_and_reload_preset,

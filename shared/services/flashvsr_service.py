@@ -114,6 +114,7 @@ def _enforce_flashvsr_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) 
     
     Enforces:
     - Single GPU requirement (FlashVSR+ doesn't support multi-GPU well)
+    - Valid CUDA device IDs (checks against available devices)
     - VRAM-based tile size recommendations
     - Resolution constraints from model metadata
     - Valid version/mode/scale combinations
@@ -127,13 +128,28 @@ def _enforce_flashvsr_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) 
     if model_meta:
         # Enforce single GPU (FlashVSR+ doesn't support multi-GPU)
         device_str = str(cfg.get("device", "auto"))
-        if device_str not in ("auto", "cpu"):
+        if device_str not in ("auto", "cpu", ""):
             # Parse device specification
             devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
             if len(devices) > 1:
                 error_logger.warning(f"FlashVSR+ doesn't support multi-GPU - forcing single GPU (using first: {devices[0]})")
                 cfg["device"] = devices[0]
                 cfg["_multi_gpu_disabled_reason"] = "FlashVSR+ is single-GPU optimized"
+            
+            # Validate CUDA device ID is actually available
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    device_count = torch.cuda.device_count()
+                    device_id_str = cfg["device"].replace("cuda:", "")
+                    if device_id_str.isdigit():
+                        device_id = int(device_id_str)
+                        if device_id >= device_count:
+                            error_logger.warning(f"Device ID {device_id} not available (only {device_count} GPUs detected) - falling back to auto")
+                            cfg["device"] = "auto"
+                            cfg["_device_validation_warning"] = f"Requested GPU {device_id} not found, using auto-select"
+            except Exception as e:
+                error_logger.warning(f"Failed to validate device ID: {e}")
         
         # Apply model-specific defaults if not set
         if not cfg.get("dtype"):
