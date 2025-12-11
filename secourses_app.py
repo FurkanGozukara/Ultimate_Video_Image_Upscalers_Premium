@@ -157,11 +157,19 @@ def main():
         """
         Load last-used presets for ALL tabs and models into shared state.
         
-        Returns tuple: (resolution_settings, resolution_cache, output_settings, output_cache)
+        COMPLETE IMPLEMENTATION: Now loads SeedVR2, GAN, RIFE, FlashVSR+, Face presets on startup.
+        
+        Returns tuple: (resolution_settings, resolution_cache, output_settings, output_cache,
+                        seedvr2_cache, gan_cache, rife_cache, flashvsr_cache, face_cache)
         """
         from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names, get_rife_model_names
         from shared.services.resolution_service import resolution_defaults
         from shared.services.output_service import output_defaults
+        from shared.services.seedvr2_service import seedvr2_defaults
+        from shared.services.gan_service import gan_defaults
+        from shared.services.rife_service import rife_defaults
+        from shared.services.flashvsr_service import flashvsr_defaults
+        from shared.services.face_service import face_defaults
         
         # Get all models for each pipeline
         seedvr2_models = get_seedvr2_model_names()
@@ -178,61 +186,80 @@ def main():
         if not all_models:
             all_models = ["default"]
         
-        # Pick first available model as primary default
-        primary_model = all_models[0]
+        # Pick first available model as primary default for each pipeline
+        primary_seedvr2 = seedvr2_models[0] if seedvr2_models else "default"
+        primary_gan = gan_models[0] if gan_models else "default"
+        primary_rife = rife_models[0] if rife_models else "default"
+        primary_flashvsr = flashvsr_models[0] if flashvsr_models else "v10_tiny_4x"
+        primary_face = all_models[0]
         
         # === RESOLUTION TAB ===
-        # Load resolution settings for PRIMARY model (used for initial UI values)
-        primary_res_last_used = preset_manager.load_last_used("resolution", primary_model)
-        res_defaults = resolution_defaults([primary_model])
+        primary_res_last_used = preset_manager.load_last_used("resolution", all_models[0])
+        res_defaults = resolution_defaults([all_models[0]])
+        primary_res_settings = preset_manager.merge_config(res_defaults, primary_res_last_used) if primary_res_last_used else res_defaults
         
-        if primary_res_last_used:
-            primary_res_settings = preset_manager.merge_config(res_defaults, primary_res_last_used)
-        else:
-            primary_res_settings = res_defaults
-        
-        # Build resolution_cache for ALL models (per-model settings duplication)
         resolution_cache = {}
         for model in all_models:
             model_last_used = preset_manager.load_last_used("resolution", model)
             model_defaults = resolution_defaults([model])
-            
-            if model_last_used:
-                resolution_cache[model] = preset_manager.merge_config(model_defaults, model_last_used)
-            else:
-                resolution_cache[model] = model_defaults
+            resolution_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
         
         # === OUTPUT TAB ===
-        # Load output settings for PRIMARY model
-        primary_output_last_used = preset_manager.load_last_used("output", primary_model)
+        primary_output_last_used = preset_manager.load_last_used("output", all_models[0])
         out_defaults = output_defaults(all_models)
+        primary_output_settings = preset_manager.merge_config(out_defaults, primary_output_last_used) if primary_output_last_used else out_defaults
         
-        if primary_output_last_used:
-            primary_output_settings = preset_manager.merge_config(out_defaults, primary_output_last_used)
-        else:
-            primary_output_settings = out_defaults
-        
-        # Build output_cache for ALL models (per-model output settings duplication)
-        # FIXED: Output settings now cached per-model like resolution settings
         output_cache = {}
         for model in all_models:
             model_output_last_used = preset_manager.load_last_used("output", model)
             model_out_defaults = output_defaults([model])
-            
-            if model_output_last_used:
-                output_cache[model] = preset_manager.merge_config(model_out_defaults, model_output_last_used)
-            else:
-                output_cache[model] = model_out_defaults
+            output_cache[model] = preset_manager.merge_config(model_out_defaults, model_output_last_used) if model_output_last_used else model_out_defaults
         
-        # Return primary settings AND per-model caches for both tabs
-        return primary_res_settings, resolution_cache, primary_output_settings, output_cache
+        # === SEEDVR2 TAB ===
+        seedvr2_cache = {}
+        for model in seedvr2_models:
+            model_last_used = preset_manager.load_last_used("seedvr2", model)
+            model_defaults = seedvr2_defaults(model)
+            seedvr2_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
+        
+        # === GAN TAB ===
+        gan_cache = {}
+        for model in gan_models:
+            model_last_used = preset_manager.load_last_used("gan", model)
+            model_defaults = gan_defaults(BASE_DIR)
+            gan_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
+        
+        # === RIFE TAB ===
+        rife_cache = {}
+        for model in rife_models:
+            model_last_used = preset_manager.load_last_used("rife", model)
+            model_defaults = rife_defaults(model)
+            rife_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
+        
+        # === FLASHVSR TAB ===
+        flashvsr_cache = {}
+        for model in flashvsr_models:
+            model_last_used = preset_manager.load_last_used("flashvsr", model)
+            model_defaults = flashvsr_defaults(model)
+            flashvsr_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
+        
+        # === FACE TAB ===
+        face_cache = {}
+        for model in all_models[:10]:  # Limit to first 10 to avoid excessive loading
+            model_last_used = preset_manager.load_last_used("face", model)
+            model_defaults = face_defaults(all_models)
+            face_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
+        
+        return (primary_res_settings, resolution_cache, primary_output_settings, output_cache,
+                seedvr2_cache, gan_cache, rife_cache, flashvsr_cache, face_cache)
 
-    # Load all startup presets
-    startup_res_settings, startup_res_cache, startup_output_settings, startup_output_cache = load_all_startup_presets()
+    # Load all startup presets for ALL tabs
+    (startup_res_settings, startup_res_cache, startup_output_settings, startup_output_cache,
+     startup_seedvr2_cache, startup_gan_cache, startup_rife_cache, startup_flashvsr_cache, startup_face_cache) = load_all_startup_presets()
     
     with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=css_overrides) as demo:
         # Shared state for cross-tab communication
-        # AUTO-POPULATED with last-used resolution AND output settings for ALL models on startup
+        # AUTO-POPULATED with last-used presets for ALL tabs on startup (Resolution, Output, SeedVR2, GAN, RIFE, FlashVSR+, Face)
         shared_state = gr.State({
             "health_banner": {"text": health_text},
             "seed_controls": {
@@ -242,10 +269,15 @@ def main():
                 "current_model": None,
                 "last_input_path": "",
                 "last_output_dir": "",
-                # AUTO-LOADED per-model resolution cache (all models restored at startup)
+                "last_output_path": None,  # FIXED: Added for pinned comparison feature
+                # AUTO-LOADED per-model caches for ALL tabs (restored at startup)
                 "resolution_cache": startup_res_cache,
-                # FIXED: AUTO-LOADED per-model output cache (all models restored at startup)
                 "output_cache": startup_output_cache,
+                "seedvr2_cache": startup_seedvr2_cache,  # NEW: SeedVR2 presets per model
+                "gan_cache": startup_gan_cache,  # NEW: GAN presets per model
+                "rife_cache": startup_rife_cache,  # NEW: RIFE presets per model
+                "flashvsr_cache": startup_flashvsr_cache,  # NEW: FlashVSR+ presets per model
+                "face_cache": startup_face_cache,  # NEW: Face presets per model
                 # AUTO-LOADED from Output tab last-used presets (primary model UI values)
                 "png_padding_val": startup_output_settings.get("png_padding", 6),
                 "png_keep_basename_val": startup_output_settings.get("png_keep_basename", True),

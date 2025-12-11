@@ -753,10 +753,11 @@ def _process_single_file(
             output_video = result.output_path if result.output_path.lower().endswith(".mp4") else None
             output_image = result.output_path if not result.output_path.lower().endswith(".mp4") else None
 
-            # Update state
+            # Update state - track both directory AND file path for pinned comparison
             try:
                 outp = Path(result.output_path)
                 seed_controls["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                seed_controls["last_output_path"] = str(outp) if outp.is_file() else None
             except Exception:
                 pass
 

@@ -31,36 +31,40 @@ def seedvr2_tab(
     All logic, callbacks, and state management internal to this function.
     """
     # Get defaults and last used preset
+    # FIXED: Use startup cache for current model instead of re-loading
     defaults = seedvr2_defaults()
-    last_used_name = preset_manager.get_last_used_name("seedvr2", defaults.get("dit_model"))
-    last_used = preset_manager.load_last_used("seedvr2", defaults.get("dit_model"))
-
-    # Handle last used preset loading with better error reporting
-    if last_used_name:
-        if last_used is None:
-            # Update health banner with warning
+    default_model = defaults.get("dit_model")
+    
+    # Try to load from startup cache first (already loaded in secourses_app.py)
+    seedvr2_cache = shared_state.value.get("seed_controls", {}).get("seedvr2_cache", {})
+    cached_for_model = seedvr2_cache.get(default_model)
+    
+    if cached_for_model:
+        # Use pre-loaded settings from startup
+        merged_defaults = cached_for_model
+        last_used_name = preset_manager.get_last_used_name("seedvr2", default_model)
+        
+        def update_success(state):
+            existing = state["health_banner"]["text"]
+            success_msg = f"✅ SeedVR2: Restored last-used preset for {default_model}"
+            state["health_banner"]["text"] = existing + "\n" + success_msg if existing else success_msg
+            return state
+        shared_state.value = update_success(shared_state.value)
+    else:
+        # Fallback: Load on-demand if cache missed
+        last_used_name = preset_manager.get_last_used_name("seedvr2", default_model)
+        last_used = preset_manager.load_last_used("seedvr2", default_model)
+        
+        if last_used_name and last_used is None:
             def update_warning(state):
                 existing = state["health_banner"]["text"]
                 warning = f"⚠️ Last used SeedVR2 preset '{last_used_name}' not found or corrupted; loaded defaults."
-                if existing:
-                    state["health_banner"]["text"] = existing + "\n" + warning
-                else:
-                    state["health_banner"]["text"] = warning
+                state["health_banner"]["text"] = existing + "\n" + warning if existing else warning
                 return state
             shared_state.value = update_warning(shared_state.value)
-        else:
-            # Successfully loaded last used preset
-            def update_success(state):
-                existing = state["health_banner"]["text"]
-                success_msg = f"✅ Loaded last used SeedVR2 preset: '{last_used_name}'"
-                if existing:
-                    state["health_banner"]["text"] = existing + "\n" + success_msg
-                else:
-                    state["health_banner"]["text"] = success_msg
-                return state
-            shared_state.value = update_success(shared_state.value)
-
-    merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+        
+        merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+    
     values = [merged_defaults[k] for k in SEEDVR2_ORDER]
 
     # Build service callbacks

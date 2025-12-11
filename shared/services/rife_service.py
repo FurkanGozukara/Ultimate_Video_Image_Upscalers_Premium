@@ -954,8 +954,16 @@ def build_rife_callbacks(
 
             meta_md = f"Input: {settings['input_path']}\nOutput: {final_output_path}\nProcessing: {steps_str}"
 
-            # Log the run
+            # Log the run and update state with output path
             if final_output_path:
+                # Track output path for pinned comparison feature
+                try:
+                    outp = Path(final_output_path)
+                    seed_controls["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                    seed_controls["last_output_path"] = str(outp) if outp.is_file() else None
+                except Exception:
+                    pass
+                
                 run_logger.write_summary(
                     Path(final_output_path),
                     {

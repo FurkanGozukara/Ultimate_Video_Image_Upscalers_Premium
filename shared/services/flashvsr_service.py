@@ -518,6 +518,17 @@ def build_flashvsr_callbacks(
                 mode="slider" if output_path and output_path.endswith(".mp4") else "native"
             )
             
+            # Track output path for pinned comparison feature
+            if output_path:
+                try:
+                    outp = Path(output_path)
+                    seed_controls = state.get("seed_controls", {})
+                    seed_controls["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                    seed_controls["last_output_path"] = str(outp) if outp.is_file() else None
+                    state["seed_controls"] = seed_controls
+                except Exception:
+                    pass
+            
             # Log run
             run_logger.write_summary(
                 Path(output_path) if output_path else output_dir,

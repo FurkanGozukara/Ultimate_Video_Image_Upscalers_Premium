@@ -840,7 +840,8 @@ def build_gan_callbacks(
                 if relocated or result.output_path:
                     try:
                         outp = Path(relocated or result.output_path)
-                        state["seed_controls"]["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                        seed_controls["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
+                        seed_controls["last_output_path"] = str(outp) if outp.is_file() else None
                     except Exception:
                         pass
                 run_logger.write_summary(

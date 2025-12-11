@@ -35,34 +35,40 @@ def gan_tab(
     )
 
     # Get defaults and last used
+    # FIXED: Use startup cache and check ACTUAL current model, not just "default"
     defaults = service["defaults"]
-    last_used_name = preset_manager.get_last_used_name("gan", defaults.get("model", "default"))
-    last_used = preset_manager.load_last_used("gan", defaults.get("model", "default"))
-
-    # Handle last used preset loading with better error reporting
-    if last_used_name:
-        if last_used is None:
+    default_model = defaults.get("model", "default")
+    
+    # Try to load from startup cache first (already loaded in secourses_app.py)
+    gan_cache = shared_state.value.get("seed_controls", {}).get("gan_cache", {})
+    cached_for_model = gan_cache.get(default_model)
+    
+    if cached_for_model:
+        # Use pre-loaded settings from startup
+        merged_defaults = cached_for_model
+        last_used_name = preset_manager.get_last_used_name("gan", default_model)
+        
+        def update_success(state):
+            existing = state["health_banner"]["text"]
+            success_msg = f"✅ GAN: Restored last-used preset for {default_model}"
+            state["health_banner"]["text"] = existing + "\n" + success_msg if existing else success_msg
+            return state
+        shared_state.value = update_success(shared_state.value)
+    else:
+        # Fallback: Load on-demand if cache missed
+        last_used_name = preset_manager.get_last_used_name("gan", default_model)
+        last_used = preset_manager.load_last_used("gan", default_model)
+        
+        if last_used_name and last_used is None:
             def update_warning(state):
                 existing = state["health_banner"]["text"]
-                warning = f"⚠️ Last used GAN preset '{last_used_name}' not found or corrupted; loaded defaults."
-                if existing:
-                    state["health_banner"]["text"] = existing + "\n" + warning
-                else:
-                    state["health_banner"]["text"] = warning
+                warning = f"⚠️ Last used GAN preset '{last_used_name}' for model '{default_model}' not found; loaded defaults."
+                state["health_banner"]["text"] = existing + "\n" + warning if existing else warning
                 return state
             shared_state.value = update_warning(shared_state.value)
-        else:
-            def update_success(state):
-                existing = state["health_banner"]["text"]
-                success_msg = f"✅ Loaded last used GAN preset: '{last_used_name}'"
-                if existing:
-                    state["health_banner"]["text"] = existing + "\n" + success_msg
-                else:
-                    state["health_banner"]["text"] = success_msg
-                return state
-            shared_state.value = update_success(shared_state.value)
-
-    merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+        
+        merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+    
     values = [merged_defaults[k] for k in GAN_ORDER]
 
     # GPU availability check (like SeedVR2 tab)

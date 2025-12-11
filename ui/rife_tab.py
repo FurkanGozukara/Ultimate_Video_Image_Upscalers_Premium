@@ -33,21 +33,40 @@ def rife_tab(
     )
 
     # Get defaults and last used
+    # FIXED: Use startup cache and check ACTUAL current model
     defaults = service["defaults"]
-    last_used_name = preset_manager.get_last_used_name("rife", defaults.get("model", "default"))
-    last_used = preset_manager.load_last_used("rife", defaults.get("model", "default"))
-    if last_used_name and last_used is None:
-        def update_warning(state):
+    default_model = defaults.get("rife_model", "default")
+    
+    # Try to load from startup cache first (already loaded in secourses_app.py)
+    rife_cache = shared_state.value.get("seed_controls", {}).get("rife_cache", {})
+    cached_for_model = rife_cache.get(default_model)
+    
+    if cached_for_model:
+        # Use pre-loaded settings from startup
+        merged_defaults = cached_for_model
+        last_used_name = preset_manager.get_last_used_name("rife", default_model)
+        
+        def update_success(state):
             existing = state["health_banner"]["text"]
-            warning = f"Last used RIFE preset '{last_used_name}' not found; loaded defaults."
-            if existing:
-                state["health_banner"]["text"] = existing + "\n" + warning
-            else:
-                state["health_banner"]["text"] = warning
+            success_msg = f"✅ RIFE: Restored last-used preset for {default_model}"
+            state["health_banner"]["text"] = existing + "\n" + success_msg if existing else success_msg
             return state
-        shared_state.value = update_warning(shared_state.value)
-
-    merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+        shared_state.value = update_success(shared_state.value)
+    else:
+        # Fallback: Load on-demand if cache missed
+        last_used_name = preset_manager.get_last_used_name("rife", default_model)
+        last_used = preset_manager.load_last_used("rife", default_model)
+        
+        if last_used_name and last_used is None:
+            def update_warning(state):
+                existing = state["health_banner"]["text"]
+                warning = f"⚠️ Last used RIFE preset '{last_used_name}' for model '{default_model}' not found; loaded defaults."
+                state["health_banner"]["text"] = existing + "\n" + warning if existing else warning
+                return state
+            shared_state.value = update_warning(shared_state.value)
+        
+        merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+    
     values = [merged_defaults[k] for k in RIFE_ORDER]
 
     # GPU availability check (like SeedVR2/GAN tabs)
