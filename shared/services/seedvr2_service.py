@@ -917,8 +917,16 @@ def build_seedvr2_callbacks(
         if not canceled:
             return gr.Markdown.update(value="No active process to cancel"), ""
 
-        # Check for partial outputs that can be compiled
-        temp_chunks_dir = Path(global_settings["temp_dir"]) / "chunks"
+        # ENHANCED: Check multiple locations for partial outputs
+        # 1. External chunked processing (PySceneDetect chunks)
+        # 2. Single-pass outputs in temp directory
+        # 3. Any incomplete output files in output directory
+        
+        compiled_output = None
+        temp_base = Path(global_settings["temp_dir"])
+        temp_chunks_dir = temp_base / "chunks"
+        
+        # Try to find and compile chunk-based partial outputs
         if temp_chunks_dir.exists():
             try:
                 from shared.chunking import detect_resume_state, concat_videos
@@ -926,8 +934,6 @@ def build_seedvr2_callbacks(
 
                 partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
                 partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
-
-                compiled_output = None
 
                 # Try to compile video chunks
                 if completed_chunks and len(completed_chunks) > 0:
@@ -954,15 +960,44 @@ def build_seedvr2_callbacks(
 
                     compiled_output = str(partial_target)
 
-                if compiled_output:
-                    return gr.Markdown.update(value=f"⏹️ Cancelled - Partial output compiled: {Path(compiled_output).name}"), f"Partial results saved to: {compiled_output}"
-                else:
-                    return gr.Markdown.update(value="⏹️ Cancelled - No partial outputs to compile"), "Processing was cancelled before any chunks were completed"
-
             except Exception as e:
-                return gr.Markdown.update(value=f"⏹️ Cancelled - Error compiling partials: {str(e)}"), "Cancellation successful but partial compilation failed"
+                pass  # Continue to check other locations
+        
+        # NEW: Check for single-pass partial outputs in temp directory
+        if not compiled_output:
+            try:
+                # Look for any mp4/png files created in temp during processing
+                temp_files = []
+                for ext in [".mp4", ".avi", ".mov", ".mkv"]:
+                    temp_files.extend(list(temp_base.glob(f"*{ext}")))
+                for ext in [".png", ".jpg", ".jpeg"]:
+                    temp_files.extend(list(temp_base.glob(f"*{ext}")))
+                
+                # Sort by modification time (most recent first)
+                temp_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                
+                if temp_files:
+                    # Copy most recent partial output to outputs folder
+                    most_recent = temp_files[0]
+                    from shared.path_utils import collision_safe_path
+                    
+                    final_output = Path(output_dir) / f"cancelled_partial_{most_recent.name}"
+                    final_output = collision_safe_path(final_output)
+                    
+                    if most_recent.is_file():
+                        shutil.copy2(most_recent, final_output)
+                        compiled_output = str(final_output)
+                    elif most_recent.is_dir():
+                        shutil.copytree(most_recent, final_output, dirs_exist_ok=True)
+                        compiled_output = str(final_output)
+                        
+            except Exception as e:
+                pass  # Silently continue
 
-        return gr.Markdown.update(value="⏹️ Processing cancelled"), "No partial outputs found to compile"
+        if compiled_output:
+            return gr.Markdown.update(value=f"⏹️ Cancelled - Partial output saved: {Path(compiled_output).name}"), f"Partial results saved to: {compiled_output}"
+        else:
+            return gr.Markdown.update(value="⏹️ Cancelled - No partial outputs found"), "Processing was cancelled. No recoverable partial outputs were found."
 
     def open_outputs_folder(state: Dict[str, Any]):
         """Open the outputs folder in file explorer - uses live global settings."""
@@ -1629,16 +1664,21 @@ def build_seedvr2_callbacks(
             proc_thread = threading.Thread(target=processing_thread, daemon=True)
             proc_thread.start()
 
-            # Stream progress updates with gr.Progress integration
+            # Stream progress updates with gr.Progress integration and throttling
             chunk_count = 0
             total_chunks_estimate = 1
             last_progress_value = 0.0
+            last_ui_update_time = 0
+            ui_update_throttle = 0.5  # Only update UI every 0.5 seconds
+            accumulated_messages = []
             
             while proc_thread.is_alive() or not progress_queue.empty():
                 try:
                     update_type, data = progress_queue.get(timeout=0.1)
+                    current_time = time.time()
+                    
                     if update_type == "progress":
-                        # Update gr.Progress if available with intelligent parsing
+                        # Always update gr.Progress for responsiveness
                         if progress:
                             import re
                             
@@ -1677,21 +1717,48 @@ def build_seedvr2_callbacks(
                                 # Generic progress update - use last known value
                                 progress(last_progress_value, desc=data[:100] if data else "Processing...")
                         
-                        yield (
-                            f"⚙️ Processing: {data}",
-                            f"Progress: {data}",
-                            "",
-                            None,
-                            None,
-                            chunk_info or "Processing...",
-                            "",
-                            "",
-                            gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{data}</div>'),
-                            gr.ImageSlider.update(value=None),
-                            gr.HTML.update(value="", visible=False),
-                            gr.Gallery.update(visible=False),
-                            state
+                        # Accumulate messages for throttled UI updates
+                        accumulated_messages.append(data)
+                        
+                        # Only update UI if significant event or enough time passed
+                        is_significant = (
+                            "chunk" in data.lower() or 
+                            "complete" in data.lower() or
+                            "finished" in data.lower() or
+                            "error" in data.lower() or
+                            "✅" in data or "❌" in data
                         )
+                        
+                        should_update_ui = (
+                            is_significant or 
+                            (current_time - last_ui_update_time) >= ui_update_throttle
+                        )
+                        
+                        if should_update_ui:
+                            # Join recent messages (last 5)
+                            recent_messages = accumulated_messages[-5:]
+                            display_text = "\n".join(recent_messages[-3:])  # Show last 3 lines
+                            
+                            yield (
+                                f"⚙️ Processing...",
+                                f"Progress: {display_text}",
+                                "",
+                                None,
+                                None,
+                                chunk_info or "Processing...",
+                                "",
+                                "",
+                                gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px; white-space: pre-wrap;">{display_text}</div>'),
+                                gr.ImageSlider.update(value=None),
+                                gr.HTML.update(value="", visible=False),
+                                gr.Gallery.update(visible=False),
+                                state
+                            )
+                            last_ui_update_time = current_time
+                            
+                            # Clear old accumulated messages (keep last 10 for context)
+                            if len(accumulated_messages) > 10:
+                                accumulated_messages = accumulated_messages[-10:]
                     elif update_type == "complete":
                         status, logs, output_video, output_image, chunk_info, chunk_summary, chunk_progress = data
                         processing_complete = True

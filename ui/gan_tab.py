@@ -484,20 +484,49 @@ def gan_tab(
         outputs=status_box
     )
 
-    # Preset management
+    # Preset management - use selected model context
+    # First, add model selector for preset context
+    with gr.Accordion("📌 Preset Model Context", open=False):
+        gr.Markdown("*Presets are saved per-model. Select which model's presets to save/load:*")
+        preset_model_selector = gr.Dropdown(
+            label="Preset Context Model",
+            choices=service["model_scanner"](),
+            value=values[4],  # gan_model default
+            info="Presets are saved/loaded for this specific model"
+        )
+    
+    # Wire up preset operations with model context
     save_preset_btn.click(
-        fn=lambda name, *vals: service["save_preset"](name, "default", list(vals)),
-        inputs=[preset_name] + inputs_list,
+        fn=lambda name, model, *vals: service["save_preset"](name, model, list(vals)),
+        inputs=[preset_name, preset_model_selector] + inputs_list,
         outputs=[preset_dropdown, preset_status]
     )
 
     load_preset_btn.click(
-        fn=lambda preset, *vals: service["load_preset"](preset, "default", list(vals)),
-        inputs=[preset_dropdown] + inputs_list,
+        fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals)),
+        inputs=[preset_dropdown, preset_model_selector] + inputs_list,
         outputs=inputs_list + [preset_status]
     )
 
     safe_defaults_btn.click(
         fn=service["safe_defaults"],
         outputs=inputs_list
+    )
+    
+    # Auto-sync preset model selector with main model selection
+    gan_model.change(
+        fn=lambda m: gr.Dropdown.update(value=m),
+        inputs=gan_model,
+        outputs=preset_model_selector
+    )
+    
+    # Refresh presets when preset model selector changes
+    def refresh_presets_for_model(model):
+        presets = preset_manager.list_presets("gan", model)
+        return gr.Dropdown.update(choices=presets, value="")
+    
+    preset_model_selector.change(
+        fn=refresh_presets_for_model,
+        inputs=preset_model_selector,
+        outputs=preset_dropdown
     )

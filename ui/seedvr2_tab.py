@@ -69,13 +69,24 @@ def seedvr2_tab(
         shared_state, output_dir, temp_dir
     )
 
-    # GPU hint and macOS detection with early validation
+    # GPU hint and macOS detection with early validation + ffmpeg check
     import platform
     is_macos = platform.system() == "Darwin"
     cuda_available = False
     cuda_count = 0
     gpu_hint = "CUDA detection in progress..."
     compile_available = False
+    ffmpeg_available = False
+
+    # Check ffmpeg availability up front
+    try:
+        from shared.error_handling import check_ffmpeg_available
+        ffmpeg_available, ffmpeg_msg = check_ffmpeg_available()
+        if not ffmpeg_available:
+            gpu_hint = f"❌ CRITICAL: {ffmpeg_msg}\nffmpeg is REQUIRED for video processing. Install ffmpeg and restart."
+    except Exception:
+        ffmpeg_available = False
+        gpu_hint = "❌ CRITICAL: ffmpeg not found. Install ffmpeg to enable video processing."
 
     try:
         import torch
@@ -96,6 +107,11 @@ def seedvr2_tab(
             else:
                 gpu_hint = "⚠️ CUDA not available - GPU-only features disabled. Processing will use CPU (significantly slower)"
                 compile_available = False
+        
+        # Append ffmpeg status to GPU hint
+        if not ffmpeg_available:
+            gpu_hint = f"❌ CRITICAL: ffmpeg not found\n{gpu_hint}"
+        
     except Exception as e:
         gpu_hint = f"❌ CUDA detection failed: {str(e)}"
         cuda_available = False
@@ -192,10 +208,16 @@ def seedvr2_tab(
             # Model loading status with periodic updates
             model_status = gr.Markdown("### 🔧 Model Status\nNo models loaded", elem_classes="model-status")
             
-            # Model management buttons
+            # Model management buttons with clarification
+            gr.Markdown("""
+            **ℹ️ Model Unloading (Subprocess Mode):**
+            - In subprocess mode (current), models are automatically unloaded after each run
+            - These buttons force CUDA cache clearing for manual VRAM management
+            - **In-app mode** (when implemented) will cache models between runs - then these buttons will actually unload persistent models
+            """)
             with gr.Row():
-                unload_model_btn = gr.Button("🗑️ Unload Current Model", variant="secondary", size="sm")
-                unload_all_models_btn = gr.Button("🗑️ Unload All Models", variant="stop", size="sm")
+                unload_model_btn = gr.Button("🧹 Clear CUDA Cache", variant="secondary", size="sm")
+                unload_all_models_btn = gr.Button("🧹 Clear All CUDA Caches", variant="stop", size="sm")
             model_unload_status = gr.Markdown("", visible=False)
             
             # Timer for periodic model status updates
@@ -604,12 +626,13 @@ def seedvr2_tab(
                 value=global_settings.get("face_global", False)
             )
 
-            # Action buttons
+            # Action buttons with ffmpeg gating
             with gr.Row():
                 upscale_btn = gr.Button(
-                    "🚀 Upscale (subprocess)",
-                    variant="primary",
-                    size="lg"
+                    "🚀 Upscale (subprocess)" if ffmpeg_available else "❌ Upscale (ffmpeg required)",
+                    variant="primary" if ffmpeg_available else "stop",
+                    size="lg",
+                    interactive=ffmpeg_available
                 )
                 cancel_confirm = gr.Checkbox(
                     label="Confirm cancel",
@@ -620,9 +643,25 @@ def seedvr2_tab(
                     variant="stop"
                 )
                 preview_btn = gr.Button(
-                    "👁️ First-frame Preview",
-                    size="lg"
+                    "👁️ First-frame Preview" if ffmpeg_available else "❌ Preview (ffmpeg required)",
+                    size="lg",
+                    interactive=ffmpeg_available
                 )
+            
+            if not ffmpeg_available:
+                gr.Markdown("""
+                <div style="background: #ffebee; padding: 12px; border-radius: 8px; border: 2px solid #f44336;">
+                    <strong>⚠️ ffmpeg NOT FOUND</strong><br>
+                    Video processing requires ffmpeg to be installed and available in your system PATH.<br>
+                    <br>
+                    <strong>Installation:</strong><br>
+                    • Windows: Download from <a href="https://ffmpeg.org/download.html" target="_blank">ffmpeg.org</a> and add to PATH<br>
+                    • Linux: <code>sudo apt install ffmpeg</code> or <code>sudo yum install ffmpeg</code><br>
+                    • macOS: <code>brew install ffmpeg</code><br>
+                    <br>
+                    After installation, restart the application.
+                </div>
+                """)
 
             # Preset management
             preset_dropdown, preset_name, save_preset_btn, load_preset_btn, preset_status, safe_defaults_btn = preset_section(
@@ -788,22 +827,42 @@ def seedvr2_tab(
         outputs=[input_cache_msg, shared_state, resolution, max_resolution, auto_res_msg]
     )
 
-    # Model caching and status updates
-    def cache_model(m, state):
+    # Model caching and status updates with preset reload
+    def cache_model_and_reload_preset(m, state, *current_vals):
+        """Cache model selection and reload that model's last-used preset"""
         state["seed_controls"]["current_model"] = m
-        # Trigger model loading when model changes
+        
+        # Load last-used preset for this model
+        last_used_preset = preset_manager.load_last_used("seedvr2", m)
+        
+        # Get model status
         try:
             from shared.model_manager import get_model_manager
             model_manager = get_model_manager()
             status_text = service.get("get_model_loading_status", lambda: "Model status unavailable")()
-            return gr.Markdown.update(value=f"✅ Model selected: {m}", visible=True), gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
+            model_status_update = gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
         except Exception as e:
-            return gr.Markdown.update(value=f"✅ Model selected: {m}", visible=True), gr.Markdown.update(value=f"### 🔧 Model Status\nError: {str(e)}")
+            model_status_update = gr.Markdown.update(value=f"### 🔧 Model Status\nError: {str(e)}")
+        
+        # If last-used preset exists, merge with current values
+        if last_used_preset:
+            current_dict = dict(zip(SEEDVR2_ORDER, current_vals))
+            merged = preset_manager.merge_config(current_dict, last_used_preset)
+            new_vals = [merged[k] for k in SEEDVR2_ORDER]
+            cache_msg = gr.Markdown.update(
+                value=f"✅ Model '{m}' selected - loaded last-used preset", 
+                visible=True
+            )
+            return [cache_msg, model_status_update] + new_vals
+        else:
+            # No last-used preset, keep current values
+            cache_msg = gr.Markdown.update(value=f"✅ Model '{m}' selected (no saved preset)", visible=True)
+            return [cache_msg, model_status_update] + list(current_vals)
 
     dit_model.change(
-        fn=lambda m, state: cache_model(m, state),
-        inputs=[dit_model, shared_state],
-        outputs=[model_cache_msg, model_status]
+        fn=cache_model_and_reload_preset,
+        inputs=[dit_model, shared_state] + inputs_list,
+        outputs=[model_cache_msg, model_status] + inputs_list
     )
 
     # Update model status periodically
@@ -839,28 +898,47 @@ def seedvr2_tab(
         outputs=model_status
     )
     
-    # Model unloading callbacks
+    # Model unloading callbacks (CUDA cache management in subprocess mode)
     def unload_current_model():
-        """Unload the current SeedVR2 model"""
+        """Clear CUDA cache (subprocess mode) or unload model (in-app mode when implemented)"""
         from shared.model_manager import get_model_manager
         
         try:
+            # In subprocess mode, just clear CUDA cache manually
+            # In in-app mode (when implemented), this will actually unload the model
+            try:
+                from shared.gpu_utils import clear_cuda_cache
+                clear_cuda_cache()
+                msg = "✅ CUDA cache cleared. Note: In subprocess mode, models reload each run automatically."
+            except Exception:
+                msg = "⚠️ CUDA cache clear attempted (may not be available)"
+            
             model_manager = get_model_manager()
-            model_manager.unload_all_models()  # Unload all for simplicity
-            return gr.Markdown.update(value="✅ Model unloaded successfully. VRAM cleared.", visible=True), service["get_model_loading_status"]()
+            model_manager.unload_all_models()  # Update tracking state
+            
+            return gr.Markdown.update(value=msg, visible=True), service["get_model_loading_status"]()
         except Exception as e:
-            return gr.Markdown.update(value=f"❌ Error unloading model: {str(e)}", visible=True), service["get_model_loading_status"]()
+            return gr.Markdown.update(value=f"❌ Error: {str(e)}", visible=True), service["get_model_loading_status"]()
     
     def unload_all_models():
-        """Unload all models from all pipelines"""
+        """Clear all CUDA caches (subprocess mode) or unload all models (in-app mode when implemented)"""
         from shared.model_manager import get_model_manager
         
         try:
+            # Force aggressive CUDA cache clearing
+            try:
+                from shared.gpu_utils import clear_cuda_cache
+                clear_cuda_cache()
+                msg = "✅ All CUDA caches cleared. Subprocess mode: Models reload each run."
+            except Exception:
+                msg = "⚠️ CUDA cache clear attempted"
+            
             model_manager = get_model_manager()
             model_manager.unload_all_models()
-            return gr.Markdown.update(value="✅ All models unloaded. VRAM fully cleared.", visible=True), service["get_model_loading_status"]()
+            
+            return gr.Markdown.update(value=msg, visible=True), service["get_model_loading_status"]()
         except Exception as e:
-            return gr.Markdown.update(value=f"❌ Error unloading models: {str(e)}", visible=True), service["get_model_loading_status"]()
+            return gr.Markdown.update(value=f"❌ Error: {str(e)}", visible=True), service["get_model_loading_status"]()
     
     unload_model_btn.click(
         fn=unload_current_model,
