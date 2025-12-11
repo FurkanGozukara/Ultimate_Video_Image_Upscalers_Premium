@@ -290,7 +290,7 @@ def build_resolution_callbacks(
         # Update shared state with resolution settings for all pipelines
         seed_controls = state.get("seed_controls", {})
         
-        # Cache resolution values for all upscalers to use
+        # Cache resolution values for all upscalers to use (GLOBAL level)
         seed_controls["resolution_val"] = settings_dict.get("target_resolution", 1080)
         seed_controls["max_resolution_val"] = settings_dict.get("max_target_resolution", 0)
         seed_controls["enable_max_target"] = settings_dict.get("enable_max_target", True)
@@ -302,6 +302,22 @@ def build_resolution_callbacks(
         seed_controls["scene_threshold"] = settings_dict.get("scene_threshold", 27.0)
         seed_controls["min_scene_len"] = settings_dict.get("min_scene_len", 2.0)
         
+        # FIXED: Also cache per-model for proper isolation as requested
+        # Write to per-model cache so each model can have different resolution settings
+        model_name = settings_dict.get("model", "")
+        if model_name:
+            model_cache = _ensure_model_cache(model_name, state)
+            model_cache["resolution_val"] = settings_dict.get("target_resolution", 1080)
+            model_cache["max_resolution_val"] = settings_dict.get("max_target_resolution", 0)
+            model_cache["enable_max_target"] = settings_dict.get("enable_max_target", True)
+            model_cache["auto_resolution"] = settings_dict.get("auto_resolution", True)
+            model_cache["chunk_size_sec"] = float(settings_dict.get("chunk_size", 0) or 0)
+            model_cache["chunk_overlap_sec"] = float(settings_dict.get("chunk_overlap", 0) or 0)
+            model_cache["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", False)
+            model_cache["per_chunk_cleanup"] = settings_dict.get("per_chunk_cleanup", False)
+            model_cache["scene_threshold"] = float(settings_dict.get("scene_threshold", 27.0))
+            model_cache["min_scene_len"] = float(settings_dict.get("min_scene_len", 2.0))
+        
         state["seed_controls"] = seed_controls
         
         status_msg = f"✅ Applied resolution settings to ALL upscalers:\n"
@@ -311,6 +327,8 @@ def build_resolution_callbacks(
         if seed_controls['chunk_size_sec'] > 0:
             status_msg += f"- Chunking: {seed_controls['chunk_size_sec']}s (overlap: {seed_controls['chunk_overlap_sec']}s)\n"
             status_msg += f"- Scene Detection: threshold={seed_controls['scene_threshold']}, min_len={seed_controls['min_scene_len']}s\n"
+        if model_name:
+            status_msg += f"\n💾 Settings also saved for model: {model_name}"
         
         return gr.Markdown.update(value=status_msg), state
 

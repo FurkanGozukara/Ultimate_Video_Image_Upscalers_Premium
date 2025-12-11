@@ -280,18 +280,9 @@ class Runner:
         if on_progress:
             on_progress(f"Executing command: {cmd_str}\n")
 
-        # Compile guardrail: if compile requested on Windows but vcvars is missing, disable compile flags with a warning.
-        if platform.system() == "Windows" and (settings.get("compile_dit") or settings.get("compile_vae")):
-            from .health import is_vs_build_tools_available
-            if not is_vs_build_tools_available():
-                warn_msg = "⚠️ VS Build Tools not found; torch.compile requires Visual Studio Build Tools. Install 'Desktop development with C++' workload."
-                if on_progress:
-                    on_progress(f"{warn_msg}\n")
-                settings["compile_dit"] = False
-                settings["compile_vae"] = False
-                cmd = [c for c in cmd if c not in ("--compile_dit", "--compile_vae")]
-
-        cmd = self._maybe_wrap_with_vcvars(cmd, settings)
+        # FIXED: Pass on_progress to _maybe_wrap_with_vcvars for transparent warning surfacing
+        # vcvars wrapper now handles compile detection and warning display
+        cmd = self._maybe_wrap_with_vcvars(cmd, settings, on_progress)
 
         if on_progress:
             on_progress("Starting SeedVR2 subprocess (CLI will handle model loading)...\n")
@@ -899,7 +890,7 @@ class Runner:
 
         return cmd
 
-    def _maybe_wrap_with_vcvars(self, cmd: List[str], settings: Dict[str, Any]) -> List[str]:
+    def _maybe_wrap_with_vcvars(self, cmd: List[str], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> List[str]:
         """
         On Windows, wrap command with vcvarsall.bat to activate C++ toolchain.
         
@@ -910,6 +901,8 @@ class Runner:
         Behavior:
         - If compile flags are set: REQUIRE vcvars, disable compile if missing
         - If no compile flags: OPTIONALLY wrap with vcvars if available (best-effort C++ support)
+        
+        FIXED: Now surfaces warnings to UI via on_progress callback for transparency
         """
         if platform.system() != "Windows":
             return cmd
@@ -920,7 +913,14 @@ class Runner:
         if not vcvars_path:
             if compile_requested:
                 # Compile was requested but vcvars not found - disable compile flags
-                self._log_lines.append("⚠️ VS Build Tools not found; disabling torch.compile for compatibility.")
+                warning_msg = "⚠️ VS Build Tools not found; disabling torch.compile for compatibility.\n" \
+                             "Install 'Desktop development with C++' workload from Visual Studio Installer for torch.compile support.\n"
+                self._log_lines.append(warning_msg.strip())
+                
+                # FIXED: Surface warning to UI so user knows compile was disabled
+                if on_progress:
+                    on_progress(warning_msg)
+                
                 # Remove compile-related flags from command
                 filtered_cmd = []
                 skip_next = False
@@ -940,7 +940,10 @@ class Runner:
                 # No compile requested and vcvars not found - proceed without vcvars
                 # Log a warning but don't block execution
                 if not hasattr(self, '_vcvars_warning_shown'):
-                    self._log_lines.append("ℹ️ VS Build Tools not found. torch.compile will be unavailable.")
+                    info_msg = "ℹ️ VS Build Tools not found. torch.compile will be unavailable.\n"
+                    self._log_lines.append(info_msg.strip())
+                    if on_progress:
+                        on_progress(info_msg)
                     self._vcvars_warning_shown = True
                 return cmd
         
@@ -999,8 +1002,9 @@ class Runner:
         cmd = self._build_rife_cmd(cli_path, input_path, predicted_output, settings)
         
         # Wrap with vcvars for C++ toolchain support (Windows only, best-effort)
+        # FIXED: Pass on_progress for transparent warning surfacing
         if self._active_mode == "subprocess":
-            cmd = self._maybe_wrap_with_vcvars(cmd, settings)
+            cmd = self._maybe_wrap_with_vcvars(cmd, settings, on_progress)
 
         # In-app mode (not cancelable)
         if self._active_mode == "in_app":

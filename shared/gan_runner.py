@@ -429,8 +429,69 @@ def _run_gan_video(
                         on_progress(f"Warning: Frame {frame_path.name} failed\n")
 
         if cancel_event and cancel_event.is_set():
-            # Compile partial results if any frames were processed
-            pass
+            # FIXED: Compile partial results if any frames were processed
+            # Requirement: "when user cancels...still compile them like completed and save"
+            upscaled_frames = sorted(frames_up_dir.glob("*.png"))
+            
+            if len(upscaled_frames) > 0:
+                if on_progress:
+                    on_progress(f"⏹️ Cancelled - Compiling {len(upscaled_frames)} partial frames to video...\n")
+                
+                # Build partial video from completed frames
+                partial_output = resolve_output_location(
+                    input_path=str(input_path),
+                    output_format=settings.get("output_format", "mp4"),
+                    global_output_dir=str(output_dir),
+                    batch_mode=False
+                )
+                
+                # Append "_partial_cancelled" to indicate incomplete processing
+                partial_output_path = Path(partial_output)
+                partial_output_final = partial_output_path.parent / f"{partial_output_path.stem}_partial_cancelled{partial_output_path.suffix}"
+                partial_output_final = collision_safe_path(partial_output_final)
+                
+                # Get original FPS for partial video
+                original_fps = get_media_fps(str(input_path)) or 30.0
+                fps_override = settings.get("fps_override", 0)
+                target_fps = fps_override if fps_override > 0 else original_fps
+                
+                # Use same frame pattern as during extraction
+                png_padding = int(settings.get("png_padding", 6))
+                upscaled_frame_pattern = f"frame_%0{png_padding}d_out.png"
+                
+                # Encode partial video from available frames
+                try:
+                    encode_cmd = [
+                        "ffmpeg", "-y",
+                        "-framerate", str(target_fps),
+                        "-i", str(frames_up_dir / upscaled_frame_pattern),
+                        "-c:v", settings.get("video_codec", "libx264"),
+                        "-crf", str(settings.get("video_quality", 18)),
+                        "-pix_fmt", "yuv420p",
+                        str(partial_output_final)
+                    ]
+                    
+                    subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    
+                    # Cleanup temp directory
+                    if not settings.get("keep_temp", False):
+                        shutil.rmtree(work_dir, ignore_errors=True)
+                    
+                    if on_progress:
+                        on_progress(f"✅ Partial video saved: {partial_output_final}\n")
+                    
+                    return GanResult(1, str(partial_output_final), f"Cancelled - Partial video saved ({len(upscaled_frames)} frames)")
+                    
+                except Exception as e:
+                    if on_progress:
+                        on_progress(f"⚠️ Partial compilation failed: {e}\n")
+                    # Still try to return the frames directory
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    return GanResult(1, None, f"Cancelled - {len(upscaled_frames)} frames processed but video compilation failed: {e}")
+            else:
+                # No frames processed yet
+                shutil.rmtree(work_dir, ignore_errors=True)
+                return GanResult(1, None, "Cancelled before any frames were processed")
 
         # Reconstruct video from upscaled frames
         if on_progress:

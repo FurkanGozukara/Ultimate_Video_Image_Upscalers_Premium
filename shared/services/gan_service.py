@@ -509,7 +509,7 @@ def build_gan_callbacks(
             batch_result = batch_processor.process_batch(
                 jobs=jobs,
                 processor_func=process_job,
-                max_concurrent=1
+                max_concurrent=1  # Sequential processing for GPU-bound operations
             )
             
             # Collect results from jobs
@@ -522,6 +522,63 @@ def build_gan_callbacks(
                     last_cmp = job.metadata["comparison"]
                 if "slider" in job.metadata:
                     last_slider = job.metadata["slider"]
+            
+            # FIXED: Write consolidated metadata for GAN batch (matching SeedVR2 behavior)
+            # Requirement: "only have 1 metadata for batch image upscale and have individual metadata for videos upscale"
+            try:
+                # Detect if this is image-only batch vs video/mixed
+                video_count = sum(1 for item in batch_items if Path(item).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'))
+                image_count = len(batch_items) - video_count
+                is_image_only_batch = image_count > 0 and video_count == 0
+                
+                metadata_dir = Path(global_settings.get("output_dir", output_dir))
+                
+                if is_image_only_batch:
+                    # Image-only batch: Single consolidated metadata (no per-file metadata to avoid spam)
+                    batch_metadata = {
+                        "batch_type": "images",
+                        "pipeline": "gan",
+                        "total_files": len(batch_items),
+                        "completed": batch_result.completed_files,
+                        "failed": batch_result.failed_files,
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "settings": settings,
+                        "outputs": outputs,
+                        "failed_files": [
+                            {"input": job.input_path, "error": job.error_message}
+                            for job in jobs if job.status == "failed"
+                        ]
+                    }
+                    metadata_path = metadata_dir / "batch_gan_images_metadata.json"
+                else:
+                    # Video/mixed batch: Batch summary only (individual metadata written by run_logger per video)
+                    batch_metadata = {
+                        "batch_type": "videos" if video_count > 0 and image_count == 0 else "mixed",
+                        "pipeline": "gan",
+                        "total_files": len(batch_items),
+                        "video_files": video_count,
+                        "image_files": image_count,
+                        "completed": batch_result.completed_files,
+                        "failed": batch_result.failed_files,
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "settings": settings,
+                        "outputs": outputs,
+                        "individual_metadata_note": "Each video has its own run_metadata.json in its output directory",
+                        "failed_files": [
+                            {"input": job.input_path, "error": job.error_message}
+                            for job in jobs if job.status == "failed"
+                        ]
+                    }
+                    metadata_path = metadata_dir / "batch_gan_videos_summary.json"
+                
+                import json
+                with metadata_path.open("w", encoding="utf-8") as f:
+                    json.dump(batch_metadata, f, indent=2)
+                    
+            except Exception as e:
+                # Don't fail batch on metadata error
+                if progress_q:
+                    progress_q.put(f"⚠️ Warning: Failed to write batch metadata: {e}\n")
             
             result_holder["payload"] = (
                 f"✅ Batch complete: {len(outputs)}/{len(batch_items)} processed ({batch_result.failed_files} failed)",
@@ -640,21 +697,22 @@ def build_gan_callbacks(
                 settings["chunk_overlap_sec"] = chunk_overlap_sec
                 settings["per_chunk_cleanup"] = per_chunk_cleanup
                 
+                # Fixed: Make chunk_progress_cb a proper callback function (not a generator)
+                # Store chunk status in a dict for UI updates
+                chunk_status = {"completed": 0, "total": 0}
+                
                 def chunk_progress_cb(progress_val, desc=""):
+                    """Non-generator callback for chunk progress (called by chunk_and_process)"""
+                    # Update gr.Progress if available
                     if progress:
                         progress(progress_val, desc=desc)
-                    yield (
-                        f"⚙️ Chunking: {desc}",
-                        f"Processing chunks... {desc}",
-                        gr.Markdown.update(value="", visible=False),
-                        None,
-                        None,
-                        desc,
-                        gr.ImageSlider.update(value=None),
-                        gr.HTML.update(value="", visible=False),
-                        gr.Gallery.update(visible=False),
-                        state
-                    )
+                    
+                    # Extract chunk numbers if present
+                    import re
+                    match = re.search(r'(\d+)/(\d+)', desc)
+                    if match:
+                        chunk_status["completed"] = int(match.group(1))
+                        chunk_status["total"] = int(match.group(2))
                 
                 # Run chunked processing using universal chunk_and_process
                 # This will route to runner.run_gan for each chunk based on model_type="gan"
@@ -671,7 +729,7 @@ def build_gan_callbacks(
                     allow_partial=True,
                     global_output_dir=str(current_output_dir),
                     resume_from_partial=False,
-                    progress_tracker=chunk_progress_cb,
+                    progress_tracker=chunk_progress_cb,  # Now properly wired as callback
                     process_func=None,  # Use model_type routing to runner.run_gan
                     model_type="gan",  # Route to runner.run_gan for each chunk
                 )
@@ -763,7 +821,7 @@ def build_gan_callbacks(
                         temp_dir=current_temp_dir,
                         output_dir=current_output_dir,
                         on_progress=progress_cb if progress_cb else None,
-                        cancel_event=None  # Will add cancel support
+                        cancel_event=cancel_event  # Fixed: Pass cancel event to enable cancellation
                     )
                 except Exception as exc:  # surface ffmpeg or other runtime issues
                     err_msg = f"❌ GAN upscale failed: {exc}"
