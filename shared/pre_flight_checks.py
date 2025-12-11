@@ -390,6 +390,17 @@ def check_pre_flight(
             if settings.get("cache_dit") or settings.get("cache_vae"):
                 warnings.append("⚠️ CUDA graph caching (cache_dit/cache_vae) requires single GPU. Will be disabled.")
     
+    # Estimate duration
+    estimated_duration = 0.0
+    if input_path and Path(input_path).exists():
+        estimated_duration = get_media_duration_seconds(input_path) or 0.0
+        
+        # Adjust for RIFE time modification if applicable
+        if model_type == "rife":
+            speed_factor = float(settings.get("speed_factor", 1.0))
+            if speed_factor > 0:
+                estimated_duration /= speed_factor
+
     # Build result
     result = PreFlightResult(
         passed=len(errors) == 0,
@@ -398,7 +409,7 @@ def check_pre_flight(
         info=info,
         estimated_vram_mb=estimated_vram,
         estimated_disk_mb=estimated_disk,
-        estimated_duration_seconds=0.0  # TODO: Calculate based on input duration and settings
+        estimated_duration_seconds=estimated_duration
     )
     
     return result

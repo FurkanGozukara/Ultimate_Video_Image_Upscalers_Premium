@@ -235,7 +235,12 @@ def build_flashvsr_callbacks(
             return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, version: str, mode: str, current_values: List[Any]):
-        """Load a preset."""
+        """
+        Load a preset.
+        
+        FIXED: Now returns (*values, status_message) to match UI output expectations.
+        UI expects: inputs_list + [preset_status]
+        """
         try:
             model_name = f"v{version}_{mode}"
             preset = preset_manager.load_preset_safe("flashvsr", model_name, preset_name)
@@ -244,10 +249,14 @@ def build_flashvsr_callbacks(
 
             current_map = dict(zip(FLASHVSR_ORDER, current_values))
             values = _apply_flashvsr_preset(preset or {}, defaults, preset_manager, current=current_map)
-            return values
+            
+            # Return values + status message (status is LAST)
+            status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
+            return (*values, gr.Markdown.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
-            return current_values
+            # Return current values + error status
+            return (*current_values, gr.Markdown.update(value=f"❌ Error: {str(e)}"))
 
     def safe_defaults():
         """Get safe default values."""

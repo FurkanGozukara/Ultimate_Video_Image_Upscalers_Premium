@@ -248,7 +248,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     load_preset_btn.click(
         fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals)),
         inputs=[preset_dropdown, model_selector] + inputs_list,
-        outputs=inputs_list
+        outputs=inputs_list + [preset_status]  # FIXED: Match service return signature
     )
 
     safe_defaults_btn.click(

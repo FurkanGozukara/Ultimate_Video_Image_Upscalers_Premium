@@ -107,6 +107,12 @@ def build_face_callbacks(
             return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
+        """
+        Load a preset.
+        
+        FIXED: Now returns (*values, status_message) to match UI output expectations.
+        Note: Face tab has special logic - skips model_selector in outputs.
+        """
         try:
             model_name = model_name or defaults["model"]
             preset = preset_manager.load_preset_safe("face", model_name, preset_name)
@@ -124,10 +130,14 @@ def build_face_callbacks(
             except Exception:
                 pass
 
-            return values
+            # Return values + status message (status is LAST)
+            # Face tab skips model_selector in outputs, so return values[1:] + status
+            status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
+            return (*values[1:], gr.Markdown.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
-            return current_values
+            # Return current values + error status (skip first value for model_selector)
+            return (*current_values[1:], gr.Markdown.update(value=f"❌ Error: {str(e)}"))
 
     def safe_defaults():
         return [defaults[k] for k in FACE_ORDER]

@@ -1089,17 +1089,17 @@ def seedvr2_tab(
         outputs=[status_box, shared_state]
     )
 
-    # Preset management
+    # Preset management - FIXED: Proper argument passing and output alignment
     save_preset_btn.click(
-        fn=lambda *args: service["save_preset"](*args[:-1]) + (args[-1],),
+        fn=lambda name, model, *vals: service["save_preset"](name, model, *vals[:-1]) + (vals[-1],),
         inputs=[preset_name, dit_model] + inputs_list + [shared_state],
         outputs=[preset_dropdown, preset_status] + inputs_list + [shared_state]
     )
 
     load_preset_btn.click(
-        fn=lambda preset, model, *vals: service["load_preset"](preset, model, defaults, list(vals[:-1])) + (vals[-1],),
+        fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals[:-1])) + (vals[-1],),
         inputs=[preset_dropdown, dit_model] + inputs_list + [shared_state],
-        outputs=inputs_list + [shared_state]
+        outputs=inputs_list + [preset_status, shared_state]  # FIXED: status is now second-to-last
     )
 
     safe_defaults_btn.click(

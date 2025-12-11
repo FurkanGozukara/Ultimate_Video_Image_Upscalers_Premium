@@ -537,17 +537,17 @@ def gan_tab(
             info="Presets are saved/loaded for this specific model"
         )
     
-    # Wire up preset operations with model context
+    # Wire up preset operations with model context - FIXED: Flatten args properly
     save_preset_btn.click(
-        fn=lambda name, model, *vals: service["save_preset"](name, model, list(vals)),
+        fn=lambda name, model, *vals: service["save_preset"](name, model, *vals),
         inputs=[preset_name, preset_model_selector] + inputs_list,
-        outputs=[preset_dropdown, preset_status] + inputs_list  # FIXED: Capture reapplied validated values
+        outputs=[preset_dropdown, preset_status] + inputs_list  # Captures reapplied validated values
     )
 
     load_preset_btn.click(
         fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals)),
         inputs=[preset_dropdown, preset_model_selector] + inputs_list,
-        outputs=inputs_list + [preset_status]
+        outputs=inputs_list + [preset_status]  # Status is last (matches service return order)
     )
 
     safe_defaults_btn.click(

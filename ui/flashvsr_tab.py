@@ -411,7 +411,7 @@ def flashvsr_tab(
     load_preset_btn.click(
         fn=lambda preset, ver, mod, *vals: service["load_preset"](preset, ver, mod, list(vals)),
         inputs=[preset_dropdown, version, mode] + inputs_list,
-        outputs=inputs_list
+        outputs=inputs_list + [preset_status]  # FIXED: Match service return signature
     )
     
     safe_defaults_btn.click(

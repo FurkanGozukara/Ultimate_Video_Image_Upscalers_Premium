@@ -140,6 +140,11 @@ def build_resolution_callbacks(
             return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
+        """
+        Load a preset.
+        
+        FIXED: Now returns (*values, status_message) to match UI output expectations.
+        """
         try:
             model_name = model_name or defaults["model"]
             preset = preset_manager.load_preset_safe("resolution", model_name, preset_name)
@@ -150,10 +155,14 @@ def build_resolution_callbacks(
             defaults_with_model["model"] = model_name
             current_map = dict(zip(RESOLUTION_ORDER, current_values))
             values = _apply_resolution_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
-            return values
+            
+            # Return values + status message (status is LAST)
+            status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
+            return (*values, gr.Markdown.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
-            return current_values
+            # Return current values + error status
+            return (*current_values, gr.Markdown.update(value=f"❌ Error: {str(e)}"))
 
     def safe_defaults():
         return [defaults[k] for k in RESOLUTION_ORDER]
