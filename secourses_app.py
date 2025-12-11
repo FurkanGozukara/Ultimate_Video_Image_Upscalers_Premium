@@ -30,10 +30,28 @@ APP_TITLE = "SECourses Ultimate Video and Image Upscaler Pro V1.0 – https://ww
 # --------------------------------------------------------------------- #
 preset_manager = PresetManager(PRESET_DIR)
 
-# Read TEMP/TMP from launcher BAT file if set, otherwise use defaults
+# FIXED: Read ALL launcher BAT settings (TEMP/TMP + model cache paths)
 # This ensures user-configured paths from Windows_Run_SECourses_Upscaler_Pro.bat are respected
 launcher_temp = os.environ.get("TEMP") or os.environ.get("TMP")
 launcher_output = None  # BAT doesn't set OUTPUT_DIR, but we check for future compatibility
+
+# FIXED: Also read model cache paths set by launcher (MODELS_DIR, HF_HOME, etc.)
+# These are used by HuggingFace/Transformers for model downloads and caching
+launcher_models_dir = os.environ.get("MODELS_DIR")
+launcher_hf_home = os.environ.get("HF_HOME")
+launcher_transformers_cache = os.environ.get("TRANSFORMERS_CACHE")
+launcher_hf_datasets = os.environ.get("HF_DATASETS_CACHE")
+
+# Validate and propagate model cache paths if set by launcher
+# This ensures models download to the correct location
+if launcher_models_dir and Path(launcher_models_dir).exists():
+    # User set MODELS_DIR in launcher - ensure HF libraries use it
+    if not launcher_hf_home:
+        os.environ["HF_HOME"] = launcher_models_dir
+    if not launcher_transformers_cache:
+        os.environ["TRANSFORMERS_CACHE"] = launcher_models_dir
+    if not launcher_hf_datasets:
+        os.environ["HF_DATASETS_CACHE"] = launcher_models_dir
 
 # If BAT file set a custom temp that's NOT the system temp, use it
 # This detects if user modified the BAT file's TEMP/TMP settings
@@ -52,6 +70,10 @@ GLOBAL_DEFAULTS = {
     "mode": "subprocess",
     "mode_locked": False,  # Persisted lock state for in-app mode
     "pinned_reference_path": None,  # Global pinned reference for iterative comparison
+    # FIXED: Store model cache paths from launcher for visibility and troubleshooting
+    "models_dir": launcher_models_dir or str(BASE_DIR / "models"),
+    "hf_home": os.environ.get("HF_HOME") or str(BASE_DIR / "models"),
+    "transformers_cache": os.environ.get("TRANSFORMERS_CACHE") or str(BASE_DIR / "models"),
 }
 global_settings = preset_manager.load_global_settings(GLOBAL_DEFAULTS)
 
@@ -135,7 +157,7 @@ def main():
         """
         Load last-used presets for ALL tabs and models into shared state.
         
-        Returns tuple: (resolution_settings, resolution_cache, output_settings)
+        Returns tuple: (resolution_settings, resolution_cache, output_settings, output_cache)
         """
         from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names, get_rife_model_names
         from shared.services.resolution_service import resolution_defaults
@@ -190,15 +212,27 @@ def main():
         else:
             primary_output_settings = out_defaults
         
-        # Return primary settings for both tabs
-        return primary_res_settings, resolution_cache, primary_output_settings
+        # Build output_cache for ALL models (per-model output settings duplication)
+        # FIXED: Output settings now cached per-model like resolution settings
+        output_cache = {}
+        for model in all_models:
+            model_output_last_used = preset_manager.load_last_used("output", model)
+            model_out_defaults = output_defaults([model])
+            
+            if model_output_last_used:
+                output_cache[model] = preset_manager.merge_config(model_out_defaults, model_output_last_used)
+            else:
+                output_cache[model] = model_out_defaults
+        
+        # Return primary settings AND per-model caches for both tabs
+        return primary_res_settings, resolution_cache, primary_output_settings, output_cache
 
     # Load all startup presets
-    startup_res_settings, startup_res_cache, startup_output_settings = load_all_startup_presets()
+    startup_res_settings, startup_res_cache, startup_output_settings, startup_output_cache = load_all_startup_presets()
     
     with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=css_overrides) as demo:
         # Shared state for cross-tab communication
-        # AUTO-POPULATED with last-used resolution settings for ALL models on startup
+        # AUTO-POPULATED with last-used resolution AND output settings for ALL models on startup
         shared_state = gr.State({
             "health_banner": {"text": health_text},
             "seed_controls": {
@@ -210,7 +244,9 @@ def main():
                 "last_output_dir": "",
                 # AUTO-LOADED per-model resolution cache (all models restored at startup)
                 "resolution_cache": startup_res_cache,
-                # AUTO-LOADED from Output tab last-used presets
+                # FIXED: AUTO-LOADED per-model output cache (all models restored at startup)
+                "output_cache": startup_output_cache,
+                # AUTO-LOADED from Output tab last-used presets (primary model UI values)
                 "png_padding_val": startup_output_settings.get("png_padding", 6),
                 "png_keep_basename_val": startup_output_settings.get("png_keep_basename", True),
                 "skip_first_frames_val": startup_output_settings.get("skip_first_frames", 0),
@@ -276,6 +312,24 @@ def main():
                 )
             save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
             global_status = gr.Markdown("")
+            
+            # FIXED: Display model cache paths from launcher BAT file
+            gr.Markdown("### 📦 Model Cache Paths (from Launcher BAT)")
+            gr.Markdown(f"""
+            **ℹ️ These paths are set by `Windows_Run_SECourses_Upscaler_Pro.bat`:**
+            
+            - **Models Directory**: `{global_settings.get('models_dir', 'Not set')}`
+            - **HuggingFace Home**: `{global_settings.get('hf_home', 'Not set')}`
+            - **Transformers Cache**: `{global_settings.get('transformers_cache', 'Not set')}`
+            
+            💡 **To change these paths:**
+            1. Close this application
+            2. Edit `Windows_Run_SECourses_Upscaler_Pro.bat`
+            3. Modify the `MODELS_DIR`, `HF_HOME`, and `TRANSFORMERS_CACHE` variables
+            4. Restart the application
+            
+            These paths control where downloaded models (SeedVR2, FlashVSR+, etc.) are stored.
+            """)
 
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
