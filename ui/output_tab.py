@@ -9,7 +9,12 @@ from typing import Dict, Any
 from shared.services.output_service import (
     build_output_callbacks, OUTPUT_ORDER
 )
-from shared.models.seedvr2_meta import get_seedvr2_model_names
+from shared.models import (
+    get_seedvr2_model_names,
+    get_flashvsr_model_names,
+    get_rife_model_names,
+    scan_gan_models
+)
 from shared.video_codec_options import (
     get_codec_choices,
     get_pixel_format_choices,
@@ -20,28 +25,25 @@ from shared.video_codec_options import (
 )
 
 
-def _get_gan_model_names(base_dir: Path) -> list:
-    """Get GAN model names from Image_Upscale_Models folder"""
-    models_dir = base_dir / "Image_Upscale_Models"
-    if not models_dir.exists():
-        return []
-    choices = []
-    for f in models_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in (".pth", ".safetensors"):
-            choices.append(f.name)
-    return sorted(choices)
-
-
 def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_settings: Dict[str, Any] = None):
     """
     Self-contained Output & Comparison tab.
-    Handles output format and comparison settings shared across models.
+    Handles output format and comparison settings shared across ALL upscaler models.
     """
 
-    # Get available models
+    # Get available models from ALL pipelines (SeedVR2, GAN, FlashVSR+, RIFE)
     seedvr2_models = get_seedvr2_model_names()
-    gan_models = _get_gan_model_names(base_dir)
-    combined_models = sorted(list({*seedvr2_models, *gan_models}))
+    gan_models = scan_gan_models(base_dir)
+    flashvsr_models = get_flashvsr_model_names()
+    rife_models = get_rife_model_names(base_dir)
+    
+    # Combine and deduplicate all models for per-model preset support
+    combined_models = sorted(list({
+        *seedvr2_models,
+        *gan_models,
+        *flashvsr_models,
+        *rife_models
+    }))
 
     # Build service callbacks with global_settings for pinned reference persistence
     service = build_output_callbacks(preset_manager, shared_state, combined_models, global_settings)

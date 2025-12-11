@@ -514,6 +514,23 @@ def seedvr2_tab(
                 info="Enable detailed debug output. Useful for troubleshooting but creates verbose logs. Enable if encountering errors."
             )
 
+            # Output & Metadata controls (shared settings from Output tab)
+            gr.Markdown("---")
+            gr.Markdown("#### 📤 Output & Metadata")
+            
+            save_metadata = gr.Checkbox(
+                label="Save Processing Metadata",
+                value=values[46] if len(values) > 46 else True,
+                info="Save run metadata (settings, timestamps, status) to output folder. Respects global telemetry toggle."
+            )
+            
+            fps_override = gr.Number(
+                label="FPS Override (0 = use source FPS)",
+                value=values[47] if len(values) > 47 else 0,
+                precision=2,
+                info="Override output video FPS. 0 = preserve original FPS, 30 = force 30fps, 60 = force 60fps. Also sourced from Output tab if set."
+            )
+
             # Input path textbox - MOVED HERE: after all controls, at bottom of left column as requested
             gr.Markdown("---")
             gr.Markdown("#### 📁 Direct Input Path (Alternative to Upload)")
@@ -716,7 +733,7 @@ def seedvr2_tab(
     # ✅ BACKWARD COMPATIBILITY:
     # Old presets automatically get new defaults via merge_config() - no migration needed!
     #
-    # Current count: len(SEEDVR2_ORDER) = 47, len(inputs_list) must also = 47
+    # Current count: len(SEEDVR2_ORDER) = 49, len(inputs_list) must also = 49 (added save_metadata, fps_override)
     # ============================================================================
     
     inputs_list = [
@@ -732,7 +749,9 @@ def seedvr2_tab(
         vae_decode_tiled, vae_decode_tile_size, vae_decode_tile_overlap, tile_debug,
         attention_mode, compile_dit, compile_vae, compile_backend, compile_mode,
         compile_fullgraph, compile_dynamic, compile_dynamo_cache_size_limit,
-        compile_dynamo_recompile_limit, cache_dit, cache_vae, debug, resume_chunking
+        compile_dynamo_recompile_limit, cache_dit, cache_vae, debug, resume_chunking,
+        # Output & shared settings (integrated from Output tab)
+        save_metadata, fps_override
     ]
     
     # Validate synchronization at tab initialization (development-time check)

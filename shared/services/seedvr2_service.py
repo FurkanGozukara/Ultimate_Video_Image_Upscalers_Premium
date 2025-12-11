@@ -188,6 +188,8 @@ def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
         "cache_vae": False,
         "debug": False,
         "resume_chunking": False,
+        "save_metadata": True,  # Per-run metadata toggle (respects global telemetry)
+        "fps_override": 0,  # FPS override (0 = use source FPS, >0 = set specific FPS)
         "_compile_compatible": compile_compatible,  # Store for validation
     }
 
@@ -272,6 +274,9 @@ SEEDVR2_ORDER: List[str] = [
     # Debug and resume
     "debug",
     "resume_chunking",
+    # Output & shared settings (from Output tab integration)
+    "save_metadata",
+    "fps_override",
 ]
 
 
@@ -758,12 +763,15 @@ def _process_single_file(
                 local_logs.append(f"Face-restored image saved to {restored_img} (strength {face_strength})")
                 output_image = restored_img
 
-        # Apply FPS override if specified
-        fps_val = seed_controls.get("fps_override_val")
-        if fps_val and output_video and Path(output_video).exists():
-            adjusted = ffmpeg_set_fps(Path(output_video), float(fps_val))
-            output_video = str(adjusted)
-            local_logs.append(f"FPS overridden to {fps_val}: {adjusted}")
+        # Apply FPS override if specified (check both tab setting and Output tab cache)
+        fps_val = settings.get("fps_override", 0) or seed_controls.get("fps_override_val", 0)
+        if fps_val and fps_val > 0 and output_video and Path(output_video).exists():
+            try:
+                adjusted = ffmpeg_set_fps(Path(output_video), float(fps_val))
+                output_video = str(adjusted)
+                local_logs.append(f"✅ FPS overridden to {fps_val}: {adjusted}")
+            except Exception as e:
+                local_logs.append(f"⚠️ FPS override failed: {str(e)}")
 
         # Generate comparison video if enabled
         comparison_mode = seed_controls.get("comparison_mode_val", "slider")
@@ -1333,6 +1341,12 @@ def build_seedvr2_callbacks(
                 # Note: telemetry is controlled globally via runner.set_telemetry()
                 # This flag controls per-run metadata emission only
                 settings["telemetry_enabled"] = bool(seed_controls["telemetry_enabled_val"])
+            
+            # Apply FPS override from Output tab ONLY if not explicitly set in SeedVR2 tab
+            # SeedVR2 tab value takes precedence
+            if seed_controls.get("fps_override_val") is not None and seed_controls["fps_override_val"] > 0:
+                if settings.get("fps_override", 0) == 0:  # Only if not set in SeedVR2 tab
+                    settings["fps_override"] = float(seed_controls["fps_override_val"])
             
             # Apply skip_first_frames and load_cap from Output tab ONLY if not explicitly set in SeedVR2 tab
             # SeedVR2 tab values take precedence over Output tab cached values

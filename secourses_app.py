@@ -129,28 +129,29 @@ def main():
     .model-status { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 12px; margin: 8px 0; font-family: 'Courier New', monospace; font-size: 14px; }
     """
 
-    # Auto-apply last-used resolution presets on startup (for ALL models)
-    # This ensures resolution/chunking settings are loaded automatically without manual "Apply"
-    def load_all_model_resolution_settings():
+    # Auto-apply last-used presets on startup for ALL tabs
+    # This ensures settings are restored automatically when app starts
+    def load_all_startup_presets():
         """
-        Load last-used resolution settings for ALL available models into shared state.
+        Load last-used presets for ALL tabs and models into shared state.
         
-        Creates a resolution_cache dictionary keyed by model name, so each model's
-        resolution/chunking settings are restored on startup and available when user
-        switches models.
+        Returns tuple: (resolution_settings, resolution_cache, output_settings)
         """
-        from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names
+        from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names, get_rife_model_names
         from shared.services.resolution_service import resolution_defaults
+        from shared.services.output_service import output_defaults
         
         # Get all models for each pipeline
         seedvr2_models = get_seedvr2_model_names()
         gan_models = scan_gan_models(BASE_DIR)
         flashvsr_models = get_flashvsr_model_names()
+        rife_models = get_rife_model_names(BASE_DIR)
         
         all_models = []
         all_models.extend(seedvr2_models)
         all_models.extend(gan_models)
         all_models.extend(flashvsr_models)
+        all_models.extend(rife_models)
         
         if not all_models:
             all_models = ["default"]
@@ -158,14 +159,15 @@ def main():
         # Pick first available model as primary default
         primary_model = all_models[0]
         
+        # === RESOLUTION TAB ===
         # Load resolution settings for PRIMARY model (used for initial UI values)
-        primary_last_used = preset_manager.load_last_used("resolution", primary_model)
+        primary_res_last_used = preset_manager.load_last_used("resolution", primary_model)
         res_defaults = resolution_defaults([primary_model])
         
-        if primary_last_used:
-            primary_settings = preset_manager.merge_config(res_defaults, primary_last_used)
+        if primary_res_last_used:
+            primary_res_settings = preset_manager.merge_config(res_defaults, primary_res_last_used)
         else:
-            primary_settings = res_defaults
+            primary_res_settings = res_defaults
         
         # Build resolution_cache for ALL models (per-model settings duplication)
         resolution_cache = {}
@@ -178,11 +180,21 @@ def main():
             else:
                 resolution_cache[model] = model_defaults
         
-        # Return both primary settings (for UI) and full cache (for model switching)
-        return primary_settings, resolution_cache
+        # === OUTPUT TAB ===
+        # Load output settings for PRIMARY model
+        primary_output_last_used = preset_manager.load_last_used("output", primary_model)
+        out_defaults = output_defaults(all_models)
+        
+        if primary_output_last_used:
+            primary_output_settings = preset_manager.merge_config(out_defaults, primary_output_last_used)
+        else:
+            primary_output_settings = out_defaults
+        
+        # Return primary settings for both tabs
+        return primary_res_settings, resolution_cache, primary_output_settings
 
-    # Load resolution settings on startup for all models
-    startup_res_settings, startup_res_cache = load_all_model_resolution_settings()
+    # Load all startup presets
+    startup_res_settings, startup_res_cache, startup_output_settings = load_all_startup_presets()
     
     with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=css_overrides) as demo:
         # Shared state for cross-tab communication
@@ -198,16 +210,18 @@ def main():
                 "last_output_dir": "",
                 # AUTO-LOADED per-model resolution cache (all models restored at startup)
                 "resolution_cache": startup_res_cache,
-                "png_padding_val": 5,
-                "png_keep_basename_val": True,
-                "skip_first_frames_val": None,
-                "load_cap_val": None,
-                "fps_override_val": None,
-                "output_format_val": None,
-                "comparison_mode_val": "native",
-                "pin_reference_val": False,
-                "fullscreen_val": False,
-                "face_strength_val": 0.5,
+                # AUTO-LOADED from Output tab last-used presets
+                "png_padding_val": startup_output_settings.get("png_padding", 6),
+                "png_keep_basename_val": startup_output_settings.get("png_keep_basename", True),
+                "skip_first_frames_val": startup_output_settings.get("skip_first_frames", 0),
+                "load_cap_val": startup_output_settings.get("load_cap", 0),
+                "fps_override_val": startup_output_settings.get("fps_override", 0),
+                "output_format_val": startup_output_settings.get("output_format", "auto"),
+                "comparison_mode_val": startup_output_settings.get("comparison_mode", "slider"),
+                "pin_reference_val": startup_output_settings.get("pin_reference", False),
+                "fullscreen_val": startup_output_settings.get("fullscreen_enabled", True),
+                "save_metadata_val": startup_output_settings.get("save_metadata", True),
+                "face_strength_val": global_settings.get("face_strength", 0.5),
                 # AUTO-LOADED chunking settings from Resolution tab (primary model)
                 "chunk_size_sec": startup_res_settings.get("chunk_size", 0),
                 "chunk_overlap_sec": startup_res_settings.get("chunk_overlap", 0.5),
