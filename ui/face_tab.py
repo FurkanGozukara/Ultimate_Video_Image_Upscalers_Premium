@@ -140,20 +140,14 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
                 backend_choices = ["auto"] + available_backends
             
             with gr.Group():
+                # Note: face_backend is NOT in FACE_ORDER - it's for display only
+                # The actual restoration model is controlled by restoration_model in the Restoration tab
                 face_backend = gr.Dropdown(
-                    label="Face Restoration Backend",
+                    label="Face Restoration Backend (Info Only)",
                     choices=backend_choices,
-                    value=values[1] if len(values) > 1 else "auto",
-                    info="'auto' uses first available backend. GFPGAN is recommended for most cases."
-                )
-                
-                face_strength = gr.Slider(
-                    label="Restoration Strength",
-                    minimum=0.0,
-                    maximum=1.0,
-                    step=0.05,
-                    value=values[2] if len(values) > 2 else 0.5,
-                    info="How much to restore faces. 0.0 = no change, 1.0 = maximum restoration. Try 0.5-0.8 for balanced results."
+                    value="auto",
+                    info="'auto' uses first available backend. GFPGAN is recommended. This is informational - configure in Face Restoration tab.",
+                    interactive=False
                 )
                 
                 backend_info = gr.Markdown("")
@@ -196,27 +190,27 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
                 face_detector = gr.Dropdown(
                     label="Face Detection Model",
                     choices=["retinaface", "yunet", "opencv", "dlib"],
-                    value=values[0],
+                    value=values[1],  # FACE_ORDER index 1 = face_detector
                     info="Algorithm for detecting faces in images/videos"
                 )
 
                 detection_confidence = gr.Slider(
                     label="Detection Confidence Threshold",
                     minimum=0.1, maximum=1.0, step=0.05,
-                    value=values[1],
+                    value=values[2],  # FACE_ORDER index 2 = detection_confidence
                     info="Minimum confidence for face detection (higher = fewer false positives)"
                 )
 
                 min_face_size = gr.Number(
                     label="Minimum Face Size (pixels)",
-                    value=values[2],
+                    value=values[3],  # FACE_ORDER index 3 = min_face_size
                     precision=0,
                     info="Skip faces smaller than this size"
                 )
 
                 max_faces = gr.Number(
                     label="Maximum Faces Per Frame",
-                    value=values[3],
+                    value=values[4],  # FACE_ORDER index 4 = max_faces
                     precision=0,
                     info="Limit faces processed per frame (0 = unlimited)"
                 )
@@ -229,26 +223,26 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
                 restoration_model = gr.Dropdown(
                     label="Restoration Model",
                     choices=["gfpgan", "restoreformer", "codeformer", "auto"],
-                    value=values[4],
+                    value=values[5],  # FACE_ORDER index 5 = restoration_model
                     info="'auto' selects best model based on input quality"
                 )
 
                 face_strength = gr.Slider(
                     label="Face Enhancement Strength",
                     minimum=0.0, maximum=1.0, step=0.05,
-                    value=values[5],
+                    value=values[6],  # FACE_ORDER index 6 = face_strength
                     info="How strongly to apply face restoration (0 = no change, 1 = maximum enhancement)"
                 )
 
                 restore_blindly = gr.Checkbox(
                     label="Restore All Faces Blindly",
-                    value=values[6],
+                    value=values[7],  # FACE_ORDER index 7 = restore_blindly
                     info="Apply restoration to all detected faces without quality checks"
                 )
 
                 upscale_faces = gr.Checkbox(
                     label="Upscale Face Region First",
-                    value=values[7],
+                    value=values[8],  # FACE_ORDER index 8 = upscale_faces
                     info="Pre-upscale face areas before restoration"
                 )
 
@@ -260,31 +254,31 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
                 face_padding = gr.Slider(
                     label="Face Padding Ratio",
                     minimum=0.1, maximum=1.0, step=0.1,
-                    value=values[8],
+                    value=values[9],  # FACE_ORDER index 9 = face_padding
                     info="Extra area around face for context"
                 )
 
                 face_landmarks = gr.Checkbox(
                     label="Use Face Landmarks",
-                    value=values[9],
+                    value=values[10],  # FACE_ORDER index 10 = use_landmarks (key name differs)
                     info="Guide restoration using facial feature detection"
                 )
 
                 color_correction = gr.Checkbox(
                     label="Apply Color Correction",
-                    value=values[10],
+                    value=values[11],  # FACE_ORDER index 11 = color_correction
                     info="Match face colors to surrounding skin tone"
                 )
 
                 gpu_acceleration = gr.Checkbox(
                     label="Enable GPU Acceleration",
-                    value=values[11],
+                    value=values[12],  # FACE_ORDER index 12 = gpu_acceleration
                     info="Use GPU for face processing (faster but uses more VRAM)"
                 )
 
                 batch_face_processing = gr.Checkbox(
                     label="Batch Face Processing",
-                    value=values[12],
+                    value=values[13],  # FACE_ORDER index 13 = batch_faces (key name differs)
                     info="Process multiple faces simultaneously"
                 )
 
@@ -296,25 +290,25 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
                 output_quality = gr.Slider(
                     label="Output Quality",
                     minimum=0.1, maximum=1.0, step=0.05,
-                    value=values[13],
+                    value=values[14],  # FACE_ORDER index 14 = output_quality
                     info="Restoration output quality (higher = better but slower)"
                 )
 
                 preserve_original = gr.Checkbox(
                     label="Preserve Original When Better",
-                    value=values[14],
+                    value=values[15],  # FACE_ORDER index 15 = preserve_original
                     info="Keep original face if restoration doesn't improve quality"
                 )
 
                 artifact_reduction = gr.Checkbox(
                     label="Artifact Reduction",
-                    value=values[15],
+                    value=values[16],  # FACE_ORDER index 16 = artifact_reduction
                     info="Apply additional filtering to reduce processing artifacts"
                 )
 
                 save_face_masks = gr.Checkbox(
                     label="Save Face Masks",
-                    value=values[16],
+                    value=values[17],  # FACE_ORDER index 17 = save_face_masks
                     info="Save debug masks showing detected face regions"
                 )
 

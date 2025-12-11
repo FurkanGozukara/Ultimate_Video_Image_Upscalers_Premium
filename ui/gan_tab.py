@@ -384,13 +384,25 @@ def gan_tab(
         - Batch processing of image collections
         """)
 
-    # Collect all inputs
+    # ============================================================================
+    # 📋 GAN PRESET INPUT LIST - MUST match GAN_ORDER in gan_service.py
+    # Adding controls? Update gan_defaults(), GAN_ORDER, and this list in sync.
+    # Current count: 21 components
+    # ============================================================================
+    
     inputs_list = [
         input_path, batch_enable, batch_input, batch_output, gan_model,
         target_resolution, downscale_first, auto_calculate_input, use_resolution_tab, tile_size, overlap,
         denoising_strength, sharpening, color_correction, gpu_acceleration, gpu_device,
         batch_size, output_format_gan, output_quality_gan, save_metadata, create_subfolders
     ]
+    
+    # Development validation
+    if len(inputs_list) != len(GAN_ORDER):
+        import logging
+        logging.getLogger("GANTab").error(
+            f"❌ inputs_list ({len(inputs_list)}) != GAN_ORDER ({len(GAN_ORDER)})"
+        )
 
     # Wire up event handlers
 

@@ -332,6 +332,22 @@ def rife_tab(
             interactive=False,
             show_download_button=True
         )
+        
+        # Comparison outputs (matching SeedVR2/GAN tabs)
+        image_slider = gr.ImageSlider(
+            label="🔍 Before/After Comparison",
+            interactive=False,
+            height=500,
+            slider_position=50,
+            max_height=600,
+            buttons=["download", "fullscreen"]
+        )
+        
+        video_comparison_html = gr.HTML(
+            label="🎬 Video Comparison Slider",
+            value="",
+            visible=False
+        )
 
     # Action buttons
     with gr.Row():
@@ -408,6 +424,12 @@ def rife_tab(
 
     # Collect all inputs matching RIFE_ORDER exactly
     # IMPORTANT: Order must match RIFE_ORDER in shared/services/rife_service.py
+    # ============================================================================
+    # 📋 RIFE PRESET INPUT LIST - MUST match RIFE_ORDER in rife_service.py
+    # Adding controls? Update rife_defaults(), RIFE_ORDER, and this list in sync.
+    # Current count: 32 components
+    # ============================================================================
+    
     inputs_list = [
         input_path,           # 0: input_path
         rife_enabled,         # 1: rife_enabled  
@@ -442,6 +464,13 @@ def rife_tab(
         output_quality_rife,  # 30: output_quality
         concat_videos,        # 31: concat_videos
     ]
+    
+    # Development validation
+    if len(inputs_list) != len(RIFE_ORDER):
+        import logging
+        logging.getLogger("RIFETab").error(
+            f"❌ inputs_list ({len(inputs_list)}) != RIFE_ORDER ({len(RIFE_ORDER)})"
+        )
 
     # Wire up event handlers
 
@@ -466,7 +495,7 @@ def rife_tab(
     process_btn.click(
         fn=lambda *args: service["run_action"](*args[:-1], state=args[-1]),
         inputs=inputs_list + [shared_state],
-        outputs=[status_box, log_box, progress_indicator, output_video, shared_state]
+        outputs=[status_box, log_box, progress_indicator, output_video, image_slider, video_comparison_html, shared_state]
     )
 
     cancel_btn.click(

@@ -180,6 +180,18 @@ def gan_defaults(base_dir: Path) -> Dict[str, Any]:
     }
 
 
+"""
+📋 GAN PRESET ORDER
+
+MUST match inputs_list order in ui/gan_tab.py.
+
+🔧 TO ADD NEW CONTROLS:
+1. Add default to gan_defaults()
+2. Append key to GAN_ORDER below
+3. Add component to ui/gan_tab.py inputs_list
+4. Old presets auto-merge (no migration needed)
+"""
+
 GAN_ORDER: List[str] = [
     "input_path",
     "batch_enable",
@@ -261,10 +273,16 @@ def build_gan_callbacks(
         return gr.Dropdown.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
+        """Save preset with validation"""
         if not preset_name.strip():
             return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
+            # Validate component count
+            if len(args) != len(GAN_ORDER):
+                error_msg = f"⚠️ Preset mismatch: {len(args)} values vs {len(GAN_ORDER)} expected. Check inputs_list in gan_tab.py"
+                return gr.Dropdown.update(), gr.Markdown.update(value=error_msg), *list(args)
+            
             payload = _gan_dict_from_args(list(args))
             model_name = payload["model"]
             preset_manager.save_preset_safe("gan", model_name, preset_name.strip(), payload)

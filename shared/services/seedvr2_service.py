@@ -13,6 +13,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import gradio as gr
 
 from shared.preset_manager import PresetManager
+from shared.preset_auto_serializer import (
+    auto_detect_inputs,
+    serialize_component_values,
+    deserialize_to_component_values,
+    create_auto_order
+)
 from shared.runner import Runner, RunResult
 from shared.path_utils import (
     normalize_path,
@@ -185,6 +191,25 @@ def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
         "_compile_compatible": compile_compatible,  # Store for validation
     }
 
+
+"""
+📋 PRESET SERIALIZATION ORDER
+
+This list defines the order of parameters for preset save/load.
+MUST match inputs_list order in ui/seedvr2_tab.py.
+
+🔧 HOW TO ADD NEW CONTROLS (Current Manual Method):
+1. Add default value to seedvr2_defaults() function
+2. Append key name to SEEDVR2_ORDER below (at end for backward compat)
+3. Add Gradio component to ui/seedvr2_tab.py inputs_list (same position)
+4. Old presets auto-merge: missing keys use current defaults (no migration needed!)
+
+💡 FUTURE IMPROVEMENT:
+The preset_auto_serializer module could auto-generate this order from components,
+eliminating manual maintenance. For now, keep this synchronized manually.
+
+To validate sync, check: len(inputs_list) == len(SEEDVR2_ORDER)
+"""
 
 SEEDVR2_ORDER: List[str] = [
     # Input/Output
@@ -422,8 +447,39 @@ def _list_media_files(folder: str, video_exts: set, image_exts: set) -> List[str
 
 # Preset helpers ---------------------------------------------------------------
 def _seedvr2_dict_from_args(args: List[Any]) -> Dict[str, Any]:
-    """Convert argument list to settings dictionary."""
+    """
+    Convert argument list to settings dictionary.
+    
+    Uses SEEDVR2_ORDER for backward compatibility, but could be auto-detected
+    using auto_detect_inputs() from preset_auto_serializer for future-proofing.
+    
+    To add a new control:
+    1. Add to seedvr2_defaults() with default value
+    2. Add to SEEDVR2_ORDER list (append at end for backward compat)
+    3. Add to inputs_list in seedvr2_tab.py (same order as SEEDVR2_ORDER)
+    4. That's it! Auto-merging ensures old presets still work.
+    """
     return dict(zip(SEEDVR2_ORDER, args))
+
+
+def _validate_preset_completeness(components: List[gr.components.Component]) -> None:
+    """
+    Validate that components list matches SEEDVR2_ORDER length.
+    Helps catch mismatches during development.
+    
+    This is a development-time helper that ensures inputs_list and SEEDVR2_ORDER
+    stay in sync. Remove or disable in production.
+    """
+    if len(components) != len(SEEDVR2_ORDER):
+        error_msg = (
+            f"⚠️ PRESET MISMATCH: inputs_list has {len(components)} components "
+            f"but SEEDVR2_ORDER has {len(SEEDVR2_ORDER)} keys.\n"
+            f"This will cause preset save/load errors.\n"
+            f"Expected keys: {SEEDVR2_ORDER}\n"
+            f"Component count: {len(components)}"
+        )
+        error_logger.warning(error_msg)
+        # Don't raise - just warn, as this is recoverable
 
 
 def _apply_preset_to_values(
@@ -773,7 +829,15 @@ def build_seedvr2_callbacks(
     output_dir: Path,
     temp_dir: Path,
 ):
-    """Build SeedVR2 callback functions for the UI."""
+    """
+    Build SeedVR2 callback functions for the UI.
+    
+    Returns a dict of callbacks that can be wired to Gradio components.
+    The callbacks handle preset management, validation, and processing orchestration.
+    
+    Note: Component order validation is performed when inputs_list is passed to save_preset.
+    If you add new controls, update both SEEDVR2_ORDER and inputs_list in seedvr2_tab.py.
+    """
     defaults = seedvr2_defaults()
 
     def refresh_presets(model_name: str, select_name: Optional[str] = None):
@@ -785,11 +849,25 @@ def build_seedvr2_callbacks(
         return gr.Dropdown.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, model_name: str, *args):
-        """Save a preset."""
+        """
+        Save a preset with automatic validation.
+        
+        Validates that args length matches SEEDVR2_ORDER to catch integration bugs early.
+        """
         if not preset_name.strip():
             return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
+            # Validate component count matches ORDER
+            if len(args) != len(SEEDVR2_ORDER):
+                error_msg = (
+                    f"⚠️ Preset schema mismatch: received {len(args)} values but expected {len(SEEDVR2_ORDER)}. "
+                    f"This indicates inputs_list in seedvr2_tab.py is out of sync with SEEDVR2_ORDER. "
+                    f"Preset saving aborted to prevent corruption."
+                )
+                error_logger.error(error_msg)
+                return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ {error_msg[:200]}..."), *list(args)
+            
             payload = _seedvr2_dict_from_args(list(args))
             validated_payload = _enforce_seedvr2_guardrails(payload, defaults, state=None)
 
@@ -1405,10 +1483,18 @@ def build_seedvr2_callbacks(
                 if failed > 0:
                     summary_msg += f", {failed} failed"
 
-                # Write consolidated metadata for image-only batches
-                if is_image_only_batch and batch_outputs:
-                    try:
-                        # Write single metadata file for entire image batch
+                # Write consolidated metadata for ALL batches (images AND videos)
+                # User requirement: "only have 1 metadata for batch image upscale and have individual metadata for videos upscale"
+                # Implementation: 
+                # - Image batches: Single consolidated metadata (no per-file metadata to avoid spam)
+                # - Video batches: Individual per-video metadata (already written by _process_single_file) + batch summary
+                # - Mixed batches: Both image and video summaries
+                
+                try:
+                    metadata_dir = Path(batch_output_path) if batch_output_path.exists() else output_dir
+                    
+                    if is_image_only_batch:
+                        # Image-only batch: Single consolidated metadata (no per-file metadata)
                         batch_metadata = {
                             "batch_type": "images",
                             "total_files": len(jobs),
@@ -1422,17 +1508,35 @@ def build_seedvr2_callbacks(
                                 for job in jobs if job.status == "failed"
                             ]
                         }
-                        
-                        # Write to batch output folder
-                        metadata_dir = Path(batch_output_path) if batch_output_path.exists() else output_dir
                         metadata_path = metadata_dir / "batch_images_metadata.json"
-                        
-                        import json
-                        with metadata_path.open("w", encoding="utf-8") as f:
-                            json.dump(batch_metadata, f, indent=2)
-                    except Exception as e:
-                        # Don't fail batch on metadata error
-                        pass
+                    else:
+                        # Video batch or mixed batch: Batch summary + individual per-video metadata
+                        # Note: Individual video metadata already written by _process_single_file → run_logger.write_summary
+                        batch_metadata = {
+                            "batch_type": "videos" if video_count > 0 and image_count == 0 else "mixed",
+                            "total_files": len(jobs),
+                            "video_files": video_count,
+                            "image_files": image_count,
+                            "completed": completed,
+                            "failed": failed,
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "settings": settings,
+                            "outputs": batch_outputs,
+                            "individual_metadata_note": "Each video has its own run_metadata.json in its output directory",
+                            "failed_files": [
+                                {"input": job.input_path, "error": job.error_message}
+                                for job in jobs if job.status == "failed"
+                            ]
+                        }
+                        metadata_path = metadata_dir / "batch_videos_summary.json"
+                    
+                    import json
+                    with metadata_path.open("w", encoding="utf-8") as f:
+                        json.dump(batch_metadata, f, indent=2)
+                    
+                except Exception as e:
+                    # Don't fail batch on metadata error
+                    pass
 
                 # Update gr.Progress to 100%
                 if progress:

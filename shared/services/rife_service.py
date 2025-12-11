@@ -69,6 +69,12 @@ def rife_defaults() -> Dict[str, Any]:
     }
 
 
+"""
+📋 RIFE PRESET ORDER - MUST match inputs_list in ui/rife_tab.py
+Adding controls? Update rife_defaults(), RIFE_ORDER, and inputs_list in sync.
+Current count: 32 components
+"""
+
 RIFE_ORDER: List[str] = [
     "input_path",
     "rife_enabled",
@@ -422,11 +428,16 @@ def build_rife_callbacks(
         return gr.Dropdown.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
-        """Save a preset."""
+        """Save preset with validation"""
         if not preset_name.strip():
             return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
+            # Validate component count
+            if len(args) != len(RIFE_ORDER):
+                error_msg = f"⚠️ Preset mismatch: {len(args)} values vs {len(RIFE_ORDER)} expected. Check inputs_list in rife_tab.py"
+                return gr.Dropdown.update(), gr.Markdown.update(value=error_msg), *list(args)
+            
             payload = _rife_dict_from_args(list(args))
             model_name = payload["model"]
             preset_manager.save_preset_safe("rife", model_name, preset_name.strip(), payload)
@@ -476,31 +487,31 @@ def build_rife_callbacks(
             # Check ffmpeg availability
             ffmpeg_ok, ffmpeg_msg = check_ffmpeg_available()
             if not ffmpeg_ok:
-                yield ("❌ ffmpeg not found in PATH", ffmpeg_msg or "Install ffmpeg and add to PATH before processing", None, "ffmpeg missing")
+                yield ("❌ ffmpeg not found in PATH", ffmpeg_msg or "Install ffmpeg and add to PATH before processing", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 return
             
             # Check disk space (require at least 5GB free)
             output_path_check = Path(global_settings.get("output_dir", output_dir))
             has_space, space_warning = check_disk_space(output_path_check, required_mb=5000)
             if not has_space:
-                yield ("❌ Insufficient disk space", space_warning or "Free up at least 5GB disk space before processing", None, "Low disk space")
+                yield ("❌ Insufficient disk space", space_warning or "Free up at least 5GB disk space before processing", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 return
 
             input_path = normalize_path(uploaded_file if uploaded_file else img_folder)
             if not input_path or not Path(input_path).exists():
-                yield ("❌ Input missing or not found", "", None, "No metadata")
+                yield ("❌ Input missing or not found", "", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 return
 
             # Validate input type based on mode
             if settings.get("img_mode"):
                 # In --img mode, require a frames folder or images
                 if Path(input_path).is_file() and Path(input_path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
-                    yield ("⚠️ --img mode expects frames folder or images, not a video file.", "", None, "No metadata")
+                    yield ("⚠️ --img mode expects frames folder or images, not a video file.", "", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                     return
             else:
                 # In video mode, require a video file
                 if Path(input_path).is_dir():
-                    yield ("⚠️ Video mode expects a video file. Enable --img for frame folders.", "", None, "No metadata")
+                    yield ("⚠️ Video mode expects a video file. Enable --img for frame folders.", "", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                     return
 
             settings["input_path"] = input_path
@@ -524,18 +535,38 @@ def build_rife_callbacks(
             # Validate CUDA devices
             cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
             if cuda_warning:
-                yield (f"⚠️ {cuda_warning}", "", None, "No metadata")
+                yield (f"⚠️ {cuda_warning}", "", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 return
 
             # Check ffmpeg availability
             if not _ffmpeg_available():
-                yield ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", None, "No metadata")
+                yield ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 return
 
             # Apply cached values from Resolution & Scene Split tab
             if seed_controls.get("resolution_val") is not None:
                 # For RIFE, resolution affects downscaling before processing
-                pass
+                target_resolution = int(seed_controls["resolution_val"])
+                max_resolution = int(seed_controls.get("max_resolution_val", 0) or 0)
+                
+                # Calculate scale factor needed to reach target resolution
+                input_dims = get_media_dimensions(input_path)
+                if input_dims:
+                    input_w, input_h = input_dims
+                    short_side = min(input_w, input_h)
+                    
+                    # Apply max resolution cap if enabled
+                    effective_target = target_resolution
+                    enable_max = seed_controls.get("enable_max_target", True)
+                    if enable_max and max_resolution > 0:
+                        effective_target = min(target_resolution, max_resolution)
+                    
+                    # Calculate scale needed to reach target
+                    if short_side > 0 and effective_target > 0:
+                        calculated_scale = effective_target / short_side
+                        # Clamp to reasonable range for RIFE (0.5x to 4.0x)
+                        calculated_scale = max(0.5, min(4.0, calculated_scale))
+                        settings["scale"] = calculated_scale
 
             # Apply output format from Comparison tab if set
             cached_fmt = seed_controls.get("output_format_val")
@@ -564,7 +595,7 @@ def build_rife_callbacks(
                 from shared.chunking import chunk_and_process
                 
                 yield ("⚙️ Starting PySceneDetect chunking for RIFE processing...", 
-                       "Initializing scene detection...", None, "Chunking...")
+                       "Initializing scene detection...", gr.Markdown.update(value="Chunking...", visible=True), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 
                 # Prepare settings for chunking
                 settings["chunk_size_sec"] = chunk_size_sec
@@ -572,7 +603,7 @@ def build_rife_callbacks(
                 settings["per_chunk_cleanup"] = per_chunk_cleanup
                 
                 def chunk_progress_cb(progress_val, desc=""):
-                    yield (f"⚙️ Chunking: {desc}", f"Processing chunks... {desc}", None, desc)
+                    yield (f"⚙️ Chunking: {desc}", f"Processing chunks... {desc}", gr.Markdown.update(value=desc, visible=True), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 
                 # Run chunked RIFE processing
                 rc, clog, final_output, chunk_count = chunk_and_process(
@@ -594,9 +625,27 @@ def build_rife_callbacks(
                 )
                 
                 status = "✅ RIFE chunked processing complete" if rc == 0 else f"⚠️ RIFE chunking failed (code {rc})"
+                
+                # Build comparison for chunked output
+                video_comp_html_update = gr.HTML.update(value="", visible=False)
+                image_slider_update = gr.ImageSlider.update(value=None)
+                
+                if final_output and Path(final_output).exists():
+                    if Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'):
+                        from shared.video_comparison_slider import create_video_comparison_html
+                        video_comp_html_value = create_video_comparison_html(
+                            original_video=settings["input_path"],
+                            upscaled_video=final_output,
+                            height=600,
+                            slider_position=50.0
+                        )
+                        video_comp_html_update = gr.HTML.update(value=video_comp_html_value, visible=True)
+                    elif not Path(final_output).is_dir():
+                        image_slider_update = gr.ImageSlider.update(value=(settings["input_path"], final_output), visible=True)
+                
                 meta_md = f"PySceneDetect chunking: {chunk_count} chunks processed\nOutput: {final_output}"
                 
-                yield (status, clog, final_output, meta_md)
+                yield (status, clog, gr.Markdown.update(value="", visible=False), final_output if final_output and Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv') else None, image_slider_update, video_comp_html_update, state)
                 return
 
             # Check for batch processing
@@ -608,7 +657,7 @@ def build_rife_callbacks(
                 batch_output_path = Path(settings.get("batch_output_path", ""))
 
                 if not batch_input_path.exists():
-                    yield ("❌ Batch input path does not exist", "", None, "No metadata")
+                    yield ("❌ Batch input path does not exist", "", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                     return
 
                 # Collect all video files for RIFE
@@ -621,7 +670,7 @@ def build_rife_callbacks(
                     batch_files = [batch_input_path]
 
                 if not batch_files:
-                    yield ("❌ No supported video files found in batch input", "", None, "No metadata")
+                    yield ("❌ No supported video files found in batch input", "", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                     return
 
                 # Create batch processor
@@ -653,7 +702,7 @@ def build_rife_callbacks(
                     if current_job:
                         status_msg += f" - Processing: {Path(current_job).name}"
 
-                    yield (status_msg, f"Processing {len(jobs)} videos...", None, f"Batch: {progress_data.get('completed_files', 0)}/{len(jobs)} completed")
+                    yield (status_msg, f"Processing {len(jobs)} videos...", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
 
                 # Define processing function for each job
                 def process_single_rife_job(job: BatchJob, progress_cb):
@@ -709,7 +758,7 @@ def build_rife_callbacks(
                 if failed > 0:
                     summary_msg += f", {failed} failed"
 
-                yield (f"✅ {summary_msg}", f"Batch processing finished. Check output folder for results.", None, f"Batch: {completed} completed, {failed} failed")
+                yield (f"✅ {summary_msg}", f"Batch processing finished. Check output folder for results.", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 return
 
             # Single file processing with streaming updates
@@ -722,10 +771,10 @@ def build_rife_callbacks(
                 # Throttle updates to every 0.5 seconds to avoid UI spam
                 if current_time - last_progress_update > 0.5:
                     last_progress_update = current_time
-                    yield (f"⚙️ Processing: {message}", f"Progress: {message}", None, f"Status: {message}")
+                    yield (f"⚙️ Processing: {message}", f"Progress: {message}", gr.Markdown.update(value=message, visible=True), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
 
             # Start processing with progress tracking
-            yield ("⚙️ Starting processing...", "Initializing...", None, "Initializing...")
+            yield ("⚙️ Starting processing...", "Initializing...", gr.Markdown.update(value="Initializing...", visible=True), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
 
             # Determine processing workflow
             edit_mode = settings.get("edit_mode", "none")
@@ -736,7 +785,7 @@ def build_rife_callbacks(
 
             # Step 1: Apply video editing (if any)
             if edit_mode != "none":
-                yield ("⚙️ Applying video editing...", "Processing video edits...", None, "Video editing in progress...")
+                yield ("⚙️ Applying video editing...", "Processing video edits...", gr.Markdown.update(value="Video editing in progress...", visible=True), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
 
                 edit_temp_output = temp_dir / f"edit_temp_{Path(current_input).stem}_{int(time.time())}.mp4"
                 edit_success, edit_log, edited_path = _apply_video_editing(
@@ -745,11 +794,11 @@ def build_rife_callbacks(
                 )
 
                 if not edit_success:
-                    yield (f"❌ Video editing failed: {edit_log}", "Edit failed", None, "Edit failed")
+                    yield (f"❌ Video editing failed: {edit_log}", "Edit failed", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                     return
 
                 current_input = edited_path
-                yield ("✅ Video editing completed", "Edit completed successfully", None, "Video editing done")
+                yield ("✅ Video editing completed", "Edit completed successfully", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
 
             # Step 2: Apply RIFE processing (if enabled)
             if rife_enabled:
@@ -757,7 +806,7 @@ def build_rife_callbacks(
                 rife_settings = settings.copy()
                 rife_settings["input_path"] = current_input
 
-                yield ("⚙️ Running RIFE frame interpolation...", "Starting RIFE processing...", None, "RIFE processing...")
+                yield ("⚙️ Running RIFE frame interpolation...", "Starting RIFE processing...", gr.Markdown.update(value="RIFE processing...", visible=True), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
 
                 # Create a queue for progress updates
                 progress_queue = queue.Queue()
@@ -778,19 +827,19 @@ def build_rife_callbacks(
                     try:
                         update_type, data = progress_queue.get(timeout=0.1)
                         if update_type == "progress":
-                            yield (f"⚙️ RIFE Processing: {data}", f"Progress: {data}", None, f"Status: {data}")
+                            yield (f"⚙️ RIFE Processing: {data}", f"Progress: {data}", gr.Markdown.update(value=data, visible=True), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                         elif update_type == "complete":
                             result = data
                             processing_complete = True
                             break
                         elif update_type == "error":
-                            yield ("❌ RIFE processing failed", f"Error: {data}", None, "Error occurred")
+                            yield ("❌ RIFE processing failed", f"Error: {data}", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                             return
                     except queue.Empty:
                         continue
 
                 if not processing_complete:
-                    yield ("❌ Processing timed out", "RIFE processing did not complete within expected time", None, "Timeout")
+                    yield ("❌ Processing timed out", "RIFE processing did not complete within expected time", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                     return
 
                 status = "✅ RIFE complete" if result.returncode == 0 else f"⚠️ RIFE exited with code {result.returncode}"
@@ -803,13 +852,13 @@ def build_rife_callbacks(
             # Apply face restoration if enabled
             face_apply = bool(global_settings.get("face_global", False))
             if face_apply and final_output_path and Path(final_output_path).exists():
-                yield ("⚙️ Applying face restoration...", "Face restoration in progress...", None, "Face restoration...")
+                yield ("⚙️ Applying face restoration...", "Face restoration in progress...", gr.Markdown.update(value="Face restoration...", visible=True), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 face_strength = float(global_settings.get("face_strength", 0.5))
                 restored = restore_video(final_output_path, strength=face_strength,
                                        on_progress=lambda x: progress_callback(f"Face restoration: {x}"))
                 if restored:
                     final_output_path = restored
-                    yield ("✅ Face restoration completed", "Face restoration done", None, "Face restoration completed")
+                    yield ("✅ Face restoration completed", "Face restoration done", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
 
             # Create metadata string
             processing_steps = []
@@ -839,14 +888,53 @@ def build_rife_callbacks(
                     },
                 )
 
+            # Build comparison outputs (match UI expectations: 5 outputs total)
+            comparison_mode = seed_controls.get("comparison_mode_val", "native")
+            image_slider_update = gr.ImageSlider.update(value=None)
+            video_comparison_html_update = gr.HTML.update(value="", visible=False)
+            
+            if final_output_path and Path(final_output_path).exists():
+                original_input = settings["input_path"]
+                
+                # Video comparison with custom HTML slider
+                if Path(final_output_path).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'):
+                    if Path(original_input).exists():
+                        from shared.video_comparison_slider import create_video_comparison_html
+                        
+                        video_comp_html_value = create_video_comparison_html(
+                            original_video=original_input,
+                            upscaled_video=final_output_path,
+                            height=600,
+                            slider_position=50.0
+                        )
+                        video_comparison_html_update = gr.HTML.update(value=video_comp_html_value, visible=True)
+                
+                # Image comparison with ImageSlider (for single-frame outputs or image mode)
+                elif Path(final_output_path).suffix.lower() in ('.png', '.jpg', '.jpeg'):
+                    if Path(original_input).exists():
+                        image_slider_update = gr.ImageSlider.update(
+                            value=(original_input, final_output_path),
+                            visible=True
+                        )
+
             state["operation_status"] = "completed" if "✅" in status else "ready"
-            yield (status, result.log if rife_enabled and 'result' in locals() else "", final_output_path, meta_md)
+            
+            # Return 7 outputs to match UI expectations: status, log, progress_indicator, output_video, image_slider, video_comparison_html, state
+            yield (
+                status,
+                result.log if rife_enabled and 'result' in locals() else "",
+                gr.Markdown.update(value="", visible=False),  # progress_indicator (clear on completion)
+                final_output_path if final_output_path and Path(final_output_path).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv') else None,
+                image_slider_update,
+                video_comparison_html_update,
+                state
+            )
 
         except Exception as e:
             error_msg = f"Critical error in RIFE processing: {str(e)}"
             state = state or {}
             state["operation_status"] = "error"
-            yield ("❌ Critical error", error_msg, None, "Error occurred")
+            yield ("❌ Critical error", error_msg, gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
 
     def cancel():
         """Cancel current processing and compile any partial outputs if available."""
