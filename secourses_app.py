@@ -192,6 +192,8 @@ def main():
                 "per_chunk_cleanup": startup_res_settings.get("per_chunk_cleanup", False),
                 "scene_threshold": startup_res_settings.get("scene_threshold", 27.0),
                 "min_scene_len": startup_res_settings.get("min_scene_len", 2.0),
+                # RESTORE pinned reference from global settings (persists across restarts)
+                "pinned_reference_path": global_settings.get("pinned_reference_path"),
             },
             "operation_status": "ready"
         })

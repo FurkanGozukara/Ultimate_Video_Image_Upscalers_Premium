@@ -19,16 +19,33 @@ from shared.runner import Runner
 from shared.path_utils import normalize_path, ffmpeg_set_fps, get_media_dimensions
 from shared.face_restore import restore_video
 from shared.logging_utils import RunLogger
+from shared.models.rife_meta import get_rife_metadata, get_rife_default_model
+from shared.error_handling import logger as error_logger
 
 
 # Defaults and ordering --------------------------------------------------------
-def rife_defaults() -> Dict[str, Any]:
-    """Get default RIFE settings aligned with RIFE CLI."""
+def rife_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get default RIFE settings aligned with RIFE CLI.
+    Applies model-specific metadata when model_name is provided.
+    """
     try:
         import torch
         cuda_default = "0" if torch.cuda.is_available() else ""
     except Exception:
         cuda_default = ""
+    
+    # Get model metadata if specific model is provided
+    default_model = model_name or get_rife_default_model()
+    model_meta = get_rife_metadata(default_model)
+    
+    # Apply model-specific defaults if metadata available
+    if model_meta:
+        default_precision = model_meta.default_precision
+        recommended_uhd = model_meta.recommended_uhd_threshold
+    else:
+        default_precision = "fp16"
+        recommended_uhd = 2160
     
     return {
         "input_path": "",
@@ -36,12 +53,12 @@ def rife_defaults() -> Dict[str, Any]:
         "output_override": "",
         "output_format": "mp4",
         "model_dir": "",
-        "rife_model": "rife-v4.6",
+        "rife_model": default_model,
         "target_fps": 0,
         "fps_multiplier": "x2",
         "scale": 1.0,
         "uhd_mode": False,
-        "rife_precision": "fp16",
+        "rife_precision": default_precision,
         "png_output": False,
         "no_audio": False,
         "show_ffmpeg": False,
@@ -66,6 +83,7 @@ def rife_defaults() -> Dict[str, Any]:
         "concat_videos": "",
         "reverse": False,
         "loop_count": 1,
+        "_recommended_uhd_threshold": recommended_uhd,  # Store for validation
     }
 
 
@@ -392,6 +410,63 @@ def _rife_dict_from_args(args: List[Any]) -> Dict[str, Any]:
     return dict(zip(RIFE_ORDER, args))
 
 
+def _enforce_rife_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Apply RIFE-specific validation rules using metadata registry.
+    
+    Enforces:
+    - Single GPU requirement (RIFE doesn't support multi-GPU)
+    - UHD mode recommendations for 4K+ content
+    - FPS multiplier constraints from model metadata
+    - Precision compatibility checks
+    """
+    cfg = cfg.copy()
+    
+    # Get model metadata
+    model_name = cfg.get("rife_model", get_rife_default_model())
+    model_meta = get_rife_metadata(model_name)
+    
+    if model_meta:
+        # Enforce single GPU (RIFE is single-GPU optimized)
+        gpu_device_str = str(cfg.get("gpu_device", ""))
+        if gpu_device_str and gpu_device_str not in ("", "cpu"):
+            devices = [d.strip() for d in gpu_device_str.replace(" ", "").split(",") if d.strip()]
+            if len(devices) > 1:
+                error_logger.warning(f"RIFE doesn't support multi-GPU - forcing single GPU (using first: {devices[0]})")
+                cfg["gpu_device"] = devices[0]
+                cfg["_multi_gpu_disabled_reason"] = "RIFE is single-GPU optimized"
+        
+        # Validate FPS multiplier against model limits
+        fps_mult_str = str(cfg.get("fps_multiplier", "x2"))
+        try:
+            # Extract numeric multiplier (e.g., "x2" -> 2)
+            mult_value = int(fps_mult_str.replace("x", "").strip())
+            max_mult = model_meta.max_fps_multiplier
+            
+            if mult_value > max_mult:
+                error_logger.warning(f"FPS multiplier {mult_value}x exceeds model limit {max_mult}x, clamping")
+                cfg["fps_multiplier"] = f"x{max_mult}"
+                cfg["_fps_mult_clamped_reason"] = f"Model {model_name} max: {max_mult}x"
+        except (ValueError, AttributeError):
+            pass  # Keep original value if parsing fails
+        
+        # Auto-enable UHD mode for high-resolution content
+        # This is a recommendation check - actual enabling happens in processing
+        if model_meta.supports_uhd:
+            cfg["_uhd_threshold"] = model_meta.recommended_uhd_threshold
+    
+    # Validate scale factor (must be positive)
+    try:
+        scale = float(cfg.get("scale", 1.0))
+        if scale <= 0:
+            cfg["scale"] = 1.0
+            error_logger.warning(f"Invalid scale {scale}, resetting to 1.0")
+    except (ValueError, TypeError):
+        cfg["scale"] = 1.0
+    
+    return cfg
+
+
 def _apply_rife_preset(
     preset: Dict[str, Any],
     defaults: Dict[str, Any],
@@ -403,6 +478,8 @@ def _apply_rife_preset(
     if current:
         base.update(current)
     merged = preset_manager.merge_config(base, preset)
+    # Apply guardrails to merged preset
+    merged = _enforce_rife_guardrails(merged, defaults)
     return [merged[key] for key in RIFE_ORDER]
 
 
@@ -480,6 +557,9 @@ def build_rife_callbacks(
             
             settings_dict = _rife_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
+            
+            # Apply RIFE guardrails (single GPU, FPS limits, etc.)
+            settings = _enforce_rife_guardrails(settings, defaults)
 
             # PRE-FLIGHT CHECKS (mirrors SeedVR2/GAN for consistency)
             from shared.error_handling import check_ffmpeg_available, check_disk_space

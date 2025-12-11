@@ -100,22 +100,27 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                     label="PNG Frame Number Padding",
                     minimum=1, maximum=10, step=1,
                     value=values[2],
-                    info="✅ Number of digits for frame numbers (e.g., 5 = 00001.png, 6 = 000001.png).\n"
-                         "⚠️ **MODEL-SPECIFIC BEHAVIOR:**\n"
-                         "• **SeedVR2**: Hardcoded 6-digit padding (CLI limitation - cannot be changed)\n"
-                         "• **GAN/RIFE**: Fully respects this setting\n"
-                         "Recommendation: Keep at 6 for consistency across all models.",
+                    info="Number of digits for frame numbers (e.g., 5 = 00001.png, 6 = 000001.png).\n\n"
+                         "⚠️ **CRITICAL MODEL-SPECIFIC LIMITATION:**\n"
+                         "• **SeedVR2**: ❌ HARDCODED to 6 digits in CLI (line 728 of inference_cli.py)\n"
+                         "  → This slider has NO EFFECT on SeedVR2 PNG outputs\n"
+                         "  → SeedVR2 will ALWAYS use 6-digit padding regardless of this setting\n"
+                         "• **GAN/RIFE/FlashVSR**: ✅ Fully respects this setting\n\n"
+                         "💡 **Recommendation**: Keep at 6 for consistency. If using SeedVR2 + other models,\n"
+                         "setting to 6 ensures all outputs match. Custom padding only works for GAN/RIFE/FlashVSR.",
                     interactive=True
                 )
 
                 png_keep_basename = gr.Checkbox(
                     label="Keep Original Basename in PNG Names",
                     value=values[3],
-                    info="✅ Preserve input filename as base for PNG frames (e.g., 'video.mp4' → 'video_00001.png').\n"
+                    info="Preserve input filename as base for PNG frames (e.g., 'video.mp4' → 'video_00001.png').\n\n"
                          "⚠️ **MODEL-SPECIFIC BEHAVIOR:**\n"
-                         "• **SeedVR2**: Always preserves input basename (CLI limitation - cannot be changed)\n"
-                         "• **GAN/RIFE**: Fully respects this setting\n"
-                         "All models respect collision-safe naming to prevent overwrites."
+                         "• **SeedVR2**: ✅ Always preserves input basename (CLI design)\n"
+                         "  → This checkbox has NO EFFECT on SeedVR2 outputs\n"
+                         "  → SeedVR2 will ALWAYS keep basename regardless of this setting\n"
+                         "• **GAN/RIFE/FlashVSR**: ✅ Fully respects this setting\n\n"
+                         "💡 **Note**: All models use collision-safe naming (_0001, _0002, etc.) to prevent overwrites."
                 )
 
         # Video Settings

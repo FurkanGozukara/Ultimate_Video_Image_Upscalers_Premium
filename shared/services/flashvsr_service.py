@@ -16,37 +16,64 @@ from shared.flashvsr_runner import run_flashvsr, FlashVSRResult
 from shared.path_utils import normalize_path
 from shared.logging_utils import RunLogger
 from shared.comparison_unified import create_unified_comparison
+from shared.models.flashvsr_meta import get_flashvsr_metadata, get_flashvsr_default_model
+from shared.error_handling import logger as error_logger
 
 # Cancel event for FlashVSR+ processing
 _flashvsr_cancel_event = threading.Event()
 
 
-def flashvsr_defaults() -> Dict[str, Any]:
-    """Get default FlashVSR+ settings aligned with CLI defaults."""
+def flashvsr_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get default FlashVSR+ settings aligned with CLI defaults.
+    Applies model-specific metadata when model_name is provided.
+    """
     try:
         import torch
         cuda_default = "auto" if torch.cuda.is_available() else "cpu"
     except Exception:
         cuda_default = "cpu"
     
+    # Get model metadata if specific model is provided
+    default_model = model_name or get_flashvsr_default_model()
+    model_meta = get_flashvsr_metadata(default_model)
+    
+    # Apply model-specific defaults if metadata available
+    if model_meta:
+        default_dtype = model_meta.default_dtype
+        default_tile_size = model_meta.default_tile_size
+        default_overlap = model_meta.default_overlap
+        default_attention = model_meta.default_attention
+        version = model_meta.version
+        mode = model_meta.mode
+        scale = model_meta.scale
+    else:
+        default_dtype = "bf16"
+        default_tile_size = 256
+        default_overlap = 24
+        default_attention = "sage"
+        version = "10"
+        mode = "tiny"
+        scale = 4
+    
     return {
         "input_path": "",
         "output_override": "",
-        "scale": 4,
-        "version": "10",
-        "mode": "tiny",
+        "scale": scale,
+        "version": version,
+        "mode": mode,
         "tiled_vae": False,
         "tiled_dit": False,
-        "tile_size": 256,
-        "overlap": 24,
+        "tile_size": default_tile_size,
+        "overlap": default_overlap,
         "unload_dit": False,
         "color_fix": True,
         "seed": 0,
-        "dtype": "bf16",
+        "dtype": default_dtype,
         "device": cuda_default,
         "fps": 30,
         "quality": 6,
-        "attention": "sage",
+        "attention": default_attention,
         "batch_enable": False,
         "batch_input_path": "",
         "batch_output_path": "",
@@ -81,6 +108,62 @@ def _flashvsr_dict_from_args(args: List[Any]) -> Dict[str, Any]:
     return dict(zip(FLASHVSR_ORDER, args))
 
 
+def _enforce_flashvsr_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Apply FlashVSR+-specific validation rules using metadata registry.
+    
+    Enforces:
+    - Single GPU requirement (FlashVSR+ doesn't support multi-GPU well)
+    - VRAM-based tile size recommendations
+    - Resolution constraints from model metadata
+    - Valid version/mode/scale combinations
+    """
+    cfg = cfg.copy()
+    
+    # Build model identifier and get metadata
+    model_id = f"v{cfg.get('version', '10')}_{cfg.get('mode', 'tiny')}_{cfg.get('scale', 4)}x"
+    model_meta = get_flashvsr_metadata(model_id)
+    
+    if model_meta:
+        # Enforce single GPU (FlashVSR+ doesn't support multi-GPU)
+        device_str = str(cfg.get("device", "auto"))
+        if device_str not in ("auto", "cpu"):
+            # Parse device specification
+            devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
+            if len(devices) > 1:
+                error_logger.warning(f"FlashVSR+ doesn't support multi-GPU - forcing single GPU (using first: {devices[0]})")
+                cfg["device"] = devices[0]
+                cfg["_multi_gpu_disabled_reason"] = "FlashVSR+ is single-GPU optimized"
+        
+        # Apply model-specific defaults if not set
+        if not cfg.get("dtype"):
+            cfg["dtype"] = model_meta.default_dtype
+        
+        if cfg.get("tile_size", 0) == 0:
+            cfg["tile_size"] = model_meta.default_tile_size
+        
+        if cfg.get("overlap", 0) == 0:
+            cfg["overlap"] = model_meta.default_overlap
+        
+        if not cfg.get("attention"):
+            cfg["attention"] = model_meta.default_attention
+        
+        # Validate tile overlap constraint
+        if cfg.get("tiled_vae") or cfg.get("tiled_dit"):
+            tile_size = int(cfg.get("tile_size", model_meta.default_tile_size))
+            overlap = int(cfg.get("overlap", model_meta.default_overlap))
+            
+            if overlap >= tile_size:
+                cfg["overlap"] = max(0, tile_size - 1)
+                error_logger.warning(f"Tile overlap ({overlap}) >= tile size ({tile_size}), correcting to {cfg['overlap']}")
+            
+            if tile_size < 64:
+                cfg["tile_size"] = model_meta.default_tile_size
+                error_logger.warning(f"Tile size too small, resetting to {cfg['tile_size']}")
+    
+    return cfg
+
+
 def _apply_flashvsr_preset(
     preset: Dict[str, Any],
     defaults: Dict[str, Any],
@@ -91,6 +174,8 @@ def _apply_flashvsr_preset(
     if current:
         base.update(current)
     merged = preset_manager.merge_config(base, preset)
+    # Apply guardrails to merged preset
+    merged = _enforce_flashvsr_guardrails(merged, defaults)
     return [merged[k] for k in FLASHVSR_ORDER]
 
 
@@ -159,6 +244,9 @@ def build_flashvsr_callbacks(
             seed_controls = state.get("seed_controls", {})
             settings_dict = _flashvsr_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
+            
+            # Apply FlashVSR+ guardrails (single GPU, tile validation, etc.)
+            settings = _enforce_flashvsr_guardrails(settings, defaults)
             
             # Apply shared Resolution & Scene Split tab settings (like SeedVR2/GAN)
             if seed_controls.get("resolution_val") is not None:

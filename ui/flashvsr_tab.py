@@ -49,9 +49,38 @@ def flashvsr_tab(
     merged_defaults = preset_manager.merge_config(defaults, last_used or {})
     values = [merged_defaults[k] for k in FLASHVSR_ORDER]
 
+    # GPU detection and warnings
+    cuda_available = False
+    cuda_count = 0
+    gpu_hint = "CUDA detection in progress..."
+    
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+        cuda_count = torch.cuda.device_count() if cuda_available else 0
+        
+        if cuda_available and cuda_count > 0:
+            gpu_hint = f"✅ Detected {cuda_count} CUDA GPU(s) - GPU acceleration available\n⚠️ FlashVSR+ uses single GPU only (multi-GPU not supported)"
+        else:
+            gpu_hint = "⚠️ CUDA not available - Processing will use CPU (significantly slower)"
+    except Exception as e:
+        gpu_hint = f"❌ CUDA detection failed: {str(e)}"
+        cuda_available = False
+
     # Layout
     gr.Markdown("### ⚡ FlashVSR+ - Real-Time Diffusion Video Super-Resolution")
     gr.Markdown("*High-quality real-time video upscaling with diffusion models*")
+    
+    # Show GPU warning if not available
+    if not cuda_available:
+        gr.Markdown(
+            f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
+            f'<strong>⚠️ GPU Acceleration Unavailable</strong><br>'
+            f'{gpu_hint}<br><br>'
+            f'FlashVSR+ requires CUDA for optimal performance. CPU mode is extremely slow.'
+            f'</div>',
+            elem_classes="warning-text"
+        )
 
     with gr.Row():
         # Left Column: Input & Settings
@@ -91,7 +120,40 @@ def flashvsr_tab(
                     label="Pipeline Mode",
                     choices=["tiny", "tiny-long", "full"],
                     value=values[4],
-                    info="tiny = fastest, full = best quality, tiny-long = balanced"
+                    info="tiny = fastest (4-6GB VRAM), tiny-long = balanced (5-7GB), full = best quality (8-12GB)"
+                )
+            
+            # Model info display with metadata
+            model_info_display = gr.Markdown("")
+            
+            def update_flashvsr_model_info(version_val, mode_val, scale_val):
+                """Display model metadata information"""
+                from shared.models.flashvsr_meta import get_flashvsr_metadata
+                
+                model_id = f"v{version_val}_{mode_val}_{scale_val}x"
+                metadata = get_flashvsr_metadata(model_id)
+                
+                if metadata:
+                    info_lines = [
+                        f"**📊 Model: {metadata.name}**",
+                        f"**VRAM Estimate:** ~{metadata.estimated_vram_gb:.1f}GB",
+                        f"**Speed:** {metadata.speed_tier.title()} | **Quality:** {metadata.quality_tier.replace('_', ' ').title()}",
+                        f"**Multi-GPU:** {'❌ Not supported' if not metadata.supports_multi_gpu else '✅ Supported'}",
+                        f"**Compile:** {'✅ Compatible' if metadata.compile_compatible else '❌ Not supported'}",
+                    ]
+                    if metadata.notes:
+                        info_lines.append(f"\n💡 {metadata.notes}")
+                    
+                    return gr.Markdown.update(value="\n".join(info_lines), visible=True)
+                else:
+                    return gr.Markdown.update(value="Model metadata not available", visible=False)
+            
+            # Wire up model info updates
+            for component in [version, mode, scale]:
+                component.change(
+                    fn=update_flashvsr_model_info,
+                    inputs=[version, mode, scale],
+                    outputs=model_info_display
                 )
             
             # Processing Settings
@@ -106,10 +168,11 @@ def flashvsr_tab(
                 )
                 
                 device = gr.Textbox(
-                    label="Device",
-                    value=values[13],
-                    placeholder="auto, cuda:0, cpu",
-                    info="auto = automatic selection, cuda:0 = specific GPU, cpu = CPU mode"
+                    label="Device (Single GPU Only)",
+                    value=values[13] if cuda_available else "cpu",
+                    placeholder="auto, cuda:0, cpu" if cuda_available else "CPU only (no CUDA)",
+                    info=f"{gpu_hint}\nauto = automatic GPU selection, cuda:0 = specific GPU, cpu = CPU mode. Multi-GPU NOT supported by FlashVSR+.",
+                    interactive=cuda_available
                 )
                 
                 seed = gr.Number(

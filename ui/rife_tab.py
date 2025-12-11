@@ -187,6 +187,38 @@ def rife_tab(
                     value=values[5],
                     info="RIFE model version. v4.6 = fastest. v4.15+ = best quality. 'anime' optimized for animation. Newer versions slower but smoother."
                 )
+                
+                # Model info display with metadata
+                rife_model_info = gr.Markdown("")
+                
+                def update_rife_model_info(model_name_val):
+                    """Display RIFE model metadata information"""
+                    from shared.models.rife_meta import get_rife_metadata
+                    
+                    metadata = get_rife_metadata(model_name_val)
+                    
+                    if metadata:
+                        info_lines = [
+                            f"**📊 Model: {metadata.name}**",
+                            f"**Version:** {metadata.version} | **Variant:** {metadata.variant.title()}",
+                            f"**VRAM Estimate:** ~{metadata.estimated_vram_gb:.1f}GB",
+                            f"**Multi-GPU:** {'❌ Not supported (single GPU only)' if not metadata.supports_multi_gpu else '✅ Supported'}",
+                            f"**Max FPS Multiplier:** {metadata.max_fps_multiplier}x",
+                            f"**UHD Mode:** {'✅ Supported (recommended for 4K+)' if metadata.supports_uhd else '❌ Not available'}",
+                        ]
+                        if metadata.notes:
+                            info_lines.append(f"\n💡 {metadata.notes}")
+                        
+                        return gr.Markdown.update(value="\n".join(info_lines), visible=True)
+                    else:
+                        return gr.Markdown.update(value="Model metadata not available", visible=False)
+                
+                # Wire up model info update
+                rife_model.change(
+                    fn=update_rife_model_info,
+                    inputs=rife_model,
+                    outputs=rife_model_info
+                )
 
                 fps_multiplier = gr.Dropdown(
                     label="FPS Multiplier",
@@ -250,10 +282,11 @@ def rife_tab(
                 )
 
                 rife_gpu = gr.Textbox(
-                    label="GPU Device",
-                    value=values[24],
-                    placeholder="0 or all",
-                    info="GPU to use for RIFE interpolation. Single GPU recommended. Use 'all' for all available GPUs (support limited). Leave empty for default GPU (0)."
+                    label="GPU Device (Single GPU Only)",
+                    value=values[24] if cuda_available else "",
+                    placeholder="0" if cuda_available else "CPU only (no CUDA)",
+                    info=f"{gpu_hint}\n⚠️ RIFE uses SINGLE GPU only. Multi-GPU not supported. Enter single GPU ID (e.g., 0, 1, 2). Leave empty for default (GPU 0).",
+                    interactive=cuda_available
                 )
 
         # Video Editing

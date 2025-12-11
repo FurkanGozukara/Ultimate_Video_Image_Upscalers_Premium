@@ -29,8 +29,18 @@ def scan_gan_models(base_dir: Path) -> List[str]:
 
 # Re-export model metadata functions for convenience
 from .seedvr2_meta import get_seedvr2_model_names, get_seedvr2_models, model_meta_map
-from .flashvsr_meta import get_flashvsr_model_names, get_flashvsr_default_model
-from .rife_meta import get_rife_model_names, get_rife_default_model
+from .flashvsr_meta import (
+    get_flashvsr_model_names, 
+    get_flashvsr_default_model,
+    get_flashvsr_metadata,
+    flashvsr_model_map
+)
+from .rife_meta import (
+    get_rife_model_names, 
+    get_rife_default_model,
+    get_rife_metadata,
+    rife_model_map
+)
 
 
 __all__ = [
@@ -40,7 +50,11 @@ __all__ = [
     "model_meta_map",
     "get_flashvsr_model_names",
     "get_flashvsr_default_model",
+    "get_flashvsr_metadata",
+    "flashvsr_model_map",
     "get_rife_model_names",
-    "get_rife_default_model"
+    "get_rife_default_model",
+    "get_rife_metadata",
+    "rife_model_map"
 ]
 
