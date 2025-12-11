@@ -915,6 +915,10 @@ class Runner:
         )
 
         cmd = self._build_rife_cmd(cli_path, input_path, predicted_output, settings)
+        
+        # Wrap with vcvars for C++ toolchain support (Windows only, best-effort)
+        if self._active_mode == "subprocess":
+            cmd = self._maybe_wrap_with_vcvars(cmd, settings)
 
         # In-app mode (not cancelable)
         if self._active_mode == "in_app":

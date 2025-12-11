@@ -49,6 +49,7 @@ GLOBAL_DEFAULTS = {
     "face_global": False,
     "face_strength": 0.5,
     "mode": "subprocess",
+    "mode_locked": False,  # Persisted lock state for in-app mode
 }
 global_settings = preset_manager.load_global_settings(GLOBAL_DEFAULTS)
 
@@ -62,11 +63,13 @@ runner = Runner(
 )
 # Restore execution mode from saved settings (default to subprocess)
 saved_mode = global_settings.get("mode", "subprocess")
+mode_locked = global_settings.get("mode_locked", False)
 try:
     runner.set_mode(saved_mode)
 except Exception:
     runner.set_mode("subprocess")
     global_settings["mode"] = "subprocess"
+    global_settings["mode_locked"] = False
 run_logger = RunLogger(enabled=global_settings.get("telemetry", True))
 
 
@@ -79,6 +82,11 @@ def main():
     try:
         initial_report = collect_health_report(temp_dir=temp_dir, output_dir=output_dir)
         warnings = []
+        
+        # Add mode lock warning if applicable
+        if mode_locked and saved_mode == "in_app":
+            warnings.append("🔒 IN-APP MODE LOCKED: You are in in-app mode. To switch back to subprocess mode, restart the application.")
+        
         for key, info in initial_report.items():
             if info.get("status") not in ("ok", "skipped"):
                 warnings.append(f"{key}: {info.get('detail')}")

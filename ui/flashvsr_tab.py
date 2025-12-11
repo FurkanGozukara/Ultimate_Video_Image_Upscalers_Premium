@@ -33,8 +33,10 @@ def flashvsr_tab(
 
     # Get defaults and last used
     defaults = service["defaults"]
-    last_used_name = preset_manager.get_last_used_name("flashvsr", "v10_tiny")
-    last_used = preset_manager.load_last_used("flashvsr", "v10_tiny")
+    # Use current model context for last-used preset (not hardcoded)
+    current_model_context = f"v{defaults['version']}_{defaults['mode']}"
+    last_used_name = preset_manager.get_last_used_name("flashvsr", current_model_context)
+    last_used = preset_manager.load_last_used("flashvsr", current_model_context)
 
     if last_used_name and last_used is None:
         def update_warning(state):

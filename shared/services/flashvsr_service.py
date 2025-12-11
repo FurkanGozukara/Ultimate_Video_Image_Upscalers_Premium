@@ -156,8 +156,23 @@ def build_flashvsr_callbacks(
         """Main processing action with gr.Progress integration and pre-flight checks."""
         try:
             state = state or {"seed_controls": {}}
+            seed_controls = state.get("seed_controls", {})
             settings_dict = _flashvsr_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
+            
+            # Apply shared Resolution & Scene Split tab settings (like SeedVR2/GAN)
+            if seed_controls.get("resolution_val") is not None:
+                settings["target_resolution"] = seed_controls["resolution_val"]
+            if seed_controls.get("max_resolution_val") is not None:
+                settings["max_target_resolution"] = seed_controls["max_resolution_val"]
+            
+            # Apply Output tab cached settings
+            if seed_controls.get("fps_override_val") is not None and seed_controls["fps_override_val"] > 0:
+                settings["fps"] = seed_controls["fps_override_val"]
+            if seed_controls.get("comparison_mode_val"):
+                settings["_comparison_mode"] = seed_controls["comparison_mode_val"]
+            if seed_controls.get("save_metadata_val") is not None:
+                settings["save_metadata"] = seed_controls["save_metadata_val"]
             
             # Clear cancel event
             _flashvsr_cancel_event.clear()
@@ -262,8 +277,37 @@ def build_flashvsr_callbacks(
                     if progress:
                         progress(0, desc="Cancelled")
                     
+                    # Try to salvage partial outputs (mirrors SeedVR2/GAN behavior)
+                    compiled_output = None
+                    temp_base = Path(global_settings.get("temp_dir", temp_dir))
+                    temp_chunks_dir = temp_base / "chunks"
+                    
+                    if temp_chunks_dir.exists():
+                        try:
+                            from shared.chunking import detect_resume_state, concat_videos
+                            from shared.path_utils import collision_safe_path
+                            import shutil
+                            
+                            # Check for completed video chunks
+                            partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
+                            
+                            if completed_chunks and len(completed_chunks) > 0:
+                                partial_target = collision_safe_path(temp_chunks_dir / "cancelled_flashvsr_partial.mp4")
+                                if concat_videos(completed_chunks, partial_target):
+                                    final_output = Path(output_dir) / f"cancelled_flashvsr_partial_upscaled.mp4"
+                                    final_output = collision_safe_path(final_output)
+                                    shutil.copy2(partial_target, final_output)
+                                    compiled_output = str(final_output)
+                                    log_buffer.append(f"\n✅ Partial output salvaged: {final_output.name}")
+                        except Exception as e:
+                            log_buffer.append(f"\n⚠️ Could not salvage partials: {str(e)}")
+                    
+                    status_msg = "⏹️ Processing cancelled"
+                    if compiled_output:
+                        status_msg += f" - Partial output saved: {Path(compiled_output).name}"
+                    
                     yield (
-                        "⏹️ Processing cancelled",
+                        status_msg,
                         "\n".join(log_buffer[-50:]) + "\n\n[Cancelled by user]",
                         None,
                         None,

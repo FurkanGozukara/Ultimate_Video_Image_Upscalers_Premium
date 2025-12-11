@@ -51,8 +51,14 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         state["mode_state"] = {"locked": False}
     mode_state = state.get("mode_state", {})
 
+    # Load persisted lock state from global settings (survives restart)
+    persisted_locked = global_settings.get("mode_locked", False)
+    if persisted_locked:
+        mode_state["locked"] = True
+        state["mode_state"]["locked"] = True
+
     # Check if trying to switch FROM in-app TO subprocess (not allowed)
-    if mode_state.get("locked") and current == "in_app" and mode_choice == "subprocess":
+    if (mode_state.get("locked") or persisted_locked) and current == "in_app" and mode_choice == "subprocess":
         return (
             gr.Radio.update(value=current),  # Force radio back to in_app
             gr.Checkbox.update(value=False),  # Uncheck confirmation
@@ -110,11 +116,15 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         
         # Save to global settings
         global_settings["mode"] = actual_mode
-        preset_manager.save_global_settings(global_settings)
         
-        # Lock state if switching to in-app
+        # Persist lock state if switching to in-app
         if mode_choice == "in_app":
             state["mode_state"]["locked"] = True
+            global_settings["mode_locked"] = True  # Persist to disk (survives restart)
+        else:
+            global_settings["mode_locked"] = False
+        
+        preset_manager.save_global_settings(global_settings)
             success_msg = (
                 "✅ **Switched to in-app mode**\n\n"
                 "Models will now persist in VRAM between runs for faster processing.\n\n"

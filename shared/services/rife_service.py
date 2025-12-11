@@ -943,9 +943,57 @@ def build_rife_callbacks(
         if not canceled:
             return gr.Markdown.update(value="No active process to cancel"), ""
 
-        # Check for partial outputs that can be compiled (RIFE doesn't use chunking like SeedVR2,
-        # but we can check for any temporary files that might be partially processed)
-        return gr.Markdown.update(value="⏹️ RIFE processing cancelled"), "Processing cancelled - RIFE uses single-pass processing so no partial outputs to compile"
+        # Try to salvage partial outputs (mirrors SeedVR2/GAN/FlashVSR+ behavior)
+        compiled_output = None
+        temp_base = Path(global_settings.get("temp_dir", temp_dir))
+        temp_chunks_dir = temp_base / "chunks"
+        
+        if temp_chunks_dir.exists():
+            try:
+                from shared.chunking import detect_resume_state, concat_videos
+                from shared.path_utils import collision_safe_path
+                import shutil
+                
+                # Check for completed video chunks
+                partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
+                partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
+                
+                # Try to compile video chunks
+                if completed_chunks and len(completed_chunks) > 0:
+                    partial_target = collision_safe_path(temp_chunks_dir / "cancelled_rife_partial.mp4")
+                    if concat_videos(completed_chunks, partial_target):
+                        final_output = Path(output_dir) / f"cancelled_rife_partial_upscaled.mp4"
+                        final_output = collision_safe_path(final_output)
+                        shutil.copy2(partial_target, final_output)
+                        compiled_output = str(final_output)
+                
+                # Or compile PNG chunks
+                elif completed_png_chunks and len(completed_png_chunks) > 0:
+                    from shared.path_utils import collision_safe_dir
+                    partial_target = collision_safe_dir(temp_chunks_dir / "cancelled_rife_partial_png")
+                    partial_target.mkdir(parents=True, exist_ok=True)
+                    
+                    for i, chunk_path in enumerate(completed_png_chunks, 1):
+                        dest = partial_target / f"chunk_{i:04d}"
+                        if Path(chunk_path).is_dir():
+                            shutil.copytree(chunk_path, dest, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(chunk_path, dest)
+                    
+                    compiled_output = str(partial_target)
+                
+                if compiled_output:
+                    return (
+                        gr.Markdown.update(value=f"⏹️ Cancelled - Partial RIFE output saved: {Path(compiled_output).name}"),
+                        f"Partial results salvaged and saved to: {compiled_output}"
+                    )
+            except Exception as e:
+                return (
+                    gr.Markdown.update(value=f"⏹️ Cancelled - Error salvaging partials: {str(e)}"),
+                    "Processing cancelled but partial compilation failed"
+                )
+        
+        return gr.Markdown.update(value="⏹️ RIFE processing cancelled"), "Processing cancelled - no partial outputs found to salvage"
 
     def open_outputs_folder(state: Dict[str, Any]):
         """Open the outputs folder in file explorer."""
