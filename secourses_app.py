@@ -258,7 +258,7 @@ def main():
         
         # === FACE TAB ===
         face_cache = {}
-        for model in all_models[:10]:  # Limit to first 10 to avoid excessive loading
+        for model in all_models:  # Load face presets for ALL models (no limit)
             model_last_used = preset_manager.load_last_used("face", model)
             model_defaults = face_defaults(all_models)
             face_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
