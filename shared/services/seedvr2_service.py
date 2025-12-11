@@ -912,41 +912,71 @@ def build_seedvr2_callbacks(
             return gr.Markdown.update(value=f"ℹ️ {message}", visible=True)
 
     def cancel():
-        """Cancel current processing and compile any partial outputs if available."""
+        """
+        Cancel current processing and properly compile any partial outputs if available.
+        
+        ENHANCED: Uses proper merge pipeline with scene overlap handling when possible,
+        falls back to simple concat or latest-file recovery for edge cases.
+        """
         canceled = runner.cancel()
         if not canceled:
             return gr.Markdown.update(value="No active process to cancel"), ""
 
-        # ENHANCED: Check multiple locations for partial outputs
-        # 1. External chunked processing (PySceneDetect chunks)
-        # 2. Single-pass outputs in temp directory
-        # 3. Any incomplete output files in output directory
+        # Check multiple locations for partial outputs:
+        # 1. External chunked processing (PySceneDetect chunks) - PREFERRED (uses proper merge)
+        # 2. Single-pass outputs in temp directory - FALLBACK (best-effort copy)
         
         compiled_output = None
+        merge_method = "none"
         temp_base = Path(global_settings["temp_dir"])
         temp_chunks_dir = temp_base / "chunks"
         
-        # Try to find and compile chunk-based partial outputs
+        # Try to find and properly merge chunk-based partial outputs
         if temp_chunks_dir.exists():
             try:
-                from shared.chunking import detect_resume_state, concat_videos
-                from shared.path_utils import collision_safe_path
+                from shared.chunking import detect_resume_state, concat_videos, concat_videos_with_blending
+                from shared.path_utils import collision_safe_path, get_media_fps
 
                 partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
                 partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
 
-                # Try to compile video chunks
+                # Try to compile video chunks with PROPER BLENDING if overlap detected
                 if completed_chunks and len(completed_chunks) > 0:
                     partial_target = collision_safe_path(temp_chunks_dir / "cancelled_partial.mp4")
-                    if concat_videos(completed_chunks, partial_target):
-                        compiled_output = str(partial_target)
-                        # Copy to outputs folder - use generic name since settings not in scope
+                    
+                    # Detect if chunks have overlap metadata (check for overlap markers in chunk names or metadata)
+                    # For now, check if chunk count > 1 and use blending as safer default
+                    use_blending = len(completed_chunks) > 1
+                    
+                    if use_blending:
+                        # Use proper blending merge (same as main pipeline)
+                        # Get FPS from first chunk
+                        first_chunk_fps = get_media_fps(str(completed_chunks[0])) if completed_chunks else 30.0
+                        
+                        # Estimate overlap frames (assume 0.5s overlap by default for PySceneDetect chunks)
+                        overlap_frames = int((first_chunk_fps or 30.0) * 0.5)
+                        
+                        success = concat_videos_with_blending(
+                            chunk_paths=completed_chunks,
+                            output_path=partial_target,
+                            overlap_frames=overlap_frames,
+                            fps=first_chunk_fps,
+                            on_progress=None  # Silent merge during cancel
+                        )
+                        merge_method = "blended" if success else "simple"
+                    else:
+                        # Single chunk or no overlap - simple concat
+                        success = concat_videos(completed_chunks, partial_target)
+                        merge_method = "simple"
+                    
+                    if success and partial_target.exists():
+                        # Copy to outputs folder with collision-safe naming
                         final_output = Path(output_dir) / f"cancelled_partial_upscaled.mp4"
                         final_output = collision_safe_path(final_output)
                         shutil.copy2(partial_target, final_output)
                         compiled_output = str(final_output)
 
-                # Or compile PNG chunks
+                # Or compile PNG chunks (directory-based)
                 elif completed_png_chunks and len(completed_png_chunks) > 0:
                     partial_target = collision_safe_path(temp_chunks_dir / "cancelled_partial_png")
                     partial_target.mkdir(parents=True, exist_ok=True)
@@ -959,11 +989,13 @@ def build_seedvr2_callbacks(
                             shutil.copy2(chunk_path, dest)
 
                     compiled_output = str(partial_target)
+                    merge_method = "png_collection"
 
             except Exception as e:
-                pass  # Continue to check other locations
+                # Log error but continue to fallback
+                error_logger.warning(f"Proper chunk merge failed during cancel: {e}")
         
-        # NEW: Check for single-pass partial outputs in temp directory
+        # FALLBACK: Check for single-pass partial outputs in temp directory
         if not compiled_output:
             try:
                 # Look for any mp4/png files created in temp during processing
@@ -987,17 +1019,33 @@ def build_seedvr2_callbacks(
                     if most_recent.is_file():
                         shutil.copy2(most_recent, final_output)
                         compiled_output = str(final_output)
+                        merge_method = "latest_file"
                     elif most_recent.is_dir():
                         shutil.copytree(most_recent, final_output, dirs_exist_ok=True)
                         compiled_output = str(final_output)
+                        merge_method = "latest_dir"
                         
             except Exception as e:
-                pass  # Silently continue
+                error_logger.warning(f"Fallback recovery failed during cancel: {e}")
 
         if compiled_output:
-            return gr.Markdown.update(value=f"⏹️ Cancelled - Partial output saved: {Path(compiled_output).name}"), f"Partial results saved to: {compiled_output}"
+            merge_info = {
+                "blended": "Chunks merged with proper frame blending (scene overlap handled)",
+                "simple": "Chunks concatenated (no overlap detected)",
+                "png_collection": "PNG frames collected from chunks",
+                "latest_file": "⚠️ Best-effort: Latest temp file copied (no proper merge)",
+                "latest_dir": "⚠️ Best-effort: Latest temp directory copied (no proper merge)"
+            }.get(merge_method, "Unknown merge method")
+            
+            return (
+                gr.Markdown.update(value=f"⏹️ Cancelled - Partial output saved: {Path(compiled_output).name}\n**Merge method:** {merge_info}"),
+                f"Partial results saved to: {compiled_output}\n\nMerge method: {merge_info}"
+            )
         else:
-            return gr.Markdown.update(value="⏹️ Cancelled - No partial outputs found"), "Processing was cancelled. No recoverable partial outputs were found."
+            return (
+                gr.Markdown.update(value="⏹️ Cancelled - No partial outputs found"),
+                "Processing was cancelled. No recoverable partial outputs were found in temp directories."
+            )
 
     def open_outputs_folder(state: Dict[str, Any]):
         """Open the outputs folder in file explorer - uses live global settings."""

@@ -446,34 +446,138 @@ class Runner:
 
     def _run_seedvr2_in_app(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
         """
-        Execute SeedVR2 in-app mode (EXPERIMENTAL - Currently Not Implemented).
+        Execute SeedVR2 in-app mode (EXPERIMENTAL).
 
-        CURRENT STATUS: This method is a stub that falls back to subprocess execution.
-        
-        PLANNED IMPLEMENTATION:
-        True in-app mode will provide:
-        - Direct model loading and caching (models stay in VRAM between runs)
-        - Faster repeated processing (no model reload overhead)
+        EXPERIMENTAL IMPLEMENTATION:
+        - Runs CLI via Python direct invocation (runpy) instead of subprocess
+        - Models stay loaded in VRAM between runs (managed by ModelManager)
+        - Faster repeated processing (no subprocess overhead)
         - Higher VRAM/RAM usage (models persist until app restart)
-        - Non-cancelable during processing (no subprocess to kill)
+        - ⚠️ Non-cancelable during processing (no subprocess to kill)
+        - ⚠️ May have memory leaks without subprocess cleanup guarantees
         
-        REQUIREMENTS FOR FULL IMPLEMENTATION:
-        - Direct import of SeedVR2 inference modules (bypass CLI wrapper)
-        - ModelManager integration for cross-run caching
-        - Proper VRAM lifecycle management without subprocess cleanup
-        - Manual model unloading controls in UI
+        LIMITATIONS:
+        - Cannot cancel mid-run (no subprocess to kill)
+        - Memory leaks possible without explicit cleanup
+        - Requires app restart to fully free VRAM
+        - VS Build Tools wrapper not applied (C++ toolchain must be pre-activated)
         
-        For now, this provides subprocess execution with the same guarantees:
-        - Full VRAM cleanup after each run
-        - Cancelable processing
-        - No memory leaks
+        USE CASES:
+        - Multiple runs with same model (avoids reload overhead)
+        - High-throughput batch processing
+        - Systems with sufficient VRAM (16GB+)
+        
+        AVOID WHEN:
+        - Low VRAM systems (<12GB)
+        - First-time testing
+        - Need cancellation support
         """
         if on_progress:
-            on_progress("ℹ️ In-app mode is currently experimental (stub implementation)\n")
-            on_progress("ℹ️ Using subprocess mode for guaranteed VRAM cleanup and cancellation support\n")
+            on_progress("⚙️ In-app mode: Running with persistent model caching\n")
+            on_progress("⚠️ Note: Cannot cancel mid-run. Models stay in VRAM until app restart.\n")
 
-        # Fall back to subprocess execution until in-app mode is fully implemented
-        return self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
+        log_lines: List[str] = []
+        returncode = -1
+        
+        try:
+            # Prepare environment
+            env = os.environ.copy()
+            env["TEMP"] = str(self.temp_dir)
+            env["TMP"] = str(self.temp_dir)
+            env.setdefault("PYTHONWARNINGS", "ignore")
+            
+            # Ensure directories exist
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            
+            if on_progress:
+                on_progress("Loading model and initializing pipeline...\n")
+            
+            # Track model loading via ModelManager
+            model_manager = self._model_manager
+            dit_model = settings.get("dit_model", "")
+            model_id = model_manager._generate_model_id(ModelType.SEEDVR2, dit_model, **settings)
+            
+            # Update current model tracking
+            old_model_id = model_manager.current_model_id
+            if old_model_id and old_model_id != model_id:
+                if on_progress:
+                    on_progress(f"Model changed ({old_model_id} → {model_id}), clearing cache...\n")
+                try:
+                    from .gpu_utils import clear_cuda_cache
+                    clear_cuda_cache()
+                except Exception:
+                    pass
+            
+            model_manager.current_model_id = model_id
+            
+            # Run CLI directly via runpy (stays in same process, models persist)
+            # Build sys.argv from cmd (skip python executable)
+            import sys
+            old_argv = sys.argv.copy()
+            
+            try:
+                # cmd format: [python_path, cli_path, ...args]
+                sys.argv = [str(cli_path)] + cmd[2:]  # Skip python path and cli path
+                
+                if on_progress:
+                    on_progress(f"Executing: {' '.join(sys.argv)}\n")
+                
+                # Capture output
+                log_buffer = io.StringIO()
+                with redirect_stdout(log_buffer), redirect_stderr(log_buffer):
+                    try:
+                        # Run the CLI script directly in this process
+                        runpy.run_path(str(cli_path), run_name="__main__")
+                        returncode = 0
+                    except SystemExit as e:
+                        returncode = e.code if isinstance(e.code, int) else (1 if e.code else 0)
+                    except Exception as e:
+                        log_lines.append(f"❌ In-app execution error: {str(e)}")
+                        returncode = 1
+                
+                log_lines.append(log_buffer.getvalue())
+                
+            finally:
+                # Restore sys.argv
+                sys.argv = old_argv
+            
+            if on_progress:
+                on_progress(f"Execution completed with code {returncode}\n")
+            
+            # Check for output
+            output_path = None
+            if predicted_output and predicted_output.exists():
+                output_path = str(predicted_output)
+                if on_progress:
+                    on_progress(f"Output created: {output_path}\n")
+            
+            # Emit metadata if successful and enabled
+            should_emit_metadata = self._telemetry_enabled and settings.get("save_metadata", True)
+            if output_path and returncode == 0 and should_emit_metadata:
+                try:
+                    emit_metadata(
+                        Path(output_path),
+                        {
+                            "returncode": returncode,
+                            "output": output_path,
+                            "args": settings,
+                            "mode": "in_app",
+                            "command": " ".join(cmd),
+                        },
+                    )
+                except Exception as e:
+                    if on_progress:
+                        on_progress(f"Warning: Failed to emit metadata: {e}\n")
+            
+            return RunResult(returncode, output_path, "\n".join(log_lines))
+            
+        except Exception as e:
+            error_msg = f"In-app execution failed: {str(e)}"
+            log_lines.append(f"❌ {error_msg}")
+            if on_progress:
+                on_progress(f"{error_msg}\n")
+            return RunResult(1, None, "\n".join(log_lines))
 
     def ensure_seedvr2_model_loaded(self, settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> bool:
         """
@@ -582,6 +686,28 @@ class Runner:
 
         return None
 
+    def _get_python_executable(self) -> str:
+        """
+        Get the correct Python executable path.
+        
+        Priority:
+        1. Venv python from launcher (venv/Scripts/python.exe or venv/bin/python)
+        2. sys.executable as fallback
+        
+        This ensures subprocess runs use the correct environment with all dependencies.
+        """
+        # Try to find venv python relative to base_dir
+        if platform.system() == "Windows":
+            venv_python = self.base_dir / "venv" / "Scripts" / "python.exe"
+        else:
+            venv_python = self.base_dir / "venv" / "bin" / "python"
+        
+        if venv_python.exists():
+            return str(venv_python)
+        
+        # Fallback to sys.executable if venv not found
+        return sys.executable
+
     def _build_seedvr2_cmd(
         self,
         cli_path: Path,
@@ -590,7 +716,7 @@ class Runner:
         preview_only: bool,
         output_override: Optional[str],
     ) -> List[str]:
-        cmd: List[str] = [sys.executable, str(cli_path), settings["input_path"]]
+        cmd: List[str] = [self._get_python_executable(), str(cli_path), settings["input_path"]]
 
         # Output path override
         if output_override:
@@ -693,36 +819,53 @@ class Runner:
 
     def _maybe_wrap_with_vcvars(self, cmd: List[str], settings: Dict[str, Any]) -> List[str]:
         """
-        On Windows, if compile is requested, attempt to call vcvarsall.bat first.
+        On Windows, wrap command with vcvarsall.bat to activate C++ toolchain.
+        
+        The C++ toolchain is required for:
+        - torch.compile (when compile_dit/compile_vae are enabled)
+        - Some CUDA operations that need nvcc at runtime
+        
+        Behavior:
+        - If compile flags are set: REQUIRE vcvars, disable compile if missing
+        - If no compile flags: OPTIONALLY wrap with vcvars if available (best-effort C++ support)
         """
         if platform.system() != "Windows":
             return cmd
-        if not (settings.get("compile_dit") or settings.get("compile_vae")):
-            return cmd
-
+        
+        compile_requested = settings.get("compile_dit") or settings.get("compile_vae")
         vcvars_path = self._find_vcvars()
+        
         if not vcvars_path:
-            # Disable compile flags if VS Build Tools are not available
-            self._log_lines.append("⚠️ VS Build Tools not found; disabling torch.compile for compatibility.")
-            # Remove compile-related flags from command
-            filtered_cmd = []
-            skip_next = False
-            for c in cmd:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if c in ("--compile_dit", "--compile_vae", "--compile_backend", "--compile_mode",
-                        "--compile_fullgraph", "--compile_dynamic"):
-                    skip_next = True  # Skip the next argument too
-                    continue
-                if c.startswith("--compile_dynamo_cache_size_limit=") or c.startswith("--compile_dynamo_recompile_limit="):
-                    continue
-                filtered_cmd.append(c)
-            return filtered_cmd
-
-        # Build cmd /c call "vcvarsall.bat" x64 && original command
+            if compile_requested:
+                # Compile was requested but vcvars not found - disable compile flags
+                self._log_lines.append("⚠️ VS Build Tools not found; disabling torch.compile for compatibility.")
+                # Remove compile-related flags from command
+                filtered_cmd = []
+                skip_next = False
+                for c in cmd:
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    if c in ("--compile_dit", "--compile_vae", "--compile_backend", "--compile_mode",
+                            "--compile_fullgraph", "--compile_dynamic"):
+                        skip_next = True  # Skip the next argument too
+                        continue
+                    if c.startswith("--compile_dynamo_cache_size_limit=") or c.startswith("--compile_dynamo_recompile_limit="):
+                        continue
+                    filtered_cmd.append(c)
+                return filtered_cmd
+            else:
+                # No compile requested and vcvars not found - proceed without vcvars
+                # Log a warning but don't block execution
+                if not hasattr(self, '_vcvars_warning_shown'):
+                    self._log_lines.append("ℹ️ VS Build Tools not found. torch.compile will be unavailable.")
+                    self._vcvars_warning_shown = True
+                return cmd
+        
+        # vcvars found - wrap command with it (whether compile is requested or not)
+        # This ensures C++ toolchain is available for any CUDA operations that might need it
         quoted_cmd = " ".join(f'"{c}"' if " " in c else c for c in cmd)
-        wrapped = ["cmd", "/c", f'call "{vcvars_path}" x64 && {quoted_cmd}']
+        wrapped = ["cmd", "/c", f'call "{vcvars_path}" x64 >nul 2>&1 && {quoted_cmd}']
         return wrapped
 
     def _maybe_clear_in_app_model(self, model_id: Optional[str]):
@@ -865,7 +1008,7 @@ class Runner:
         output_path: Path,
         settings: Dict[str, Any],
     ) -> List[str]:
-        cmd: List[str] = [sys.executable, str(cli_path)]
+        cmd: List[str] = [self._get_python_executable(), str(cli_path)]
 
         if settings.get("img_mode"):
             cmd.extend(["--img", input_path])

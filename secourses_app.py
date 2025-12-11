@@ -175,38 +175,35 @@ def main():
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
             gr.Markdown("""
-            **Subprocess Mode** (Default & Recommended & ONLY WORKING MODE): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but model reloads each time.
+            **Subprocess Mode** (Default & Recommended): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but model reloads each time.
             
-            **⚠️ In-App Mode** (CURRENTLY NOT IMPLEMENTED): 
-            - **Status**: This mode is **NOT YET IMPLEMENTED** and is disabled for safety.
-            - **Planned Features** (not yet implemented):
+            **⚠️ In-App Mode** (EXPERIMENTAL - Use with Caution): 
+            - **Status**: This mode is **EXPERIMENTAL** and may have stability issues.
+            - **Features**:
               - Direct model loading and caching (models stay in VRAM between runs)
               - Faster repeated processing (no model reload overhead)
               - Higher VRAM/RAM usage (models persist until app restart)
-              - Requires app restart to return to subprocess mode
-            - **Current Status**: DISABLED until full implementation complete
-            - **Implementation Blockers**:
-              1. Requires direct imports of model inference code (not just CLI wrappers)
-              2. Needs ModelManager integration for persistent VRAM caching across runs
-              3. Must handle proper cleanup without subprocess termination guarantees
-              4. Requires UI controls for manual model unloading when VRAM fills up
+              - ⚠️ **REQUIRES APP RESTART** to return to subprocess mode
+              - ⚠️ May have memory leaks on some systems
+            - **When to use**: Multiple runs with same model settings
+            - **When to avoid**: Low VRAM systems, first-time testing, or if encountering crashes
             
-            💡 **Current Mode**: Subprocess only (the toggle below is disabled until in-app mode is ready)
+            💡 **Recommendation**: Start with subprocess mode. Switch to in-app only if you need speed and have sufficient VRAM.
             """)
             mode_radio = gr.Radio(
-                choices=["subprocess"],  # Only subprocess available
-                value="subprocess",  # Force subprocess
+                choices=["subprocess", "in_app"],
+                value=saved_mode,  # Restore from saved settings
                 label="Processing Mode",
-                info="Subprocess mode: Each run is isolated with full VRAM cleanup. In-app mode coming soon.",
-                interactive=False  # Disable until in-app implemented
+                info="⚠️ Changing to in-app requires confirmation and persists until app restart",
+                interactive=True
             )
             mode_confirm = gr.Checkbox(
-                label="⚠️ Mode switching disabled (in-app not implemented)",
+                label="⚠️ I understand that in-app mode requires app restart to revert",
                 value=False,
-                visible=False,  # Hide since mode can't be changed
-                info="This will be enabled when in-app mode is implemented"
+                visible=True,
+                info="Enable this checkbox to confirm mode switch to in-app (cannot be undone without restart)"
             )
-            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg", visible=False)  # Hide button
+            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
 
             # Wire up global settings events
             def save_global_settings(od, td, tel, face, state):
@@ -217,6 +214,9 @@ def main():
                 from shared.services.global_service import apply_mode_selection
                 return apply_mode_selection(mode_choice, confirm, runner, preset_manager, global_settings, state)
 
+            # Add status display for mode changes
+            mode_status = gr.Markdown("")
+
             save_global.click(
                 fn=save_global_settings,
                 inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, shared_state],
@@ -226,7 +226,7 @@ def main():
             apply_mode_btn.click(
                 fn=apply_mode_selection,
                 inputs=[mode_radio, mode_confirm, shared_state],
-                outputs=[mode_radio, mode_confirm, shared_state],
+                outputs=[mode_radio, mode_confirm, mode_status, shared_state],
             )
 
         # Self-contained tabs following SECourses pattern
