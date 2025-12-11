@@ -51,6 +51,7 @@ GLOBAL_DEFAULTS = {
     "face_strength": 0.5,
     "mode": "subprocess",
     "mode_locked": False,  # Persisted lock state for in-app mode
+    "pinned_reference_path": None,  # Global pinned reference for iterative comparison
 }
 global_settings = preset_manager.load_global_settings(GLOBAL_DEFAULTS)
 
@@ -333,7 +334,8 @@ def main():
             output_tab(
                 preset_manager=preset_manager,
                 shared_state=shared_state,
-                base_dir=BASE_DIR
+                base_dir=BASE_DIR,
+                global_settings=global_settings
             )
 
         with gr.Tab("👤 Face Restoration"):

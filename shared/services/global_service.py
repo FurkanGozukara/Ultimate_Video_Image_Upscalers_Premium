@@ -8,6 +8,10 @@ from shared.preset_manager import PresetManager
 
 
 def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabled: bool, face_global: bool, face_strength: float, runner, preset_manager: PresetManager, global_settings: dict, run_logger=None, state: dict = None):
+    # Preserve pinned reference from state if present
+    seed_controls = state.get("seed_controls", {}) if state else {}
+    pinned_ref = seed_controls.get("pinned_reference_path") or global_settings.get("pinned_reference_path")
+    
     global_settings.update(
         {
             "output_dir": output_dir_val or global_settings.get("output_dir"),
@@ -16,6 +20,7 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
             "face_global": bool(face_global),
             "face_strength": float(face_strength),
             "mode": runner.get_mode(),
+            "pinned_reference_path": pinned_ref,  # Persist pinned reference
         }
     )
     preset_manager.save_global_settings(global_settings)

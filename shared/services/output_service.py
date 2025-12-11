@@ -90,8 +90,15 @@ def build_output_callbacks(
     preset_manager: PresetManager,
     shared_state: gr.State,
     models: List[str],
+    global_settings: Optional[Dict[str, Any]] = None,
 ):
     defaults = output_defaults(models)
+    
+    # Load persisted pinned reference from global settings if available
+    if global_settings and "pinned_reference_path" in global_settings:
+        if shared_state and shared_state.value:
+            seed_controls = shared_state.value.get("seed_controls", {})
+            seed_controls["pinned_reference_path"] = global_settings["pinned_reference_path"]
 
     def refresh_presets(model_name: str, select_name: Optional[str] = None):
         presets = preset_manager.list_presets("output", model_name)
@@ -128,11 +135,12 @@ def build_output_callbacks(
             defaults_with_model["model"] = model_name
             current_map = dict(zip(OUTPUT_ORDER, current_values))
             values = _apply_output_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
-            return values
+            status = gr.Markdown.update(value=f"✅ Loaded preset '{preset_name}' for {model_name}")
+            return values + [status]
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
-            return current_values
-        return values
+            error_status = gr.Markdown.update(value=f"❌ Error loading preset: {str(e)}")
+            return current_values + [error_status]
 
     def safe_defaults():
         return [defaults[k] for k in OUTPUT_ORDER]
@@ -234,23 +242,39 @@ def build_output_callbacks(
         return gr.Markdown.update(value=status), state
 
     def pin_reference_frame(image_path, state):
-        """Pin a reference frame for iterative comparison"""
+        """
+        Pin a reference frame for iterative comparison.
+        Persists to global settings for cross-session persistence.
+        """
+        from pathlib import Path
+        
         seed_controls = state.get("seed_controls", {})
-        if image_path:
+        if image_path and Path(image_path).exists():
             seed_controls["pinned_reference_path"] = image_path
-            msg = f"✅ Reference pinned: {image_path}"
+            # Persist to global settings
+            if global_settings is not None:
+                global_settings["pinned_reference_path"] = image_path
+                preset_manager.save_global_settings(global_settings)
+            msg = f"✅ Reference pinned: {Path(image_path).name}\n💾 Saved to global settings (persists across sessions)"
         else:
             seed_controls["pinned_reference_path"] = None
-            msg = "⚠️ No image to pin"
+            msg = "⚠️ No valid image to pin"
         state["seed_controls"] = seed_controls
         return gr.Markdown.update(value=msg), state
 
     def unpin_reference(state):
-        """Clear pinned reference"""
+        """
+        Clear pinned reference.
+        Removes from both runtime state and global settings.
+        """
         seed_controls = state.get("seed_controls", {})
         seed_controls["pinned_reference_path"] = None
+        # Clear from global settings
+        if global_settings is not None:
+            global_settings["pinned_reference_path"] = None
+            preset_manager.save_global_settings(global_settings)
         state["seed_controls"] = seed_controls
-        return gr.Markdown.update(value="✅ Reference unpinned"), state
+        return gr.Markdown.update(value="✅ Reference unpinned and cleared from global settings"), state
 
     return {
         "defaults": defaults,

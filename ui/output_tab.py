@@ -32,7 +32,7 @@ def _get_gan_model_names(base_dir: Path) -> list:
     return sorted(choices)
 
 
-def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
+def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_settings: Dict[str, Any] = None):
     """
     Self-contained Output & Comparison tab.
     Handles output format and comparison settings shared across models.
@@ -43,8 +43,8 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     gan_models = _get_gan_model_names(base_dir)
     combined_models = sorted(list({*seedvr2_models, *gan_models}))
 
-    # Build service callbacks
-    service = build_output_callbacks(preset_manager, shared_state, combined_models)
+    # Build service callbacks with global_settings for pinned reference persistence
+    service = build_output_callbacks(preset_manager, shared_state, combined_models, global_settings)
 
     # Get defaults and last used
     current_model = combined_models[0] if combined_models else "default"

@@ -1747,19 +1747,25 @@ def build_seedvr2_callbacks(
                         # Accumulate messages for throttled UI updates
                         accumulated_messages.append(data)
                         
-                        # Only update UI if significant event or enough time passed
-                        is_significant = (
-                            "chunk" in data.lower() or 
-                            "complete" in data.lower() or
-                            "finished" in data.lower() or
-                            "error" in data.lower() or
-                            "✅" in data or "❌" in data
+                        # Only update UI on CHUNK COMPLETION (not in-progress chunk messages)
+                        # Requirement: "only update when last newer chunk is done"
+                        is_chunk_completion = (
+                            ("completed chunk" in data.lower() or 
+                             "finished chunk" in data.lower() or
+                             "chunk complete" in data.lower()) and
+                            (chunk_count > 0)  # Valid chunk count extracted
                         )
                         
-                        should_update_ui = (
-                            is_significant or 
-                            (current_time - last_ui_update_time) >= ui_update_throttle
+                        is_critical_event = (
+                            "error" in data.lower() or
+                            "failed" in data.lower() or
+                            "✅" in data or "❌" in data or
+                            "complete" in data.lower()
                         )
+                        
+                        # STRICT THROTTLING: Only yield on chunk completion or critical events
+                        # Suppress intermediate frame-level progress to keep UI clean
+                        should_update_ui = is_chunk_completion or is_critical_event
                         
                         if should_update_ui:
                             # Join recent messages (last 5)
