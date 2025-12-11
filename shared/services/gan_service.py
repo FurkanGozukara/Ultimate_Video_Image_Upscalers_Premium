@@ -1006,6 +1006,18 @@ def build_gan_callbacks(
         except Exception:
             return _parse_scale_from_name(model_name)
 
+    def open_outputs_folder_gan(state: Dict[str, Any]):
+        """Open outputs folder - delegates to shared utility"""
+        from shared.services.global_service import open_outputs_folder
+        live_output_dir = str(global_settings.get("output_dir", output_dir))
+        return open_outputs_folder(live_output_dir)
+    
+    def clear_temp_folder_gan(confirm: bool):
+        """Clear temp folder - delegates to shared utility"""
+        from shared.services.global_service import clear_temp_folder
+        live_temp_dir = str(global_settings.get("temp_dir", temp_dir))
+        return clear_temp_folder(live_temp_dir, confirm)
+
     return {
         "defaults": defaults,
         "order": GAN_ORDER,
@@ -1017,6 +1029,8 @@ def build_gan_callbacks(
         "model_scanner": lambda: _scan_gan_models(base_dir),
         "cancel_action": lambda *args: cancel_action(args[0] if args else None),
         "get_model_scale": get_model_scale,
+        "open_outputs_folder": open_outputs_folder_gan,
+        "clear_temp_folder": clear_temp_folder_gan,
     }
 
 

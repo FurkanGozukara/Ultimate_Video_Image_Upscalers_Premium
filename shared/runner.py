@@ -472,54 +472,83 @@ class Runner:
 
     def _run_seedvr2_in_app(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
         """
-        Execute SeedVR2 in-app mode (EXPERIMENTAL).
+        Execute SeedVR2 in-app mode (EXPERIMENTAL - NOT RECOMMENDED).
 
+        ⚠️ CRITICAL LIMITATION: SeedVR2 CLI ARCHITECTURE PREVENTS MODEL PERSISTENCE
+        ============================================================================
+        The SeedVR2 CLI is designed to load models, process, then exit. Even when run
+        via runpy (in-process), the CLI code does NOT maintain model instances between
+        runs. Each invocation reloads models from disk.
+        
+        RESULT: In-app mode provides **ZERO SPEED BENEFIT** for SeedVR2 compared to subprocess.
+        
         CURRENT IMPLEMENTATION STATUS:
-        - ⚠️ PARTIALLY IMPLEMENTED: Runs CLI via runpy but does NOT yet implement persistent model caching
-        - Models are reloaded each run (same as subprocess mode)
-        - ModelManager tracking is used but full caching requires SeedVR2 CLI refactoring
-        
-        LIMITATIONS (CURRENT):
+        - ⚠️ PARTIALLY IMPLEMENTED: Runs CLI via runpy but does NOT implement persistent model caching
+        - ❌ Models reload each run (IDENTICAL to subprocess mode - no performance gain)
         - ❌ Cannot cancel mid-run (no subprocess to kill)
-        - ❌ Models still reload each run (no speed benefit yet)
-        - ⚠️ VS Build Tools must be pre-activated (vcvars wrapper not applied in-app)
-        - ⚠️ May have memory leaks without subprocess isolation
+        - ❌ VS Build Tools wrapper not applied (torch.compile may fail on Windows)
+        - ⚠️ Memory leaks possible without subprocess isolation
+        - ⚠️ ModelManager tracking exists but cannot force CLI to keep models loaded
         
-        PLANNED (FUTURE):
-        - Persistent model caching between runs
-        - Faster repeated processing with same model
-        - Intelligent model swapping
+        WHY THIS EXISTS:
+        - Framework placeholder for future GAN/RIFE in-app optimization
+        - Demonstrates in-app execution pattern for other model types
+        - SeedVR2 would need CLI refactoring to support true model persistence
         
-        CURRENT RECOMMENDATION:
-        - Use subprocess mode (default) for all use cases
-        - In-app mode provides no benefits in current implementation
-        - Reserved for future optimization work
+        RECOMMENDATION FOR SEEDVR2:
+        🚫 **DO NOT USE IN-APP MODE** - It provides no benefits and loses cancellation.
+        ✅ **USE SUBPROCESS MODE** - Same speed, full cancellation, better isolation.
         
-        AVOID WHEN:
-        - Low VRAM systems (<12GB)
-        - First-time testing
-        - Need cancellation support
-        - Need torch.compile (requires vcvars pre-activation on Windows)
-        - Need speed (no caching benefit yet)
+        FUTURE WORK (requires SeedVR2 CLI changes):
+        - Refactor CLI to expose model loading/inference as separate functions
+        - Implement persistent model caching in ModelManager
+        - Add intelligent model swapping when user changes models
+        - Enable proper cancellation via threading interrupts
         """
         if on_progress:
-            on_progress("⚙️ In-app mode (EXPERIMENTAL): Running CLI directly without subprocess\n")
-            on_progress("⚠️ LIMITATIONS: Cannot cancel mid-run. No model caching benefits yet (models reload each run).\n")
-            on_progress("ℹ️ For best results, use subprocess mode (default) until in-app caching is fully implemented.\n")
+            on_progress("⚠️ IN-APP MODE ACTIVE (NOT RECOMMENDED FOR SEEDVR2)\n")
+            on_progress("🚫 CRITICAL: SeedVR2 CLI reloads models each run - NO SPEED BENEFIT over subprocess\n")
+            on_progress("❌ LIMITATION: Cannot cancel mid-run (no subprocess to kill)\n")
+            on_progress("💡 RECOMMENDATION: Use subprocess mode for SeedVR2 (same speed + cancellation)\n")
         
-        # Check for compile + Windows without vcvars pre-activation
+        # Check for compile + Windows - attempt vcvars environment setup
         if platform.system() == "Windows" and (settings.get("compile_dit") or settings.get("compile_vae")):
             from .health import is_vs_build_tools_available
-            if not is_vs_build_tools_available():
+            
+            # Check if vcvars environment is already active
+            vcvars_active = os.environ.get("VSCMD_ARG_TGT_ARCH") is not None
+            
+            if not vcvars_active:
                 if on_progress:
-                    on_progress("⚠️ WARNING: torch.compile requested but VS Build Tools not detected.\n")
-                    on_progress("⚠️ In-app mode cannot wrap vcvars automatically. Compile will likely fail.\n")
-                    on_progress("💡 SOLUTION: Either (1) use subprocess mode, or (2) activate vcvars before starting app.\n")
-                # Disable compile flags to prevent cryptic errors
-                settings["compile_dit"] = False
-                settings["compile_vae"] = False
+                    on_progress("⚠️ WARNING: torch.compile requested but vcvars environment not active.\n")
+                
+                # Try to find and source vcvars
+                vcvars_path = self._find_vcvars()
+                
+                if vcvars_path and vcvars_path.exists():
+                    if on_progress:
+                        on_progress(f"🔧 Attempting to activate VS Build Tools: {vcvars_path}\n")
+                    
+                    # In-app mode limitation: We cannot directly modify the current process environment
+                    # after Python has started. The vcvars.bat sets up C++ compiler paths, but these
+                    # need to be active BEFORE Python imports torch.
+                    if on_progress:
+                        on_progress("⚠️ IN-APP LIMITATION: Cannot activate vcvars after Python started.\n")
+                        on_progress("💡 WORKAROUND: Activate vcvars BEFORE starting this app, or use subprocess mode.\n")
+                        on_progress("🚫 Auto-disabling torch.compile to prevent cryptic compilation errors.\n")
+                    
+                    settings["compile_dit"] = False
+                    settings["compile_vae"] = False
+                else:
+                    if on_progress:
+                        on_progress("❌ VS Build Tools not found. torch.compile disabled.\n")
+                        on_progress("💡 Install 'Desktop development with C++' workload from Visual Studio Installer.\n")
+                    
+                    settings["compile_dit"] = False
+                    settings["compile_vae"] = False
+            else:
                 if on_progress:
-                    on_progress("✅ Auto-disabled compile flags for compatibility.\n")
+                    on_progress("✅ VS Build Tools environment active - torch.compile should work.\n")
 
         log_lines: List[str] = []
         returncode = -1

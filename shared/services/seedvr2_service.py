@@ -1047,40 +1047,19 @@ def build_seedvr2_callbacks(
                 "Processing was cancelled. No recoverable partial outputs were found in temp directories."
             )
 
-    def open_outputs_folder(state: Dict[str, Any]):
-        """Open the outputs folder in file explorer - uses live global settings."""
-        try:
-            import platform
-            import subprocess
-            
-            # Use live output_dir from global settings (may have changed since tab load)
-            live_output_dir = str(global_settings.get("output_dir", output_dir))
-            if platform.system() == "Windows":
-                subprocess.Popen(["explorer", live_output_dir])
-            elif platform.system() == "Darwin":
-                subprocess.Popen(["open", live_output_dir])
-            else:
-                subprocess.Popen(["xdg-open", live_output_dir])
-            return gr.Markdown.update(value=f"✅ Opened outputs folder: {live_output_dir}")
-        except Exception as e:
-            return gr.Markdown.update(value=f"❌ Failed to open outputs folder: {str(e)}")
-
-    def clear_temp_folder(confirm: bool):
-        """Clear temporary folder if confirmed - uses live global settings."""
-        if not confirm:
-            return gr.Markdown.update(value="⚠️ Check 'Confirm delete temp' to clear temporary files")
-        
-        try:
-            # Use live temp_dir from global settings (may have changed since tab load)
-            live_temp_dir = Path(global_settings.get("temp_dir", temp_dir))
-            if live_temp_dir.exists():
-                shutil.rmtree(live_temp_dir)
-                live_temp_dir.mkdir(parents=True, exist_ok=True)
-                return gr.Markdown.update(value=f"✅ Cleared temp folder: {live_temp_dir}")
-            else:
-                return gr.Markdown.update(value=f"ℹ️ Temp folder doesn't exist: {live_temp_dir}")
-        except Exception as e:
-            return gr.Markdown.update(value=f"❌ Failed to clear temp folder: {str(e)}")
+    def open_outputs_folder_seedvr2(state: Dict[str, Any]):
+        """Open outputs folder - delegates to shared utility (no code duplication)"""
+        from shared.services.global_service import open_outputs_folder
+        # Use live output_dir from global settings (may have changed since tab load)
+        live_output_dir = str(global_settings.get("output_dir", output_dir))
+        return open_outputs_folder(live_output_dir)
+    
+    def clear_temp_folder_seedvr2(confirm: bool):
+        """Clear temp folder - delegates to shared utility (no code duplication)"""
+        from shared.services.global_service import clear_temp_folder
+        # Use live temp_dir from global settings (may have changed since tab load)
+        live_temp_dir = str(global_settings.get("temp_dir", temp_dir))
+        return clear_temp_folder(live_temp_dir, confirm)
 
     def get_model_loading_status():
         """Get current model loading status for UI display."""
@@ -1964,8 +1943,8 @@ def build_seedvr2_callbacks(
         "check_resume_status": check_resume_status,
         "run_action": run_action,
         "cancel_action": cancel,
-        "open_outputs_folder": open_outputs_folder,
-        "clear_temp_folder": clear_temp_folder,
+        "open_outputs_folder": open_outputs_folder_seedvr2,
+        "clear_temp_folder": clear_temp_folder_seedvr2,
         "comparison_html_slider": comparison_html_slider,
         "auto_res_on_input": _auto_res_from_input,
         "get_model_loading_status": get_model_loading_status,

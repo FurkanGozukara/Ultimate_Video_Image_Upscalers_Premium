@@ -995,37 +995,15 @@ def build_rife_callbacks(
         
         return gr.Markdown.update(value="⏹️ RIFE processing cancelled"), "Processing cancelled - no partial outputs found to salvage"
 
-    def open_outputs_folder(state: Dict[str, Any]):
-        """Open the outputs folder in file explorer."""
-        try:
-            import platform
-            
-            out_dir = str(output_dir)
-            if platform.system() == "Windows":
-                subprocess.Popen(["explorer", out_dir])
-            elif platform.system() == "Darwin":
-                subprocess.Popen(["open", out_dir])
-            else:
-                subprocess.Popen(["xdg-open", out_dir])
-            return gr.Markdown.update(value=f"✅ Opened outputs folder: {out_dir}")
-        except Exception as e:
-            return gr.Markdown.update(value=f"❌ Failed to open outputs folder: {str(e)}")
-
-    def clear_temp_folder(confirm: bool):
-        """Clear temporary folder if confirmed."""
-        if not confirm:
-            return gr.Markdown.update(value="⚠️ Check 'Confirm delete temp' to clear temporary files")
-        
-        try:
-            temp_path = Path(temp_dir)
-            if temp_path.exists():
-                shutil.rmtree(temp_path)
-                temp_path.mkdir(parents=True, exist_ok=True)
-                return gr.Markdown.update(value=f"✅ Cleared temp folder: {temp_path}")
-            else:
-                return gr.Markdown.update(value=f"ℹ️ Temp folder doesn't exist: {temp_path}")
-        except Exception as e:
-            return gr.Markdown.update(value=f"❌ Failed to clear temp folder: {str(e)}")
+    def open_outputs_folder_rife():
+        """Open outputs folder - delegates to shared utility (no code duplication)"""
+        from shared.services.global_service import open_outputs_folder
+        return open_outputs_folder(str(output_dir))
+    
+    def clear_temp_folder_rife(confirm: bool):
+        """Clear temp folder - delegates to shared utility (no code duplication)"""
+        from shared.services.global_service import clear_temp_folder
+        return clear_temp_folder(str(temp_dir), confirm)
 
     return {
         "defaults": defaults,
@@ -1036,6 +1014,6 @@ def build_rife_callbacks(
         "safe_defaults": safe_defaults,
         "run_action": run_action,
         "cancel_action": cancel,
-        "open_outputs_folder": open_outputs_folder,
-        "clear_temp_folder": clear_temp_folder,
+        "open_outputs_folder": open_outputs_folder_rife,
+        "clear_temp_folder": clear_temp_folder_rife,
     }

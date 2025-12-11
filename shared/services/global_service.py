@@ -125,6 +125,8 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
             global_settings["mode_locked"] = False
         
         preset_manager.save_global_settings(global_settings)
+        
+        if mode_choice == "in_app":
             success_msg = (
                 "✅ **Switched to in-app mode**\n\n"
                 "Models will now persist in VRAM between runs for faster processing.\n\n"

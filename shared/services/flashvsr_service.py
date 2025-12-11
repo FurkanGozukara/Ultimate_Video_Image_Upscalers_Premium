@@ -458,22 +458,15 @@ def build_flashvsr_callbacks(
         _flashvsr_cancel_event.set()
         return gr.Markdown.update(value="⏹️ Cancellation requested - FlashVSR+ will stop at next checkpoint"), "Cancelling..."
 
-    def open_outputs_folder():
-        """Open outputs folder"""
-        import platform
-        import subprocess
-        
-        try:
-            out_dir = str(output_dir)
-            if platform.system() == "Windows":
-                subprocess.Popen(["explorer", out_dir])
-            elif platform.system() == "Darwin":
-                subprocess.Popen(["open", out_dir])
-            else:
-                subprocess.Popen(["xdg-open", out_dir])
-            return gr.Markdown.update(value=f"✅ Opened: {out_dir}")
-        except Exception as e:
-            return gr.Markdown.update(value=f"❌ Error: {str(e)}")
+    def open_outputs_folder_flashvsr():
+        """Open outputs folder - delegates to shared utility (no code duplication)"""
+        from shared.services.global_service import open_outputs_folder
+        return open_outputs_folder(str(output_dir))
+    
+    def clear_temp_folder_flashvsr(confirm: bool):
+        """Clear temp folder - delegates to shared utility (no code duplication)"""
+        from shared.services.global_service import clear_temp_folder
+        return clear_temp_folder(str(temp_dir), confirm)
 
     return {
         "defaults": defaults,
@@ -484,6 +477,7 @@ def build_flashvsr_callbacks(
         "safe_defaults": safe_defaults,
         "run_action": run_action,
         "cancel_action": cancel_action,
-        "open_outputs_folder": open_outputs_folder,
+        "open_outputs_folder": open_outputs_folder_flashvsr,
+        "clear_temp_folder": clear_temp_folder_flashvsr,
     }
 
