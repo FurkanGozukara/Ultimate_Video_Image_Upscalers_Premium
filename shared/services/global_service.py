@@ -7,13 +7,14 @@ import gradio as gr
 from shared.preset_manager import PresetManager
 
 
-def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabled: bool, face_global: bool, runner, preset_manager: PresetManager, global_settings: dict, run_logger=None, state: dict = None):
+def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabled: bool, face_global: bool, face_strength: float, runner, preset_manager: PresetManager, global_settings: dict, run_logger=None, state: dict = None):
     global_settings.update(
         {
             "output_dir": output_dir_val or global_settings.get("output_dir"),
             "temp_dir": temp_dir_val or global_settings.get("temp_dir"),
             "telemetry": telemetry_enabled,
             "face_global": bool(face_global),
+            "face_strength": float(face_strength),
             "mode": runner.get_mode(),
         }
     )
@@ -29,7 +30,7 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
 
     # Update state if provided
     if state:
-        state["seed_controls"]["face_strength_val"] = global_settings.get("face_strength", 0.5)
+        state["seed_controls"]["face_strength_val"] = float(face_strength)
 
     return gr.Markdown.update(value="✅ Global settings saved"), state or {}
 

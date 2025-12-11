@@ -169,6 +169,15 @@ def main():
                     value=global_settings.get("face_global", False),
                     info="Enable face restoration for all upscaling operations"
                 )
+            with gr.Row():
+                face_strength_slider = gr.Slider(
+                    label="Global Face Restoration Strength",
+                    minimum=0.0,
+                    maximum=1.0,
+                    step=0.05,
+                    value=global_settings.get("face_strength", 0.5),
+                    info="Strength of face restoration when globally enabled (0.0 = subtle, 1.0 = maximum)"
+                )
             save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
             global_status = gr.Markdown("")
 
@@ -219,7 +228,7 @@ def main():
 
             save_global.click(
                 fn=save_global_settings,
-                inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, shared_state],
+                inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, face_strength_slider, shared_state],
                 outputs=[global_status, shared_state],
             )
 

@@ -4,7 +4,10 @@ from typing import Dict, List
 from pathlib import Path
 
 DEFAULT_BATCH_SIZE = 5
-DEFAULT_ATTENTION = "sdpa"
+# Default attention mode: flash_attn preferred, falls back to sdpa if unavailable
+# This is used as fallback for unknown models. Runtime detection (_get_default_attention_mode) 
+# tests actual GPU compatibility and takes precedence.
+DEFAULT_ATTENTION = "flash_attn"  # Preferred default, runtime will fall back to sdpa if needed
 
 # Local scan will look for common weight extensions inside ./models/seedvr2 (and siblings).
 MODEL_EXTS = {".safetensors", ".gguf"}

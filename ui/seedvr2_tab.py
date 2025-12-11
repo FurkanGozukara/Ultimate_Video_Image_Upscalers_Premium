@@ -676,9 +676,11 @@ def seedvr2_tab(
             # Mode information
             gr.Markdown("#### ℹ️ Processing Mode")
             gr.Markdown(
-                "**Current Mode:** Subprocess (each run is isolated with full VRAM cleanup)\n\n"
-                "**Note:** In-app mode (persistent model loading) is not yet implemented. "
-                "All processing currently uses subprocess mode for guaranteed memory cleanup and cancellation support."
+                "**Current Mode:** Check Global Settings tab to view/change execution mode\n\n"
+                "**Available Modes:**\n"
+                "- **Subprocess (Default):** Each run is isolated with full VRAM cleanup and cancellation support\n"
+                "- **In-app (Experimental):** Models stay loaded in VRAM between runs for faster processing but higher memory usage\n\n"
+                "**Note:** Switch modes in Global Settings tab. In-app mode requires app restart to revert."
             )
             gr.Markdown("**Comparison:** Enhanced ImageSlider with fullscreen and download support for images. Custom HTML5 slider for videos.")
 

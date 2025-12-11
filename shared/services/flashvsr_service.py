@@ -236,6 +236,10 @@ def build_flashvsr_callbacks(
             thread = threading.Thread(target=processing_thread, daemon=True)
             thread.start()
             
+            # Apply face restoration if globally enabled
+            face_apply = global_settings.get("face_global", False)
+            face_strength = global_settings.get("face_strength", 0.5)
+            
             # Stream progress updates
             last_update = time.time()
             log_buffer = []
@@ -332,21 +336,50 @@ def build_flashvsr_callbacks(
             if progress:
                 progress(1.0, desc="FlashVSR+ complete!")
             
+            # Apply face restoration if globally enabled
+            output_path = result.output_path
+            face_apply = global_settings.get("face_global", False)
+            face_strength = global_settings.get("face_strength", 0.5)
+            
+            if face_apply and output_path and Path(output_path).exists():
+                from shared.face_restore import restore_video, restore_image
+                
+                log_buffer.append(f"Applying face restoration (strength {face_strength})...")
+                
+                if Path(output_path).suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']:
+                    # Video restoration
+                    restored = restore_video(
+                        output_path,
+                        strength=face_strength,
+                        on_progress=lambda x: log_buffer.append(x) if x else None
+                    )
+                    if restored and Path(restored).exists():
+                        output_path = restored
+                        log_buffer.append(f"✅ Face restoration complete: {restored}")
+                else:
+                    # Image restoration
+                    restored = restore_image(output_path, strength=face_strength)
+                    if restored and Path(restored).exists():
+                        output_path = restored
+                        log_buffer.append(f"✅ Face restoration complete: {restored}")
+            
             # Create comparison
             html_comp, img_slider = create_unified_comparison(
                 input_path=input_path,
-                output_path=result.output_path,
-                mode="slider" if result.output_path and result.output_path.endswith(".mp4") else "native"
+                output_path=output_path,
+                mode="slider" if output_path and output_path.endswith(".mp4") else "native"
             )
             
             # Log run
             run_logger.write_summary(
-                Path(result.output_path) if result.output_path else output_dir,
+                Path(output_path) if output_path else output_dir,
                 {
                     "input": input_path,
-                    "output": result.output_path,
+                    "output": output_path,
                     "returncode": result.returncode,
                     "args": settings,
+                    "face_apply": face_apply,
+                    "face_strength": face_strength,
                     "pipeline": "flashvsr",
                 }
             )
@@ -356,8 +389,8 @@ def build_flashvsr_callbacks(
             yield (
                 status,
                 result.log,
-                result.output_path if result.output_path and result.output_path.endswith(".mp4") else None,
-                result.output_path if result.output_path and not result.output_path.endswith(".mp4") else None,
+                output_path if output_path and output_path.endswith(".mp4") else None,
+                output_path if output_path and not output_path.endswith(".mp4") else None,
                 img_slider if img_slider else gr.ImageSlider.update(visible=False),
                 html_comp if html_comp else gr.HTML.update(value="", visible=False),
                 state
