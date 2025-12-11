@@ -200,15 +200,43 @@ def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
 This list defines the order of parameters for preset save/load.
 MUST match inputs_list order in ui/seedvr2_tab.py.
 
-🔧 HOW TO ADD NEW CONTROLS (Current Manual Method):
-1. Add default value to seedvr2_defaults() function
-2. Append key name to SEEDVR2_ORDER below (at end for backward compat)
-3. Add Gradio component to ui/seedvr2_tab.py inputs_list (same position)
-4. Old presets auto-merge: missing keys use current defaults (no migration needed!)
+⚠️ CURRENT LIMITATION - MANUAL SYNCHRONIZATION REQUIRED:
+Adding a new control requires manual updates across 3 files:
+1. Add default value to seedvr2_defaults() function (this file)
+2. Append key name to SEEDVR2_ORDER below (this file, at end for backward compat)
+3. Add Gradio component to ui/seedvr2_tab.py inputs_list (same position as SEEDVR2_ORDER)
 
-💡 FUTURE IMPROVEMENT:
-The preset_auto_serializer module could auto-generate this order from components,
-eliminating manual maintenance. For now, keep this synchronized manually.
+✅ BACKWARD COMPATIBILITY:
+Old presets auto-merge: missing keys use current defaults (no migration needed!)
+The PresetManager.merge_config() preserves existing values for keys not in the preset.
+
+⚠️ VALIDATION:
+Runtime validation occurs in save_preset() callback - warns if len(inputs_list) != len(SEEDVR2_ORDER).
+This catches integration bugs early but requires manual fixing.
+
+💡 FUTURE IMPROVEMENT OPTIONS:
+Option A: Auto-serialization from Gradio components (preset_auto_serializer module exists but unused)
+  - Scan inputs_list component IDs/labels and auto-generate order
+  - Eliminates manual SEEDVR2_ORDER maintenance
+  - Requires component naming conventions
+
+Option B: Schema-driven approach with dataclasses
+  - Define settings schema as @dataclass
+  - Auto-generate UI components from schema
+  - Single source of truth for all tabs
+  - Breaking change - requires refactoring all tabs
+
+Option C: Keep current manual approach
+  - Proven stable and predictable
+  - Easy to debug when things break
+  - Explicit control over serialization order
+  - Trade-off: requires discipline to maintain sync
+
+RECOMMENDATION: Option C (current manual approach) is acceptable for now given:
+- Auto-merge backward compatibility works well
+- Save callback validates sync at runtime
+- Only ~50 controls per tab (manageable)
+- Refactoring to A or B is significant breaking change
 
 To validate sync, check: len(inputs_list) == len(SEEDVR2_ORDER)
 """
@@ -925,6 +953,8 @@ def build_seedvr2_callbacks(
         
         ENHANCED: Uses proper merge pipeline with scene overlap handling when possible,
         falls back to simple concat or latest-file recovery for edge cases.
+        
+        BATCH SUPPORT: Also handles partial batch outputs by collecting completed files.
         """
         canceled = runner.cancel()
         if not canceled:
@@ -932,7 +962,8 @@ def build_seedvr2_callbacks(
 
         # Check multiple locations for partial outputs:
         # 1. External chunked processing (PySceneDetect chunks) - PREFERRED (uses proper merge)
-        # 2. Single-pass outputs in temp directory - FALLBACK (best-effort copy)
+        # 2. Batch processing outputs - collect completed files
+        # 3. Single-pass outputs in temp directory - FALLBACK (best-effort copy)
         
         compiled_output = None
         merge_method = "none"
@@ -1003,6 +1034,29 @@ def build_seedvr2_callbacks(
                 # Log error but continue to fallback
                 error_logger.warning(f"Proper chunk merge failed during cancel: {e}")
         
+        # Check for batch partial outputs (completed files in output_dir)
+        if not compiled_output:
+            try:
+                # Look for recently created upscaled files (from batch jobs that completed before cancel)
+                batch_outputs = []
+                for ext in [".mp4", ".avi", ".mov", ".mkv", ".png", ".jpg", ".jpeg"]:
+                    batch_outputs.extend(list(Path(output_dir).glob(f"*_upscaled{ext}")))
+                
+                # Filter to files modified in last 24 hours (current session)
+                import time
+                current_time = time.time()
+                recent_outputs = [
+                    f for f in batch_outputs 
+                    if current_time - f.stat().st_mtime < 86400  # 24 hours
+                ]
+                
+                if recent_outputs:
+                    compiled_output = str(Path(output_dir))
+                    merge_method = "batch_partial"
+                    
+            except Exception as e:
+                error_logger.warning(f"Batch partial recovery failed: {e}")
+        
         # FALLBACK: Check for single-pass partial outputs in temp directory
         if not compiled_output:
             try:
@@ -1041,6 +1095,7 @@ def build_seedvr2_callbacks(
                 "blended": "Chunks merged with proper frame blending (scene overlap handled)",
                 "simple": "Chunks concatenated (no overlap detected)",
                 "png_collection": "PNG frames collected from chunks",
+                "batch_partial": f"Batch processing cancelled - {len(recent_outputs)} completed files saved in output folder",
                 "latest_file": "⚠️ Best-effort: Latest temp file copied (no proper merge)",
                 "latest_dir": "⚠️ Best-effort: Latest temp directory copied (no proper merge)"
             }.get(merge_method, "Unknown merge method")

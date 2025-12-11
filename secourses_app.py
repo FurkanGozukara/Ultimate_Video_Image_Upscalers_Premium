@@ -334,37 +334,40 @@ def main():
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
             gr.Markdown("""
-            **Subprocess Mode** (Default & RECOMMENDED): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but model reloads each time.
+            **Subprocess Mode** (Default & RECOMMENDED): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup, full cancellation support, and automatic vcvars wrapper for torch.compile.
             
-            **⚠️ In-App Mode** (EXPERIMENTAL - MODEL-SPECIFIC SUPPORT): 
-            - **Status**: This mode is **PARTIALLY IMPLEMENTED** with MODEL-SPECIFIC compatibility.
+            **⚠️ In-App Mode** (EXPERIMENTAL - PLACEHOLDER IMPLEMENTATION): 
+            - **Status**: This mode is **NOT FULLY FUNCTIONAL** and provides **NO BENEFITS** for most models.
             
-            - **MODEL COMPATIBILITY**:
-              - ✅ **GAN Models**: Can work in in-app mode (no cancellation, but functional)
-              - ✅ **RIFE**: Can work in in-app mode (no cancellation, but functional)
-              - ❌ **SeedVR2**: Models reload each run (NO BENEFIT over subprocess)
-              - ❌ **FlashVSR+**: Models reload each run (NO BENEFIT over subprocess)
+            - **IMPLEMENTATION STATUS**:
+              - ❌ **NO MODEL PERSISTENCE**: Models reload each run (identical to subprocess - zero speed gain)
+              - ❌ **NO CANCELLATION**: Cannot stop processing mid-run (no subprocess to terminate)
+              - ❌ **NO VCVARS WRAPPER**: torch.compile fails on Windows (requires manual C++ toolchain setup before app launch)
+              - ❌ **MEMORY LEAKS**: No subprocess isolation - VRAM/RAM may accumulate across runs
+              - ⚠️ **REQUIRES APP RESTART**: Cannot switch back to subprocess mode without restarting
             
-            - **Current Limitations (ALL MODELS)**:
-              - ❌ **CANNOT CANCEL**: No way to stop processing mid-run (no subprocess to kill)
-              - ⚠️ **VS BUILD TOOLS**: Must be pre-activated on Windows for torch.compile
-              - ⚠️ **MEMORY LEAKS**: No subprocess isolation; VRAM may not clean up properly
-              - ⚠️ **REQUIRES APP RESTART** to return to subprocess mode
+            - **WHY IT EXISTS**:
+              - Framework placeholder for future optimization work
+              - Demonstrates in-process execution pattern
+              - Requires significant refactoring to become functional
             
-            - **SeedVR2-Specific Issues**:
-              - ❌ **NO MODEL CACHING**: CLI design forces model reload each run (no speed benefit)
-              - 💡 Requires CLI refactoring for persistent model caching
+            - **REQUIRED WORK FOR FUNCTIONAL IN-APP MODE**:
+              1. Implement persistent model caching in ModelManager (keep models loaded between runs)
+              2. Add intelligent model swapping (deload old model when user switches models)
+              3. Implement threading-based cancellation (cannot use subprocess kill)
+              4. Add vcvars environment injection before torch import (complex on Windows)
+              5. Implement proper VRAM cleanup hooks between runs
+              6. Add memory leak monitoring and automatic cleanup
             
-            - **Planned Features** (Future Work):
-              - Persistent model caching for SeedVR2 (requires CLI changes)
-              - Cancellation support via threading interrupts
-              - Intelligent model swapping with VRAM management
-            
-            - **Current Recommendation**: 
-              - **SeedVR2/FlashVSR+**: **USE SUBPROCESS MODE** (in-app provides no benefits)
-              - **GAN/RIFE**: In-app may work but subprocess still recommended for stability
-            
-            💡 **Recommendation**: **Always use subprocess mode** for reliability, cancellation, and proper VRAM cleanup.
+            - **CURRENT RECOMMENDATION**: 
+              - ✅ **ALWAYS USE SUBPROCESS MODE** - it provides:
+                - ✅ 100% VRAM/RAM cleanup after each run
+                - ✅ Full cancellation support (kill subprocess)
+                - ✅ Automatic vcvars wrapper for torch.compile
+                - ✅ Process isolation prevents memory leaks
+                - ✅ Proven stability across all models
+              
+            💡 **In-app mode is a placeholder and should not be used in production.**
             """)
             mode_radio = gr.Radio(
                 choices=["subprocess", "in_app"],
