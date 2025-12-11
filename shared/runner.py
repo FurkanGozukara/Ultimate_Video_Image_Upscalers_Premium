@@ -216,8 +216,9 @@ class Runner:
         format_for_cli = None if output_format == "auto" else output_format
 
         batch_mode = bool(settings.get("batch_mode"))
-        # Only honor an explicit override; otherwise let resolve_output_location
-        # derive the path using global output dir with _upscaled suffix semantics.
+        # FIXED: Always honor global output_dir, even when Output Override is empty
+        # The SeedVR2 CLI's generate_output_path() REQUIRES --output to use custom directory,
+        # otherwise it defaults to writing next to input. We must always pass --output.
         effective_output_override = settings.get("output_override") or None
         if preview_only:
             # Force single-frame preview: load_cap=1, image path remains same
@@ -233,37 +234,46 @@ class Runner:
         else:
             effective_output_format = format_for_cli
 
-        # Predict output path: if user supplied an explicit file path, keep it; otherwise mirror CLI logic
+        # FIXED: Predict output path AND ensure CLI receives --output for global output_dir
+        # Even when user doesn't set Output Override, we need to pass global output_dir to CLI
         predicted_output: Optional[Path]
-        global_override: Optional[str] = None
+        cli_output_arg: Optional[str] = None  # What we pass to CLI via --output
+        
         if effective_output_override:
+            # User explicitly set Output Override - use it
             override_path = Path(normalize_path(effective_output_override))
             if override_path.suffix:
+                # Explicit file path
                 predicted_output = override_path
+                cli_output_arg = str(override_path)
             else:
-                global_override = str(override_path)
+                # Directory override
+                cli_output_arg = str(override_path)
                 predicted_output = resolve_output_location(
                     input_path=input_path,
                     output_format=effective_output_format,
-                    global_output_dir=global_override,
+                    global_output_dir=cli_output_arg,
                     batch_mode=batch_mode,
                     png_padding=settings.get("png_padding"),
                     png_keep_basename=settings.get("png_keep_basename", False),
                     original_filename=settings.get("_original_filename"),  # Preserve user's filename
                 )
         else:
-            global_override = str(self.output_dir)
+            # FIXED: No override, but still pass global output_dir to CLI
+            # This ensures files go to user's configured output folder, not next to input
+            cli_output_arg = str(self.output_dir)  # CRITICAL: Pass to CLI even when no override
             predicted_output = resolve_output_location(
                 input_path=input_path,
                 output_format=effective_output_format,
-                global_output_dir=global_override,
+                global_output_dir=cli_output_arg,
                 batch_mode=batch_mode,
                 png_padding=settings.get("png_padding"),
                 png_keep_basename=settings.get("png_keep_basename", False),
                 original_filename=settings.get("_original_filename"),  # Preserve user's filename
             )
 
-        cmd = self._build_seedvr2_cmd(cli_path, settings, format_for_cli, preview_only, output_override=effective_output_override)
+        # FIXED: Pass cli_output_arg to command builder (not effective_output_override)
+        cmd = self._build_seedvr2_cmd(cli_path, settings, format_for_cli, preview_only, output_override=cli_output_arg)
 
         # Route based on execution mode
         if self._active_mode == "in_app":

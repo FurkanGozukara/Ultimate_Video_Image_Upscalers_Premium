@@ -342,6 +342,8 @@ def seedvr2_tab(
                 visible=not is_macos,
                 interactive=cuda_available  # Disable if CUDA not available
             )
+            # FIXED: Live CUDA validation feedback (validates device IDs immediately on change)
+            cuda_device_warning = gr.Markdown("", visible=False)
             dit_offload_device = gr.Textbox(
                 label="DiT Offload Device",
                 value=values[22],  # Was 25, now 22
@@ -1202,7 +1204,75 @@ def seedvr2_tab(
         outputs=tile_decode_warning
     )
     
-    # Cache + GPU validation
+    # FIXED: Live CUDA device validation with comprehensive checks
+    cuda_device_warning = gr.Markdown("", visible=False)
+    
+    def validate_cuda_device_live(cuda_device_val):
+        """
+        Live CUDA device validation - warns user immediately on input change.
+        
+        Checks:
+        - Device ID validity (must be numeric)
+        - Device availability (checks against torch.cuda.device_count())
+        - Multi-GPU compatibility warnings
+        """
+        if not cuda_device_val or not cuda_device_val.strip():
+            return gr.Markdown.update(value="", visible=False)
+        
+        try:
+            import torch
+            
+            if not torch.cuda.is_available():
+                return gr.Markdown.update(value="⚠️ CUDA not available on this system. GPU acceleration disabled.", visible=True)
+            
+            # Parse device spec (handle "all" and comma-separated IDs)
+            device_str = str(cuda_device_val).strip()
+            
+            if device_str.lower() == "all":
+                device_count = torch.cuda.device_count()
+                return gr.Markdown.update(value=f"✅ Using all {device_count} available GPU(s)", visible=True)
+            
+            # Parse comma-separated device IDs
+            devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
+            device_count = torch.cuda.device_count()
+            
+            # Validate each device ID
+            invalid_devices = []
+            valid_devices = []
+            
+            for device in devices:
+                if not device.isdigit():
+                    invalid_devices.append(device)
+                else:
+                    device_id = int(device)
+                    if device_id >= device_count:
+                        invalid_devices.append(f"{device} (max: {device_count-1})")
+                    else:
+                        valid_devices.append(device_id)
+            
+            if invalid_devices:
+                return gr.Markdown.update(
+                    value=f"❌ Invalid CUDA device ID(s): {', '.join(invalid_devices)}. Available devices: 0-{device_count-1}",
+                    visible=True
+                )
+            
+            if len(valid_devices) > 1:
+                return gr.Markdown.update(
+                    value=f"✅ Multi-GPU: Using {len(valid_devices)} GPUs ({', '.join(map(str, valid_devices))})\n⚠️ Note: Multi-GPU disables model caching (cache_dit/cache_vae auto-disabled)",
+                    visible=True
+                )
+            elif len(valid_devices) == 1:
+                return gr.Markdown.update(
+                    value=f"✅ Single GPU: Using GPU {valid_devices[0]}",
+                    visible=True
+                )
+            else:
+                return gr.Markdown.update(value="", visible=False)
+                
+        except Exception as e:
+            return gr.Markdown.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
+    
+    # Cache + GPU validation (enhanced with comprehensive checks)
     def validate_cache_gpu(cache_dit_val, cache_vae_val, cuda_device_val):
         if not cuda_device_val:
             return gr.Markdown.update(value="", visible=False)
@@ -1210,6 +1280,13 @@ def seedvr2_tab(
         if len(devices) > 1 and (cache_dit_val or cache_vae_val):
             return gr.Markdown.update(value="⚠️ Model caching (cache_dit/cache_vae) only works with single GPU. Multi-GPU detected - caching will be auto-disabled.", visible=True)
         return gr.Markdown.update(value="", visible=False)
+    
+    # Wire up LIVE CUDA device validation (validates on every change)
+    cuda_device.change(
+        fn=validate_cuda_device_live,
+        inputs=cuda_device,
+        outputs=cuda_device_warning
+    )
     
     # Wire up cache validation
     cache_dit.change(

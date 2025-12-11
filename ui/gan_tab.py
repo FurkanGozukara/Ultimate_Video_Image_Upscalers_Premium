@@ -276,6 +276,8 @@ def gan_tab(
                             info=f"GPU device ID(s). {cuda_count} GPU(s) detected. Single ID (0) for one GPU, 'all' for all available. Multi-GPU support model-dependent.",
                             interactive=cuda_available  # Disable if no CUDA
                         )
+                        # FIXED: Live CUDA validation feedback for GAN tab
+                        gpu_device_warning = gr.Markdown("", visible=False)
 
                 # Output Settings
                 with gr.TabItem("📤 Output Settings"):
@@ -447,6 +449,67 @@ def gan_tab(
         )
 
     # Wire up event handlers
+    
+    # FIXED: Live CUDA device validation for GAN tab
+    def validate_cuda_device_live_gan(cuda_device_val):
+        """Live CUDA validation for GAN models (enforces single GPU)"""
+        if not cuda_device_val or not cuda_device_val.strip():
+            return gr.Markdown.update(value="", visible=False)
+        
+        try:
+            import torch
+            
+            if not torch.cuda.is_available():
+                return gr.Markdown.update(value="⚠️ CUDA not available. GPU acceleration disabled.", visible=True)
+            
+            device_str = str(cuda_device_val).strip()
+            device_count = torch.cuda.device_count()
+            
+            if device_str.lower() == "all":
+                return gr.Markdown.update(value=f"⚠️ GAN models use single GPU. 'all' will use GPU 0 (of {device_count} available)", visible=True)
+            
+            devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
+            
+            invalid_devices = []
+            valid_devices = []
+            
+            for device in devices:
+                if not device.isdigit():
+                    invalid_devices.append(device)
+                else:
+                    device_id = int(device)
+                    if device_id >= device_count:
+                        invalid_devices.append(f"{device} (max: {device_count-1})")
+                    else:
+                        valid_devices.append(device_id)
+            
+            if invalid_devices:
+                return gr.Markdown.update(
+                    value=f"❌ Invalid device ID(s): {', '.join(invalid_devices)}. Available: 0-{device_count-1}",
+                    visible=True
+                )
+            
+            if len(valid_devices) > 1:
+                return gr.Markdown.update(
+                    value=f"⚠️ GAN models use single GPU. Will use GPU {valid_devices[0]} (ignoring others)",
+                    visible=True
+                )
+            elif len(valid_devices) == 1:
+                return gr.Markdown.update(
+                    value=f"✅ Using GPU {valid_devices[0]}",
+                    visible=True
+                )
+            
+            return gr.Markdown.update(value="", visible=False)
+        except Exception as e:
+            return gr.Markdown.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
+    
+    # Wire up live CUDA validation
+    gpu_device.change(
+        fn=validate_cuda_device_live_gan,
+        inputs=gpu_device,
+        outputs=gpu_device_warning
+    )
 
     # Input handling
     def cache_input(val, state):

@@ -308,6 +308,8 @@ def rife_tab(
                             info=f"{gpu_hint}\n⚠️ RIFE uses SINGLE GPU only. Multi-GPU not supported. Enter single GPU ID (e.g., 0, 1, 2). Leave empty for default (GPU 0).",
                             interactive=cuda_available
                         )
+                        # FIXED: Live CUDA validation feedback for RIFE tab
+                        rife_gpu_warning = gr.Markdown("", visible=False)
 
                 # Video Editing
                 with gr.TabItem("✂️ Video Editing"):
@@ -561,6 +563,67 @@ def rife_tab(
         )
 
     # Wire up event handlers
+    
+    # FIXED: Live CUDA device validation for RIFE tab (enforces single GPU)
+    def validate_cuda_device_live_rife(cuda_device_val):
+        """Live CUDA validation for RIFE (enforces single GPU)"""
+        if not cuda_device_val or not cuda_device_val.strip():
+            return gr.Markdown.update(value="", visible=False)
+        
+        try:
+            import torch
+            
+            if not torch.cuda.is_available():
+                return gr.Markdown.update(value="⚠️ CUDA not available. CPU mode will be used (very slow).", visible=True)
+            
+            device_str = str(cuda_device_val).strip()
+            device_count = torch.cuda.device_count()
+            
+            if device_str.lower() == "all":
+                return gr.Markdown.update(value=f"⚠️ RIFE uses single GPU only. Will use GPU 0 (ignoring 'all')", visible=True)
+            
+            devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
+            
+            invalid_devices = []
+            valid_devices = []
+            
+            for device in devices:
+                if not device.isdigit():
+                    invalid_devices.append(device)
+                else:
+                    device_id = int(device)
+                    if device_id >= device_count:
+                        invalid_devices.append(f"{device} (max: {device_count-1})")
+                    else:
+                        valid_devices.append(device_id)
+            
+            if invalid_devices:
+                return gr.Markdown.update(
+                    value=f"❌ Invalid device ID(s): {', '.join(invalid_devices)}. Available: 0-{device_count-1}",
+                    visible=True
+                )
+            
+            if len(valid_devices) > 1:
+                return gr.Markdown.update(
+                    value=f"⚠️ RIFE single GPU only. Will use GPU {valid_devices[0]} (ignoring {', '.join(map(str, valid_devices[1:]))})",
+                    visible=True
+                )
+            elif len(valid_devices) == 1:
+                return gr.Markdown.update(
+                    value=f"✅ Using GPU {valid_devices[0]}",
+                    visible=True
+                )
+            
+            return gr.Markdown.update(value="", visible=False)
+        except Exception as e:
+            return gr.Markdown.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
+    
+    # Wire up live CUDA validation
+    rife_gpu.change(
+        fn=validate_cuda_device_live_rife,
+        inputs=rife_gpu,
+        outputs=rife_gpu_warning
+    )
 
     # Input handling
     def cache_input(val, state):

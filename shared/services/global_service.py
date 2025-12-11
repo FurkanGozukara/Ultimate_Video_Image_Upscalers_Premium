@@ -7,11 +7,24 @@ import gradio as gr
 from shared.preset_manager import PresetManager
 
 
-def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabled: bool, face_global: bool, face_strength: float, runner, preset_manager: PresetManager, global_settings: dict, run_logger=None, state: dict = None):
+def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabled: bool, face_global: bool, face_strength: float, 
+                         models_dir_val: str, hf_home_val: str, transformers_cache_val: str,
+                         runner, preset_manager: PresetManager, global_settings: dict, run_logger=None, state: dict = None):
+    """
+    Save global settings including model cache paths.
+    
+    FIXED: Now persists model cache paths (MODELS_DIR, HF_HOME, TRANSFORMERS_CACHE) so user can
+    override launcher BAT file settings from the UI. These paths control where AI models are downloaded.
+    
+    ⚠️ IMPORTANT: Changing model cache paths requires app restart to take effect (environment variables
+    are set at app startup). Updated paths will be used on next launch.
+    """
     # Preserve pinned reference from state if present
     seed_controls = state.get("seed_controls", {}) if state else {}
     pinned_ref = seed_controls.get("pinned_reference_path") or global_settings.get("pinned_reference_path")
     
+    # FIXED: Persist model cache paths for next app launch
+    # These override launcher BAT file settings if user configures them in UI
     global_settings.update(
         {
             "output_dir": output_dir_val or global_settings.get("output_dir"),
@@ -21,6 +34,10 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
             "face_strength": float(face_strength),
             "mode": runner.get_mode(),
             "pinned_reference_path": pinned_ref,  # Persist pinned reference
+            # FIXED: Save model cache paths (editable in UI)
+            "models_dir": models_dir_val or global_settings.get("models_dir"),
+            "hf_home": hf_home_val or global_settings.get("hf_home"),
+            "transformers_cache": transformers_cache_val or global_settings.get("transformers_cache"),
         }
     )
     preset_manager.save_global_settings(global_settings)
@@ -36,8 +53,33 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
     # Update state if provided
     if state:
         state["seed_controls"]["face_strength_val"] = float(face_strength)
+    
+    # Build status message with restart reminder if model cache paths changed
+    status_lines = ["✅ Global settings saved"]
+    
+    # Check if model cache paths were changed
+    original_models = global_settings.get("_original_models_dir")
+    original_hf = global_settings.get("_original_hf_home")
+    original_trans = global_settings.get("_original_transformers_cache")
+    
+    models_changed = (
+        (models_dir_val and models_dir_val != original_models) or
+        (hf_home_val and hf_home_val != original_hf) or
+        (transformers_cache_val and transformers_cache_val != original_trans)
+    )
+    
+    if models_changed:
+        status_lines.append("")
+        status_lines.append("⚠️ **Model cache paths changed - RESTART REQUIRED**")
+        status_lines.append("")
+        status_lines.append("**Action needed:**")
+        status_lines.append("1. Close this application")
+        status_lines.append("2. Restart to apply new model cache locations")
+        status_lines.append("")
+        status_lines.append("💡 Models will download to new location on next run.")
+        status_lines.append("To keep existing models, manually copy them from old to new location.")
 
-    return gr.Markdown.update(value="✅ Global settings saved"), state or {}
+    return gr.Markdown.update(value="\n".join(status_lines)), state or {}
 
 
 def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager: PresetManager, global_settings: dict, state: dict = None):
