@@ -19,26 +19,118 @@ class SeedVR2Model:
     size: str
     precision: str
     variant: str
+    # Multi-GPU support
     supports_multi_gpu: bool = True
+    # Performance defaults
     default_batch_size: int = DEFAULT_BATCH_SIZE
     preferred_attention: str = DEFAULT_ATTENTION
+    # Compilation support
     compile_compatible: bool = True
+    preferred_compile_backend: str = "inductor"  # inductor, cudagraphs
+    preferred_compile_mode: str = "default"  # default, reduce-overhead, max-autotune
+    # Resolution constraints
     max_resolution: int = 0  # 0 = no cap
+    min_resolution: int = 256  # Minimum safe resolution
+    # Offload recommendations
+    recommended_dit_offload: str = "none"  # none, cpu, or specific GPU
+    recommended_vae_offload: str = "none"
+    # BlockSwap support
+    supports_blockswap: bool = True
+    max_blocks_to_swap: int = 36  # Maximum safe blocks for this model
+    # Caching support (CUDA graphs)
+    supports_cache_dit: bool = True
+    supports_cache_vae: bool = True
+    requires_single_gpu_for_cache: bool = True  # Most models require single GPU for caching
+    # Memory requirements (rough estimates in GB)
+    estimated_vram_gb: float = 8.0  # Estimated VRAM usage
+    # Special notes
+    notes: str = ""
 
 
 def _built_ins() -> List[SeedVR2Model]:
     return [
-        SeedVR2Model(name="seedvr2_ema_3b_fp8_e4m3fn.safetensors", size="3B", precision="fp8_e4m3fn", variant="standard", preferred_attention="flash_attn", supports_multi_gpu=True),
-        SeedVR2Model(name="seedvr2_ema_3b_fp16.safetensors", size="3B", precision="fp16", variant="standard", preferred_attention="flash_attn", supports_multi_gpu=True),
-        # GGUF models don't support multi-GPU well due to quantization overhead
-        SeedVR2Model(name="seedvr2_ema_3b-Q8_0.gguf", size="3B", precision="Q8_0", variant="standard", compile_compatible=False, supports_multi_gpu=False),
-        SeedVR2Model(name="seedvr2_ema_3b-Q4_K_M.gguf", size="3B", precision="Q4_K_M", variant="standard", compile_compatible=False, supports_multi_gpu=False),
-        SeedVR2Model(name="seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="standard", preferred_attention="flash_attn", supports_multi_gpu=True),
-        SeedVR2Model(name="seedvr2_ema_7b_fp16.safetensors", size="7B", precision="fp16", variant="standard", preferred_attention="flash_attn", supports_multi_gpu=True),
-        SeedVR2Model(name="seedvr2_ema_7b-Q4_K_M.gguf", size="7B", precision="Q4_K_M", variant="standard", compile_compatible=False, supports_multi_gpu=False),
-        SeedVR2Model(name="seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="sharp", preferred_attention="flash_attn", supports_multi_gpu=True),
-        SeedVR2Model(name="seedvr2_ema_7b_sharp_fp16.safetensors", size="7B", precision="fp16", variant="sharp", preferred_attention="flash_attn", supports_multi_gpu=True),
-        SeedVR2Model(name="seedvr2_ema_7b_sharp-Q4_K_M.gguf", size="7B", precision="Q4_K_M", variant="sharp", compile_compatible=False, supports_multi_gpu=False),
+        # 3B models - lower VRAM, faster, good for most use cases
+        SeedVR2Model(
+            name="seedvr2_ema_3b_fp8_e4m3fn.safetensors",
+            size="3B", precision="fp8_e4m3fn", variant="standard",
+            preferred_attention="flash_attn", supports_multi_gpu=True,
+            estimated_vram_gb=6.0, max_resolution=4096,
+            notes="Lightweight 3B model with fp8 quantization. Good balance of speed and quality."
+        ),
+        SeedVR2Model(
+            name="seedvr2_ema_3b_fp16.safetensors",
+            size="3B", precision="fp16", variant="standard",
+            preferred_attention="flash_attn", supports_multi_gpu=True,
+            estimated_vram_gb=8.0, max_resolution=4096,
+            notes="Standard 3B model with fp16 precision. Recommended for 8GB+ VRAM."
+        ),
+        # GGUF 3B models - quantized, limited features
+        SeedVR2Model(
+            name="seedvr2_ema_3b-Q8_0.gguf",
+            size="3B", precision="Q8_0", variant="standard",
+            compile_compatible=False, supports_multi_gpu=False,
+            supports_cache_dit=False, supports_cache_vae=False,
+            estimated_vram_gb=4.0, max_resolution=2160,
+            notes="GGUF Q8_0 quantized. Low VRAM but no torch.compile or multi-GPU support."
+        ),
+        SeedVR2Model(
+            name="seedvr2_ema_3b-Q4_K_M.gguf",
+            size="3B", precision="Q4_K_M", variant="standard",
+            compile_compatible=False, supports_multi_gpu=False,
+            supports_cache_dit=False, supports_cache_vae=False,
+            estimated_vram_gb=3.0, max_resolution=2160,
+            notes="GGUF Q4 quantized. Minimal VRAM, quality trade-offs. No compile/multi-GPU."
+        ),
+        # 7B models - higher quality, more VRAM
+        SeedVR2Model(
+            name="seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors",
+            size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="standard",
+            preferred_attention="flash_attn", supports_multi_gpu=True,
+            estimated_vram_gb=12.0, max_resolution=4096,
+            default_batch_size=5, max_blocks_to_swap=35,
+            notes="Mixed precision 7B. Balances VRAM usage and quality. 12GB+ recommended."
+        ),
+        SeedVR2Model(
+            name="seedvr2_ema_7b_fp16.safetensors",
+            size="7B", precision="fp16", variant="standard",
+            preferred_attention="flash_attn", supports_multi_gpu=True,
+            estimated_vram_gb=16.0, max_resolution=4096,
+            default_batch_size=5,
+            notes="Full fp16 7B model. Highest quality, requires 16GB+ VRAM."
+        ),
+        SeedVR2Model(
+            name="seedvr2_ema_7b-Q4_K_M.gguf",
+            size="7B", precision="Q4_K_M", variant="standard",
+            compile_compatible=False, supports_multi_gpu=False,
+            supports_cache_dit=False, supports_cache_vae=False,
+            estimated_vram_gb=5.0, max_resolution=2160,
+            notes="GGUF Q4 7B. Reduced VRAM for 7B quality, but no compile/multi-GPU."
+        ),
+        # Sharp variants - enhanced edge preservation
+        SeedVR2Model(
+            name="seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors",
+            size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="sharp",
+            preferred_attention="flash_attn", supports_multi_gpu=True,
+            estimated_vram_gb=12.0, max_resolution=4096,
+            default_batch_size=5, max_blocks_to_swap=35,
+            notes="Sharp variant with enhanced edge detail. Mixed precision for efficiency."
+        ),
+        SeedVR2Model(
+            name="seedvr2_ema_7b_sharp_fp16.safetensors",
+            size="7B", precision="fp16", variant="sharp",
+            preferred_attention="flash_attn", supports_multi_gpu=True,
+            estimated_vram_gb=16.0, max_resolution=4096,
+            default_batch_size=5,
+            notes="Sharp variant fp16. Maximum quality with edge enhancement. 16GB+ VRAM."
+        ),
+        SeedVR2Model(
+            name="seedvr2_ema_7b_sharp-Q4_K_M.gguf",
+            size="7B", precision="Q4_K_M", variant="sharp",
+            compile_compatible=False, supports_multi_gpu=False,
+            supports_cache_dit=False, supports_cache_vae=False,
+            estimated_vram_gb=5.0, max_resolution=2160,
+            notes="GGUF Q4 sharp variant. Low VRAM sharp quality, limited features."
+        ),
     ]
 
 

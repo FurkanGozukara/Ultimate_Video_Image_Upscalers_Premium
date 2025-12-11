@@ -65,9 +65,39 @@ def gan_tab(
     merged_defaults = preset_manager.merge_config(defaults, last_used or {})
     values = [merged_defaults[k] for k in GAN_ORDER]
 
+    # GPU availability check (like SeedVR2 tab)
+    import platform
+    cuda_available = False
+    cuda_count = 0
+    gpu_hint = "CUDA detection in progress..."
+    
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+        cuda_count = torch.cuda.device_count() if cuda_available else 0
+        
+        if cuda_available and cuda_count > 0:
+            gpu_hint = f"✅ Detected {cuda_count} CUDA GPU(s) - GPU acceleration available"
+        else:
+            gpu_hint = "⚠️ CUDA not available - GPU acceleration disabled. Processing will use CPU (significantly slower)"
+    except Exception as e:
+        gpu_hint = f"❌ CUDA detection failed: {str(e)}"
+        cuda_available = False
+
     # Layout
     gr.Markdown("### 🖼️ Image-Based (GAN) Upscaling")
     gr.Markdown("*High-quality image upscaling using GAN models with fixed scale factors (2x, 4x, etc.)*")
+    
+    # Show GPU warning if not available
+    if not cuda_available:
+        gr.Markdown(
+            f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
+            f'<strong>⚠️ GPU Acceleration Unavailable</strong><br>'
+            f'{gpu_hint}<br><br>'
+            f'GAN upscaling will use CPU fallback (10-100x slower). Install CUDA-enabled PyTorch for GPU acceleration.'
+            f'</div>',
+            elem_classes="warning-text"
+        )
 
     # Input section
     with gr.Accordion("📁 Input Configuration", open=True):
@@ -226,15 +256,17 @@ def gan_tab(
 
                 gpu_acceleration = gr.Checkbox(
                     label="GPU Acceleration",
-                    value=values[14],
-                    info="Use GPU for processing. HIGHLY RECOMMENDED for speed. CPU fallback is 10-100x slower. Disable only if no compatible GPU."
+                    value=values[14] if cuda_available else False,  # Force False if no CUDA
+                    info=f"{gpu_hint} | Use GPU for processing. HIGHLY RECOMMENDED for speed. CPU fallback is 10-100x slower.",
+                    interactive=cuda_available  # Disable if no CUDA
                 )
 
                 gpu_device = gr.Textbox(
                     label="GPU Device",
-                    value=values[15],
-                    placeholder="0 or all",
-                    info="GPU device ID(s) to use. Single ID (0) for one GPU, 'all' for all available GPUs (model-dependent). Multi-GPU support limited. Check CUDA availability in Health tab."
+                    value=values[15] if cuda_available else "",  # Clear if no CUDA
+                    placeholder="0 or all" if cuda_available else "CUDA not available",
+                    info=f"GPU device ID(s). {cuda_count} GPU(s) detected. Single ID (0) for one GPU, 'all' for all available. Multi-GPU support model-dependent.",
+                    interactive=cuda_available  # Disable if no CUDA
                 )
 
         # Output Settings

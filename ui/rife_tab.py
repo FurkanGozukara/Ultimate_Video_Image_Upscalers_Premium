@@ -50,9 +50,40 @@ def rife_tab(
     merged_defaults = preset_manager.merge_config(defaults, last_used or {})
     values = [merged_defaults[k] for k in RIFE_ORDER]
 
+    # GPU availability check (like SeedVR2/GAN tabs)
+    import platform
+    cuda_available = False
+    cuda_count = 0
+    gpu_hint = "CUDA detection in progress..."
+    
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+        cuda_count = torch.cuda.device_count() if cuda_available else 0
+        
+        if cuda_available and cuda_count > 0:
+            gpu_hint = f"✅ Detected {cuda_count} CUDA GPU(s) - GPU acceleration available"
+        else:
+            gpu_hint = "⚠️ CUDA not available - GPU acceleration disabled. Processing will use CPU (significantly slower)"
+    except Exception as e:
+        gpu_hint = f"❌ CUDA detection failed: {str(e)}"
+        cuda_available = False
+
     # Layout
     gr.Markdown("### ⏱️ RIFE / FPS / Edit Videos")
     gr.Markdown("*Frame interpolation, FPS adjustment, and video editing tools*")
+    
+    # Show GPU warning if not available
+    if not cuda_available:
+        gr.Markdown(
+            f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
+            f'<strong>⚠️ GPU Acceleration Unavailable</strong><br>'
+            f'{gpu_hint}<br><br>'
+            f'RIFE frame interpolation requires GPU acceleration. CPU fallback is extremely slow (10-100x).<br>'
+            f'Install CUDA-enabled PyTorch for optimal performance.'
+            f'</div>',
+            elem_classes="warning-text"
+        )
 
     # Input section
     with gr.Accordion("📁 Input Configuration", open=True):
@@ -180,15 +211,17 @@ def rife_tab(
                 
                 uhd_mode = gr.Checkbox(
                     label="UHD Mode (4K+ Processing)",
-                    value=values[9],
-                    info="Enable optimizations for 4K/8K videos. Uses more memory but handles high resolutions better. Enable for 3840x2160+ inputs."
+                    value=values[9] if cuda_available else False,  # Force False if no CUDA
+                    info=f"{gpu_hint} | Enable optimizations for 4K/8K videos. Uses more memory. Enable for 3840x2160+ inputs.",
+                    interactive=cuda_available  # Disable if no CUDA
                 )
 
                 rife_precision = gr.Dropdown(
                     label="Precision",
                     choices=["fp16", "fp32"],
-                    value=values[10],
-                    info="fp16 = half precision, 2x faster, uses less VRAM, minimal quality loss. fp32 = full precision, slower, more accurate. Use fp16 unless quality-critical."
+                    value=values[10] if cuda_available else "fp32",  # Force fp32 if no CUDA
+                    info=f"fp16 = half precision, 2x faster, less VRAM. fp32 = full precision. {'(fp16 requires GPU)' if not cuda_available else 'Use fp16 for speed.'}",
+                    interactive=cuda_available  # Disable if no CUDA (CPU uses fp32 only)
                 )
                 
                 montage = gr.Checkbox(

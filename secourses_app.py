@@ -10,6 +10,7 @@ from shared.logging_utils import RunLogger
 from shared.path_utils import get_default_output_dir, get_default_temp_dir
 from shared.preset_manager import PresetManager
 from shared.runner import Runner
+from shared.gradio_compat import check_gradio_version, check_required_features
 from ui.seedvr2_tab import seedvr2_tab
 from ui.resolution_tab import resolution_tab
 from ui.output_tab import output_tab
@@ -83,6 +84,15 @@ def main():
         initial_report = collect_health_report(temp_dir=temp_dir, output_dir=output_dir)
         warnings = []
         
+        # Check Gradio compatibility FIRST (critical for UI)
+        gradio_compatible, gradio_msg, gradio_features = check_gradio_version()
+        if not gradio_compatible:
+            warnings.append(f"⚠️ GRADIO: {gradio_msg}")
+        
+        required_features, features_msg = check_required_features()
+        if not required_features:
+            warnings.append(f"⚠️ GRADIO FEATURES: {features_msg}")
+        
         # Add mode lock warning if applicable
         if mode_locked and saved_mode == "in_app":
             warnings.append("🔒 IN-APP MODE LOCKED: You are in in-app mode. To switch back to subprocess mode, restart the application.")
@@ -118,13 +128,46 @@ def main():
     .model-status { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 12px; margin: 8px 0; font-family: 'Courier New', monospace; font-size: 14px; }
     """
 
+    # Auto-apply last-used resolution presets on startup (for all models)
+    # This ensures resolution/chunking settings are loaded automatically without manual "Apply"
+    def load_default_resolution_settings():
+        """Load last-used resolution settings for default models into shared state"""
+        from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names
+        
+        # Get primary models for each pipeline
+        seedvr2_models = get_seedvr2_model_names()
+        gan_models = scan_gan_models(BASE_DIR)
+        flashvsr_models = get_flashvsr_model_names()
+        
+        # Pick first model from each as default
+        default_model = seedvr2_models[0] if seedvr2_models else (gan_models[0] if gan_models else (flashvsr_models[0] if flashvsr_models else "default"))
+        
+        # Load last-used resolution preset for default model
+        last_used_res = preset_manager.load_last_used("resolution", default_model)
+        
+        # Extract resolution settings (fall back to defaults if no preset)
+        from shared.services.resolution_service import resolution_defaults
+        res_defaults = resolution_defaults([default_model])
+        
+        if last_used_res:
+            res_settings = preset_manager.merge_config(res_defaults, last_used_res)
+        else:
+            res_settings = res_defaults
+        
+        return res_settings
+
+    # Load resolution settings on startup
+    startup_res_settings = load_default_resolution_settings()
+    
     with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=css_overrides) as demo:
         # Shared state for cross-tab communication
+        # AUTO-POPULATED with last-used resolution settings on startup
         shared_state = gr.State({
             "health_banner": {"text": health_text},
             "seed_controls": {
-                "resolution_val": None,
-                "max_resolution_val": None,
+                # AUTO-LOADED from Resolution tab last-used presets
+                "resolution_val": startup_res_settings.get("target_resolution", 1080),
+                "max_resolution_val": startup_res_settings.get("max_target_resolution", 0),
                 "current_model": None,
                 "last_input_path": "",
                 "last_output_dir": "",
@@ -139,12 +182,15 @@ def main():
                 "pin_reference_val": False,
                 "fullscreen_val": False,
                 "face_strength_val": 0.5,
-                "chunk_size_sec": 0,
-                "chunk_overlap_sec": 0,
-                "ratio_downscale": False,
-                "enable_max_target": True,
-                "auto_resolution": True,
-                "per_chunk_cleanup": False,
+                # AUTO-LOADED chunking settings from Resolution tab
+                "chunk_size_sec": startup_res_settings.get("chunk_size", 0),
+                "chunk_overlap_sec": startup_res_settings.get("chunk_overlap", 0.5),
+                "ratio_downscale": startup_res_settings.get("ratio_downscale_then_upscale", False),
+                "enable_max_target": startup_res_settings.get("enable_max_target", True),
+                "auto_resolution": startup_res_settings.get("auto_resolution", True),
+                "per_chunk_cleanup": startup_res_settings.get("per_chunk_cleanup", False),
+                "scene_threshold": startup_res_settings.get("scene_threshold", 27.0),
+                "min_scene_len": startup_res_settings.get("min_scene_len", 2.0),
             },
             "operation_status": "ready"
         })
@@ -192,20 +238,23 @@ def main():
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
             gr.Markdown("""
-            **Subprocess Mode** (Default & Recommended): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but model reloads each time.
+            **Subprocess Mode** (Default & RECOMMENDED): Each processing run is a separate subprocess. Ensures 100% VRAM/RAM cleanup but model reloads each time.
             
-            **⚠️ In-App Mode** (EXPERIMENTAL - Use with Caution): 
-            - **Status**: This mode is **EXPERIMENTAL** and may have stability issues.
-            - **Features**:
-              - Direct model loading and caching (models stay in VRAM between runs)
-              - Faster repeated processing (no model reload overhead)
-              - Higher VRAM/RAM usage (models persist until app restart)
+            **⚠️ In-App Mode** (EXPERIMENTAL - NOT RECOMMENDED): 
+            - **Status**: This mode is **PARTIALLY IMPLEMENTED** and **NOT PRODUCTION READY**.
+            - **Current Limitations**:
+              - ❌ **NO MODEL CACHING**: Models still reload each run (no speed benefit)
+              - ❌ **CANNOT CANCEL**: No way to stop processing mid-run
+              - ❌ **NO VS BUILD TOOLS WRAPPER**: torch.compile may fail on Windows
+              - ⚠️ **MEMORY LEAKS**: No subprocess isolation for cleanup
               - ⚠️ **REQUIRES APP RESTART** to return to subprocess mode
-              - ⚠️ May have memory leaks on some systems
-            - **When to use**: Multiple runs with same model settings
-            - **When to avoid**: Low VRAM systems, first-time testing, or if encountering crashes
+            - **Planned Features** (Not Yet Implemented):
+              - Persistent model caching between runs
+              - Faster repeated processing
+              - Intelligent model swapping
+            - **Current Recommendation**: **DO NOT USE** - provides no benefits and has significant limitations
             
-            💡 **Recommendation**: Start with subprocess mode. Switch to in-app only if you need speed and have sufficient VRAM.
+            💡 **Recommendation**: **Always use subprocess mode** until in-app caching is fully implemented.
             """)
             mode_radio = gr.Radio(
                 choices=["subprocess", "in_app"],

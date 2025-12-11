@@ -419,20 +419,32 @@ class Runner:
             log_lines.append("Run canceled; partial output preserved.")
             output_path = str(predicted_output)
 
-        # Emit metadata if successful and enabled
+        # Emit metadata for ALL runs (success, failure, cancellation) if enabled
+        # This provides crucial telemetry for troubleshooting failed/cancelled runs
         # Check both global telemetry AND per-run metadata settings
         should_emit_metadata = self._telemetry_enabled and settings.get("save_metadata", True)
-        if output_path and returncode == 0 and should_emit_metadata:
+        if should_emit_metadata:
             try:
-                emit_metadata(
-                    Path(output_path),
-                    {
-                        "returncode": returncode,
-                        "output": output_path,
-                        "args": settings,
-                        "command": cmd_str,
-                    },
-                )
+                # Determine metadata target: output path if exists, otherwise output_dir
+                metadata_target = Path(output_path) if output_path else self.output_dir
+                
+                # Build comprehensive metadata including failure/cancellation info
+                metadata_payload = {
+                    "returncode": returncode,
+                    "output": output_path,
+                    "args": settings,
+                    "command": cmd_str,
+                    "status": "success" if returncode == 0 else ("cancelled" if self._canceled else "failed"),
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                
+                # Add failure-specific context
+                if returncode != 0:
+                    metadata_payload["error_logs"] = log_lines[-50:]  # Last 50 log lines for debugging
+                    if self._canceled:
+                        metadata_payload["cancellation_reason"] = "User cancelled processing"
+                
+                emit_metadata(metadata_target, metadata_payload)
             except Exception as e:
                 if on_progress:
                     on_progress(f"Warning: Failed to emit metadata: {e}\n")
@@ -448,33 +460,37 @@ class Runner:
         """
         Execute SeedVR2 in-app mode (EXPERIMENTAL).
 
-        EXPERIMENTAL IMPLEMENTATION:
-        - Runs CLI via Python direct invocation (runpy) instead of subprocess
-        - Models stay loaded in VRAM between runs (managed by ModelManager)
-        - Faster repeated processing (no subprocess overhead)
-        - Higher VRAM/RAM usage (models persist until app restart)
-        - ⚠️ Non-cancelable during processing (no subprocess to kill)
-        - ⚠️ May have memory leaks without subprocess cleanup guarantees
+        CURRENT IMPLEMENTATION STATUS:
+        - ⚠️ PARTIALLY IMPLEMENTED: Runs CLI via runpy but does NOT yet implement persistent model caching
+        - Models are reloaded each run (same as subprocess mode)
+        - ModelManager tracking is used but full caching requires SeedVR2 CLI refactoring
         
-        LIMITATIONS:
-        - Cannot cancel mid-run (no subprocess to kill)
-        - Memory leaks possible without explicit cleanup
-        - Requires app restart to fully free VRAM
-        - VS Build Tools wrapper not applied (C++ toolchain must be pre-activated)
+        LIMITATIONS (CURRENT):
+        - ❌ Cannot cancel mid-run (no subprocess to kill)
+        - ❌ Models still reload each run (no speed benefit yet)
+        - ⚠️ VS Build Tools wrapper not applied (C++ toolchain must be pre-activated)
+        - ⚠️ May have memory leaks without subprocess isolation
         
-        USE CASES:
-        - Multiple runs with same model (avoids reload overhead)
-        - High-throughput batch processing
-        - Systems with sufficient VRAM (16GB+)
+        PLANNED (FUTURE):
+        - Persistent model caching between runs
+        - Faster repeated processing with same model
+        - Intelligent model swapping
+        
+        CURRENT RECOMMENDATION:
+        - Use subprocess mode (default) for all use cases
+        - In-app mode provides no benefits in current implementation
+        - Reserved for future optimization work
         
         AVOID WHEN:
         - Low VRAM systems (<12GB)
         - First-time testing
         - Need cancellation support
+        - Need speed (no caching benefit yet)
         """
         if on_progress:
-            on_progress("⚙️ In-app mode: Running with persistent model caching\n")
-            on_progress("⚠️ Note: Cannot cancel mid-run. Models stay in VRAM until app restart.\n")
+            on_progress("⚙️ In-app mode (EXPERIMENTAL): Running CLI directly without subprocess\n")
+            on_progress("⚠️ LIMITATIONS: Cannot cancel mid-run. No model caching benefits yet (models reload each run).\n")
+            on_progress("ℹ️ For best results, use subprocess mode (default) until in-app caching is fully implemented.\n")
 
         log_lines: List[str] = []
         returncode = -1
@@ -552,20 +568,28 @@ class Runner:
                 if on_progress:
                     on_progress(f"Output created: {output_path}\n")
             
-            # Emit metadata if successful and enabled
+            # Emit metadata for ALL runs (success, failure, cancellation) if enabled
             should_emit_metadata = self._telemetry_enabled and settings.get("save_metadata", True)
-            if output_path and returncode == 0 and should_emit_metadata:
+            if should_emit_metadata:
                 try:
-                    emit_metadata(
-                        Path(output_path),
-                        {
-                            "returncode": returncode,
-                            "output": output_path,
-                            "args": settings,
-                            "mode": "in_app",
-                            "command": " ".join(cmd),
-                        },
-                    )
+                    # Determine metadata target
+                    metadata_target = Path(output_path) if output_path else self.output_dir
+                    
+                    metadata_payload = {
+                        "returncode": returncode,
+                        "output": output_path,
+                        "args": settings,
+                        "mode": "in_app",
+                        "command": " ".join(cmd),
+                        "status": "success" if returncode == 0 else "failed",
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    
+                    # Add failure context
+                    if returncode != 0:
+                        metadata_payload["error_logs"] = log_lines[-50:]  # Last 50 lines for debugging
+                    
+                    emit_metadata(metadata_target, metadata_payload)
                 except Exception as e:
                     if on_progress:
                         on_progress(f"Warning: Failed to emit metadata: {e}\n")
@@ -990,20 +1014,33 @@ class Runner:
             adjusted = ffmpeg_set_fps(predicted_output, settings["fps_override"])
             output_path = str(adjusted)
 
+        returncode_val = proc.returncode if proc else -1
         meta_payload = {
-            "returncode": proc.returncode if proc else -1,
+            "returncode": returncode_val,
             "output": output_path,
             "args": settings,
+            "status": "success" if returncode_val == 0 else ("cancelled" if self._canceled else "failed"),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        
+        # Add error context for failures
+        if returncode_val != 0 and log_lines:
+            meta_payload["error_logs"] = log_lines[-50:]
+        
         # Check both global telemetry AND per-run metadata settings
         should_emit_metadata = self._telemetry_enabled and settings.get("save_metadata", True)
         if should_emit_metadata:
-            if png_output:
-                write_png_metadata(Path(output_path), meta_payload)
-            else:
-                emit_metadata(Path(output_path), meta_payload)
+            try:
+                # Emit for all runs (success, failure, cancellation)
+                metadata_target = Path(output_path) if Path(output_path).exists() or Path(output_path).parent.exists() else self.output_dir
+                if png_output:
+                    write_png_metadata(metadata_target if metadata_target.is_dir() else metadata_target.parent, meta_payload)
+                else:
+                    emit_metadata(metadata_target, meta_payload)
+            except Exception:
+                pass  # Don't fail run if metadata fails
 
-        return RunResult(proc.returncode if proc else -1, output_path, "\n".join(log_lines))
+        return RunResult(returncode_val, output_path, "\n".join(log_lines))
 
     def _build_rife_cmd(
         self,

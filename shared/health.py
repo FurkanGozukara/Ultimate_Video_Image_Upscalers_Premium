@@ -167,8 +167,28 @@ def is_vs_build_tools_available() -> bool:
     return result.get("status") == "ok"
 
 
+def _check_gradio() -> Dict[str, Optional[str]]:
+    """Check Gradio version and feature availability"""
+    try:
+        from .gradio_compat import check_gradio_version, check_required_features
+        
+        is_compatible, version_msg, features = check_gradio_version()
+        required_ok, features_msg = check_required_features()
+        
+        if is_compatible and required_ok:
+            return {"status": "ok", "detail": version_msg}
+        elif is_compatible and not required_ok:
+            return {"status": "warning", "detail": f"{version_msg}\n{features_msg}"}
+        else:
+            return {"status": "error", "detail": f"{version_msg}\n{features_msg}"}
+            
+    except Exception as e:
+        return {"status": "error", "detail": f"Gradio check failed: {str(e)}"}
+
+
 def collect_health_report(temp_dir: Path, output_dir: Path) -> Dict[str, Dict[str, Optional[str]]]:
     report = {
+        "gradio": _check_gradio(),  # Check Gradio FIRST (critical for UI)
         "ffmpeg": _check_ffmpeg(),
         "cuda": _check_cuda(),
         "vs_build_tools": _check_vs_build_tools(),

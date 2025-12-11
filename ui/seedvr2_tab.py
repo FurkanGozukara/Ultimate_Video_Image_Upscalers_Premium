@@ -629,18 +629,20 @@ def seedvr2_tab(
             # Action buttons with ffmpeg gating
             with gr.Row():
                 upscale_btn = gr.Button(
-                    "🚀 Upscale (subprocess)" if ffmpeg_available else "❌ Upscale (ffmpeg required)",
+                    "🚀 Upscale" if ffmpeg_available else "❌ Upscale (ffmpeg required)",
                     variant="primary" if ffmpeg_available else "stop",
                     size="lg",
                     interactive=ffmpeg_available
                 )
                 cancel_confirm = gr.Checkbox(
-                    label="Confirm cancel",
-                    value=False
+                    label="⚠️ Confirm cancel (subprocess mode only)",
+                    value=False,
+                    info="Cancel only works in subprocess mode. Check Global Settings to verify mode."
                 )
                 cancel_btn = gr.Button(
-                    "⏹️ Cancel",
-                    variant="stop"
+                    "⏹️ Cancel (subprocess only)",
+                    variant="stop",
+                    scale=1
                 )
                 preview_btn = gr.Button(
                     "👁️ First-frame Preview" if ffmpeg_available else "❌ Preview (ffmpeg required)",
@@ -678,9 +680,10 @@ def seedvr2_tab(
             gr.Markdown(
                 "**Current Mode:** Check Global Settings tab to view/change execution mode\n\n"
                 "**Available Modes:**\n"
-                "- **Subprocess (Default):** Each run is isolated with full VRAM cleanup and cancellation support\n"
-                "- **In-app (Experimental):** Models stay loaded in VRAM between runs for faster processing but higher memory usage\n\n"
-                "**Note:** Switch modes in Global Settings tab. In-app mode requires app restart to revert."
+                "- **Subprocess (Default & RECOMMENDED):** Each run is isolated with full VRAM cleanup and **cancellation support**\n"
+                "- **⚠️ In-app (EXPERIMENTAL - NOT RECOMMENDED):** Partially implemented. **Cannot cancel**, no model caching benefits yet, models reload each run\n\n"
+                "**⚠️ IMPORTANT:** Cancel button only works in **subprocess mode**. In-app mode runs cannot be cancelled mid-process.\n\n"
+                "**Note:** Always use subprocess mode until in-app caching is fully implemented. Switch modes in Global Settings tab."
             )
             gr.Markdown("**Comparison:** Enhanced ImageSlider with fullscreen and download support for images. Custom HTML5 slider for videos.")
 
