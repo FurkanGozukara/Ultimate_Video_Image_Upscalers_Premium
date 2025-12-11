@@ -614,8 +614,9 @@ def build_gan_callbacks(
             chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
             chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0) or 0)
             per_chunk_cleanup = seed_controls.get("per_chunk_cleanup", False)
-            scene_threshold = 27.0  # Default for scene detection
-            min_scene_len = 2.0
+            # PySceneDetect parameters now managed centrally in Resolution tab
+            scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
+            min_scene_len = float(seed_controls.get("min_scene_len", 2.0))
             
             # Determine if PySceneDetect chunking should be used for video inputs
             from shared.path_utils import detect_input_type as detect_type

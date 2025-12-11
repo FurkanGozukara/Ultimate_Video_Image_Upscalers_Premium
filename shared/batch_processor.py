@@ -172,6 +172,24 @@ class BatchProcessor:
                     if success:
                         job.status = "completed"
                         progress.completed_files += 1
+                        
+                        # Write per-file summary for successful completions
+                        if self.logger and job.output_path:
+                            try:
+                                output_path = Path(job.output_path)
+                                self.logger.write_summary(
+                                    output_path,
+                                    {
+                                        "input": job.input_path,
+                                        "output": job.output_path,
+                                        "status": "completed",
+                                        "processing_time": job.end_time - job.start_time if job.start_time else 0,
+                                        "batch_processing": True,
+                                        "metadata": job.metadata
+                                    }
+                                )
+                            except Exception:
+                                pass  # Non-critical metadata write
                     else:
                         job.status = "failed"
                         progress.failed_files += 1
@@ -192,8 +210,20 @@ class BatchProcessor:
                     job.error_message = str(e)
                     job.end_time = time.time()
                 
-                if self.logger:
-                    self.logger.log_error(f"Batch job failed: {job.input_path}", str(e))
+                # Log error (RunLogger doesn't have log_error, just write summary with error status)
+                if self.logger and job.output_path:
+                    try:
+                        self.logger.write_summary(
+                            Path(job.output_path).parent if job.output_path else Path(self.output_dir or "."),
+                            {
+                                "input": job.input_path,
+                                "status": "failed",
+                                "error": str(e),
+                                "batch_processing": True
+                            }
+                        )
+                    except Exception:
+                        pass
 
             # Callback after each job
             if self.progress_callback:
@@ -203,6 +233,35 @@ class BatchProcessor:
         progress.current_file = None
         if self.progress_callback:
             self.progress_callback(progress)
+        
+        # Write batch summary
+        if self.logger and self.output_dir:
+            try:
+                batch_summary_path = Path(self.output_dir) / "batch_summary.json"
+                self.logger.write_summary(
+                    batch_summary_path.parent,
+                    {
+                        "batch_processing": True,
+                        "total_files": progress.total_files,
+                        "completed_files": progress.completed_files,
+                        "failed_files": progress.failed_files,
+                        "skipped_files": progress.skipped_files,
+                        "overall_progress": progress.overall_progress,
+                        "total_time": time.time() - (progress.start_time or time.time()),
+                        "jobs": [
+                            {
+                                "input": job.input_path,
+                                "output": job.output_path,
+                                "status": job.status,
+                                "error": job.error_message,
+                                "processing_time": (job.end_time - job.start_time) if (job.start_time and job.end_time) else None
+                            }
+                            for job in jobs
+                        ]
+                    }
+                )
+            except Exception:
+                pass  # Non-critical summary write
 
         return progress
 
