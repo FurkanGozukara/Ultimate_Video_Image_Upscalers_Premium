@@ -34,6 +34,7 @@ from shared.logging_utils import RunLogger
 from shared.comparison_unified import create_unified_comparison, build_comparison_selector
 from shared.video_comparison import create_comparison_selector
 from shared.model_manager import get_model_manager, ModelType
+from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.error_handling import (
     validate_input_path,
     validate_cuda_device as validate_cuda_spec,
@@ -515,15 +516,11 @@ def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
 
 
 def _expand_cuda_spec(cuda_spec: str) -> str:
-    """Expand 'all' to actual device list."""
-    try:
-        import torch
-        
-        if str(cuda_spec).strip().lower() == "all" and torch.cuda.is_available():
-            return ",".join(str(i) for i in range(torch.cuda.device_count()))
-    except Exception:
-        pass
-    return cuda_spec
+    """
+    DEPRECATED: Use shared.gpu_utils.expand_cuda_device_spec instead.
+    Kept for backward compatibility.
+    """
+    return expand_cuda_device_spec(cuda_spec)
 
 
 def _ffmpeg_available() -> bool:
@@ -1375,8 +1372,8 @@ def build_seedvr2_callbacks(
             if cuda_device_raw:
                 settings["cuda_device"] = _expand_cuda_spec(cuda_device_raw)
             
-            # Validate CUDA devices
-            cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
+            # Validate CUDA devices (using shared GPU utility)
+            cuda_warning = validate_cuda_device_spec(settings.get("cuda_device", ""))
             if cuda_warning:
                 yield (
                     f"⚠️ {cuda_warning}",

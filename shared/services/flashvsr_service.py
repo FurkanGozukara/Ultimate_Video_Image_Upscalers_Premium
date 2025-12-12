@@ -17,6 +17,7 @@ from shared.path_utils import normalize_path
 from shared.logging_utils import RunLogger
 from shared.comparison_unified import create_unified_comparison
 from shared.models.flashvsr_meta import get_flashvsr_metadata, get_flashvsr_default_model
+from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.error_handling import logger as error_logger
 
 # Cancel event for FlashVSR+ processing

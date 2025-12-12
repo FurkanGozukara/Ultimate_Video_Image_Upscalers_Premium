@@ -1,317 +1,189 @@
 """
-GPU Detection and Management Utilities
+GPU utility functions shared across all model services.
 
-Provides comprehensive GPU detection with:
-- GPU names and memory information
-- CUDA availability checking
-- Multi-GPU configuration validation
-- VRAM usage monitoring
+Provides consistent CUDA device handling for SeedVR2, GAN, RIFE, FlashVSR+.
 """
-
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
-import platform
+from typing import Optional
 
 
-@dataclass
-class GPUInfo:
-    """Information about a single GPU"""
-    id: int
-    name: str
-    total_memory_gb: float
-    available_memory_gb: float = 0.0
-    is_available: bool = True
-    compute_capability: Optional[Tuple[int, int]] = None
-
-
-def get_gpu_info() -> List[GPUInfo]:
+def expand_cuda_device_spec(cuda_spec: str) -> str:
     """
-    Get comprehensive information about all available GPUs.
+    Expand 'all' to actual device list.
     
+    Supports:
+    - "0" -> "0" (single GPU)
+    - "0,1,2" -> "0,1,2" (explicit multi-GPU)
+    - "all" -> "0,1,2,3" (auto-detect all GPUs)
+    - Whitespace-tolerant: "0, 1, 2" -> "0,1,2"
+    
+    Args:
+        cuda_spec: User-provided CUDA device specification
+        
     Returns:
-        List of GPUInfo objects, empty list if CUDA not available
+        Normalized device specification (comma-separated GPU IDs)
     """
-    gpus = []
-    
     try:
         import torch
+        
+        spec_clean = str(cuda_spec).strip().lower()
+        
+        # Handle "all" keyword
+        if spec_clean == "all" and torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+            return ",".join(str(i) for i in range(device_count))
+        
+        # Normalize whitespace in device lists
+        # "0, 1, 2" -> "0,1,2"
+        devices = [d.strip() for d in str(cuda_spec).replace(" ", "").split(",") if d.strip()]
+        return ",".join(devices)
+        
+    except Exception:
+        # If torch unavailable or error, return as-is
+        return cuda_spec
+
+
+def validate_cuda_device_spec(cuda_spec: str) -> Optional[str]:
+    """
+    Validate CUDA device specification.
+    
+    Checks:
+    - CUDA availability
+    - Device ID validity (numeric and within range)
+    - Multi-GPU compatibility warnings
+    
+    Args:
+        cuda_spec: Device specification (already expanded via expand_cuda_device_spec)
+        
+    Returns:
+        Error message if invalid, None if valid
+    """
+    try:
+        import torch
+        
+        if not cuda_spec or cuda_spec.strip() == "":
+            return None  # Empty is valid (CPU fallback)
         
         if not torch.cuda.is_available():
-            return []
+            return "CUDA is not available on this system, but CUDA devices were specified."
         
+        # Parse device list
+        devices = [d.strip() for d in str(cuda_spec).split(",") if d.strip()]
         device_count = torch.cuda.device_count()
         
-        for i in range(device_count):
-            try:
-                # Get device properties
-                props = torch.cuda.get_device_properties(i)
-                name = props.name
-                total_memory = props.total_memory / (1024 ** 3)  # Convert to GB
-                
-                # Get compute capability
-                compute_cap = (props.major, props.minor)
-                
-                # Try to get available memory
-                available_memory = 0.0
-                try:
-                    torch.cuda.set_device(i)
-                    available_memory = (torch.cuda.mem_get_info()[0]) / (1024 ** 3)
-                except Exception:
-                    # If we can't get available memory, just use total
-                    available_memory = total_memory
-                
-                gpu = GPUInfo(
-                    id=i,
-                    name=name,
-                    total_memory_gb=total_memory,
-                    available_memory_gb=available_memory,
-                    is_available=True,
-                    compute_capability=compute_cap
-                )
-                gpus.append(gpu)
-                
-            except Exception as e:
-                # GPU exists but we couldn't get details
-                gpus.append(GPUInfo(
-                    id=i,
-                    name=f"GPU {i} (details unavailable)",
-                    total_memory_gb=0.0,
-                    is_available=False
-                ))
-    
-    except ImportError:
-        # PyTorch not installed
-        return []
-    except Exception as e:
-        # Other errors
-        print(f"Error detecting GPUs: {e}")
-        return []
-    
-    return gpus
-
-
-def get_gpu_summary() -> str:
-    """
-    Get a human-readable summary of available GPUs.
-    
-    Returns:
-        Formatted string with GPU information
-    """
-    gpus = get_gpu_info()
-    
-    if not gpus:
-        return "No CUDA GPUs detected. CPU-only mode."
-    
-    lines = [f"**Detected {len(gpus)} GPU(s):**\n"]
-    
-    for gpu in gpus:
-        if gpu.is_available:
-            status_icon = "✅"
-            memory_info = f"{gpu.available_memory_gb:.1f}GB available / {gpu.total_memory_gb:.1f}GB total"
-            if gpu.compute_capability:
-                cc_info = f" (Compute {gpu.compute_capability[0]}.{gpu.compute_capability[1]})"
-            else:
-                cc_info = ""
-        else:
-            status_icon = "⚠️"
-            memory_info = "Unavailable"
-            cc_info = ""
+        # Validate each device ID
+        invalid = []
+        for d in devices:
+            if not d.isdigit():
+                invalid.append(f"{d} (not numeric)")
+            elif int(d) >= device_count:
+                invalid.append(f"{d} (max: {device_count-1})")
         
-        lines.append(f"{status_icon} **GPU {gpu.id}:** {gpu.name} - {memory_info}{cc_info}")
-    
-    return "\n".join(lines)
-
-
-def validate_gpu_ids(gpu_ids: str, allow_multi: bool = True) -> Tuple[bool, str, List[int]]:
-    """
-    Validate GPU ID string and return parsed IDs.
-    
-    Args:
-        gpu_ids: Comma-separated GPU IDs (e.g., "0" or "0,1,2")
-        allow_multi: Whether multi-GPU is allowed
+        if invalid:
+            return f"Invalid CUDA device ID(s): {', '.join(invalid)}. Available devices: 0-{device_count-1}"
         
-    Returns:
-        (is_valid, message, parsed_ids)
-    """
-    if not gpu_ids or not gpu_ids.strip():
-        return True, "Using default GPU (0)", [0]
-    
-    try:
-        # Parse IDs
-        parsed = []
-        for part in gpu_ids.split(","):
-            part = part.strip()
-            if part:
-                gpu_id = int(part)
-                if gpu_id < 0:
-                    return False, f"Invalid GPU ID: {gpu_id} (must be >= 0)", []
-                parsed.append(gpu_id)
+        return None  # Valid
         
-        if not parsed:
-            return True, "Using default GPU (0)", [0]
-        
-        # Check multi-GPU restriction
-        if not allow_multi and len(parsed) > 1:
-            return False, "Multi-GPU not supported for this model", []
-        
-        # Validate against available GPUs
-        gpus = get_gpu_info()
-        if gpus:
-            available_ids = [g.id for g in gpus if g.is_available]
-            max_id = max(available_ids) if available_ids else -1
-            
-            for gpu_id in parsed:
-                if gpu_id > max_id:
-                    return False, f"GPU {gpu_id} not available. Detected GPUs: 0-{max_id}", []
-        
-        # All valid
-        if len(parsed) == 1:
-            msg = f"Using GPU {parsed[0]}"
-        else:
-            msg = f"Using {len(parsed)} GPUs: {', '.join(map(str, parsed))}"
-        
-        return True, msg, parsed
-        
-    except ValueError as e:
-        return False, f"Invalid GPU ID format: {gpu_ids}. Use comma-separated integers (e.g., '0,1,2')", []
-
-
-def get_recommended_gpu() -> int:
-    """
-    Get the recommended GPU ID based on available memory.
-    
-    Returns:
-        GPU ID with most available memory, or 0 if none detected
-    """
-    gpus = get_gpu_info()
-    
-    if not gpus:
-        return 0
-    
-    # Find GPU with most available memory
-    best_gpu = max(gpus, key=lambda g: g.available_memory_gb if g.is_available else -1)
-    
-    return best_gpu.id
-
-
-def format_gpu_memory(bytes_value: int) -> str:
-    """
-    Format memory value in human-readable format.
-    
-    Args:
-        bytes_value: Memory in bytes
-        
-    Returns:
-        Formatted string (e.g., "8.5 GB")
-    """
-    gb = bytes_value / (1024 ** 3)
-    if gb >= 1.0:
-        return f"{gb:.1f} GB"
-    else:
-        mb = bytes_value / (1024 ** 2)
-        return f"{mb:.0f} MB"
-
-
-def check_vram_available(required_gb: float) -> Tuple[bool, str]:
-    """
-    Check if enough VRAM is available on any GPU.
-    
-    Args:
-        required_gb: Required VRAM in gigabytes
-        
-    Returns:
-        (is_available, message)
-    """
-    gpus = get_gpu_info()
-    
-    if not gpus:
-        return False, f"No GPUs available. {required_gb:.1f}GB VRAM required."
-    
-    for gpu in gpus:
-        if gpu.is_available and gpu.available_memory_gb >= required_gb:
-            return True, f"GPU {gpu.id} has {gpu.available_memory_gb:.1f}GB available ({required_gb:.1f}GB required)"
-    
-    max_available = max((g.available_memory_gb for g in gpus if g.is_available), default=0)
-    return False, f"Insufficient VRAM. Required: {required_gb:.1f}GB, Available: {max_available:.1f}GB"
-
-
-def get_cuda_version() -> Optional[str]:
-    """
-    Get CUDA version string.
-    
-    Returns:
-        CUDA version or None if not available
-    """
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return torch.version.cuda
-    except Exception:
-        pass
-    return None
-
-
-def is_apple_silicon() -> bool:
-    """
-    Check if running on Apple Silicon (M1/M2/M3).
-    
-    Returns:
-        True if Apple Silicon detected
-    """
-    if platform.system() != "Darwin":
-        return False
-    
-    try:
-        import subprocess
-        result = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], 
-                              capture_output=True, text=True, timeout=1)
-        return 'Apple' in result.stdout
-    except Exception:
-        return False
-
-
-def get_device_recommendation(model_type: str = "default") -> str:
-    """
-    Get recommended device configuration based on hardware.
-    
-    Args:
-        model_type: Type of model (affects VRAM requirements)
-        
-    Returns:
-        Recommendation message
-    """
-    if is_apple_silicon():
-        return "🍎 **Apple Silicon detected:** Use MPS backend for GPU acceleration. CUDA not available on macOS."
-    
-    gpus = get_gpu_info()
-    
-    if not gpus:
-        return "⚠️ **No CUDA GPUs detected:** Processing will use CPU (significantly slower)."
-    
-    if len(gpus) == 1:
-        gpu = gpus[0]
-        if gpu.total_memory_gb >= 12:
-            return f"✅ **Single GPU:** {gpu.name} with {gpu.total_memory_gb:.0f}GB VRAM - Excellent for all models."
-        elif gpu.total_memory_gb >= 8:
-            return f"✅ **Single GPU:** {gpu.name} with {gpu.total_memory_gb:.0f}GB VRAM - Good for most models. Use tiling for 4K+."
-        else:
-            return f"⚠️ **Single GPU:** {gpu.name} with {gpu.total_memory_gb:.0f}GB VRAM - Limited. Use BlockSwap and tiling."
-    
-    else:
-        total_vram = sum(g.total_memory_gb for g in gpus if g.is_available)
-        return f"✅ **Multi-GPU:** {len(gpus)} GPUs with {total_vram:.0f}GB total VRAM - Excellent for large batches and streaming."
+    except Exception as exc:
+        return f"CUDA validation error: {exc}"
 
 
 def clear_cuda_cache():
     """
     Clear CUDA cache to free VRAM.
-    Safe to call even if CUDA is not available.
+    
+    Safe to call even if CUDA unavailable (silently ignored).
+    Used after subprocess completion or model switches.
     """
     try:
         import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            torch.cuda.synchronize()  # Wait for GPU operations to finish
     except Exception:
-        pass
+        pass  # Silently ignore if CUDA not available
 
+
+def get_cuda_memory_info() -> str:
+    """
+    Get human-readable CUDA memory usage summary.
+    
+    Returns:
+        Formatted string with memory stats for each GPU, or empty if unavailable
+    """
+    try:
+        import torch
+        
+        if not torch.cuda.is_available():
+            return "CUDA not available"
+        
+        device_count = torch.cuda.device_count()
+        if device_count == 0:
+            return "No CUDA devices found"
+        
+        lines = []
+        for i in range(device_count):
+            props = torch.cuda.get_device_properties(i)
+            allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)  # GB
+            reserved = torch.cuda.memory_reserved(i) / (1024 ** 3)  # GB
+            total = props.total_memory / (1024 ** 3)  # GB
+            
+            lines.append(
+                f"GPU {i} ({props.name}): "
+                f"{allocated:.2f}GB allocated, "
+                f"{reserved:.2f}GB reserved, "
+                f"{total:.2f}GB total"
+            )
+        
+        return "\n".join(lines)
+        
+    except Exception as e:
+        return f"Memory info unavailable: {e}"
+
+
+def check_gpu_compatibility(model_type: str) -> tuple[bool, str]:
+    """
+    Check if GPU acceleration is available and compatible.
+    
+    Args:
+        model_type: Model type for specific warnings (seedvr2, gan, rife, flashvsr)
+        
+    Returns:
+        (is_compatible, warning_message) tuple
+    """
+    try:
+        import torch
+        
+        if not torch.cuda.is_available():
+            return False, "CUDA not available - processing will use CPU (significantly slower)"
+        
+        device_count = torch.cuda.device_count()
+        if device_count == 0:
+            return False, "No CUDA devices detected - processing will use CPU"
+        
+        # Check compute capability for model-specific warnings
+        props = torch.cuda.get_device_properties(0)
+        compute_cap = (props.major, props.minor)
+        
+        warnings = []
+        
+        # Flash attention requires Ampere+ (8.0) for optimal performance
+        if model_type in ("seedvr2", "flashvsr") and compute_cap[0] < 8:
+            warnings.append(
+                f"GPU compute capability {compute_cap[0]}.{compute_cap[1]} detected. "
+                f"Flash attention works best on Ampere (8.0+) or newer GPUs."
+            )
+        
+        # torch.compile requires recent GPU
+        if compute_cap[0] < 7:
+            warnings.append(
+                f"GPU compute capability {compute_cap[0]}.{compute_cap[1]} is very old. "
+                f"torch.compile may not work properly. Consider upgrading GPU."
+            )
+        
+        if warnings:
+            return True, "\n".join(warnings)
+        
+        return True, f"✅ {device_count} CUDA GPU(s) detected and compatible"
+        
+    except Exception as e:
+        return False, f"GPU check failed: {e}"

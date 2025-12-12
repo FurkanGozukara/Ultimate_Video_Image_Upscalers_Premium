@@ -22,6 +22,7 @@ from shared.realesrgan_runner import run_realesrgan
 from shared.gan_runner import run_gan_upscale, GanResult, get_gan_model_metadata
 from shared.comparison_unified import create_unified_comparison, create_video_comparison_slider
 from shared.video_comparison_slider import create_video_comparison_html
+from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 
 
 GAN_MODEL_EXTS = {".pth", ".safetensors"}
@@ -234,21 +235,23 @@ def _apply_gan_preset(
     return [merged[k] for k in GAN_ORDER]
 
 
-def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
-    try:
-        import torch  # type: ignore
+from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 
-        if not cuda_spec:
-            return None
-        if not torch.cuda.is_available():
-            return "CUDA is not available on this system, but CUDA devices were specified."
-        devices = [d.strip() for d in str(cuda_spec).split(",") if d.strip() != ""]
-        count = torch.cuda.device_count()
-        invalid = [d for d in devices if (not d.isdigit()) or int(d) >= count]
-        if invalid:
-            return f"Invalid CUDA device id(s): {', '.join(invalid)}. Available: 0-{count-1}"
-    except Exception as exc:
-        return f"CUDA validation failed: {exc}"
+
+def _expand_cuda_spec_gan(cuda_spec: str) -> str:
+    """
+    DEPRECATED: Use shared.gpu_utils.expand_cuda_device_spec instead.
+    Kept for backward compatibility.
+    """
+    return expand_cuda_device_spec(cuda_spec)
+
+
+def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
+    """
+    DEPRECATED: Use shared.gpu_utils.validate_cuda_device_spec instead.
+    Kept for backward compatibility.
+    """
+    return validate_cuda_device_spec(cuda_spec)
     return None
 
 
@@ -623,22 +626,12 @@ def build_gan_callbacks(
 
             settings["input_path"] = inp
 
-            # Expand "all" to device list if specified
+            # Expand "all" to device list if specified (uses shared GPU utility)
             cuda_device_raw = settings.get("cuda_device", "")
             if cuda_device_raw:
-                # Define _expand_cuda_spec for GAN service
-                def _expand_cuda_spec_local(cuda_spec: str) -> str:
-                    try:
-                        import torch
-                        if str(cuda_spec).strip().lower() == "all" and torch.cuda.is_available():
-                            return ",".join(str(i) for i in range(torch.cuda.device_count()))
-                    except Exception:
-                        pass
-                    return cuda_spec
-                
-                settings["cuda_device"] = _expand_cuda_spec_local(cuda_device_raw)
+                settings["cuda_device"] = expand_cuda_device_spec(cuda_device_raw)
 
-            cuda_warn = _validate_cuda_devices(settings.get("cuda_device", ""))
+            cuda_warn = validate_cuda_device_spec(settings.get("cuda_device", ""))
             if cuda_warn:
                 yield (f"⚠️ {cuda_warn}", "", gr.Markdown.update(value="", visible=False), None, None, "CUDA Error", gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), gr.Gallery.update(visible=False), state)
                 return

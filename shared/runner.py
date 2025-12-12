@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .path_utils import (
     emit_metadata,
     ffmpeg_set_fps,
+    get_media_fps,
     normalize_path,
     resolve_output_location,
     rife_output_path,
@@ -989,6 +990,9 @@ class Runner:
     ) -> RunResult:
         """
         Run RIFE inference_video.py with given settings.
+        
+        FIXED: Now supports skip_first_frames and load_cap via ffmpeg preprocessing.
+        RIFE CLI doesn't have these options natively, so we pre-trim the video.
         """
         cli_path = self.base_dir / "RIFE" / "inference_video.py"
         if not cli_path.exists():
@@ -998,10 +1002,54 @@ class Runner:
         if not input_path:
             raise ValueError("Input path is required for RIFE.")
 
+        # FIXED: Pre-process video if skip_first_frames or load_cap is set
+        # RIFE CLI doesn't support these natively, so we trim via ffmpeg first
+        skip_frames = int(settings.get("skip_first_frames", 0))
+        load_cap = int(settings.get("load_cap", 0))
+        
+        effective_input = input_path
+        trimmed_video = None
+        
+        if (skip_frames > 0 or load_cap > 0) and detect_input_type(input_path) == "video":
+            # Need to trim video via ffmpeg
+            trimmed_video = self.temp_dir / f"rife_trimmed_{Path(input_path).stem}.mp4"
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+            
+            if on_progress:
+                on_progress(f"Pre-trimming video (skip {skip_frames}, cap {load_cap})...\n")
+            
+            # Build ffmpeg trim command
+            trim_cmd = ["ffmpeg", "-y", "-i", input_path]
+            
+            if skip_frames > 0:
+                # Get FPS to convert frames to seconds
+                fps = get_media_fps(input_path) or 30.0
+                start_time = skip_frames / fps
+                trim_cmd.extend(["-ss", str(start_time)])
+            
+            if load_cap > 0:
+                # Limit number of frames
+                trim_cmd.extend(["-frames:v", str(load_cap)])
+            
+            # Copy codec for fast trim (no re-encode)
+            trim_cmd.extend(["-c", "copy", str(trimmed_video)])
+            
+            try:
+                subprocess.run(trim_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                effective_input = str(trimmed_video)
+                
+                if on_progress:
+                    on_progress(f"✅ Video trimmed: {trimmed_video.name}\n")
+            except Exception as e:
+                if on_progress:
+                    on_progress(f"⚠️ Video trimming failed: {e}, using original input\n")
+                # Fall back to original if trim fails
+                effective_input = input_path
+
         png_output = bool(settings.get("png_output"))
         output_override = settings.get("output_override") or None
         predicted_output = rife_output_path(
-            input_path,
+            effective_input,  # Use trimmed input for output naming
             png_output,
             output_override,
             global_output_dir=str(self.output_dir),
@@ -1009,7 +1057,7 @@ class Runner:
             png_keep_basename=settings.get("png_keep_basename", False),
         )
 
-        cmd = self._build_rife_cmd(cli_path, input_path, predicted_output, settings)
+        cmd = self._build_rife_cmd(cli_path, effective_input, predicted_output, settings)
         
         # Wrap with vcvars for C++ toolchain support (Windows only, best-effort)
         # FIXED: Pass on_progress for transparent warning surfacing
@@ -1111,6 +1159,15 @@ class Runner:
                     emit_metadata(metadata_target, meta_payload)
             except Exception:
                 pass  # Don't fail run if metadata fails
+        
+        # FIXED: Clean up trimmed temp file if we created one
+        if trimmed_video and trimmed_video.exists():
+            try:
+                trimmed_video.unlink()
+                if on_progress:
+                    on_progress("✅ Cleaned up temporary trimmed video\n")
+            except Exception:
+                pass  # Non-critical cleanup failure
 
         return RunResult(returncode_val, output_path, "\n".join(log_lines))
 
@@ -1160,13 +1217,9 @@ class Runner:
         if settings.get("skip_static_frames"):
             cmd.append("--skip")
 
-        # Frame control
-        if settings.get("skip_first_frames") and settings["skip_first_frames"] > 0:
-            # RIFE uses --skip for static frames, not for frame skipping
-            pass
-        if settings.get("load_cap") and settings["load_cap"] > 0:
-            # RIFE doesn't have a direct load_cap equivalent
-            pass
+        # Frame control: skip_first_frames and load_cap are now handled via ffmpeg preprocessing
+        # in run_rife() before RIFE CLI is called, so no CLI args needed here.
+        # RIFE's --skip flag is for static frame detection, not frame trimming.
 
         return cmd
 

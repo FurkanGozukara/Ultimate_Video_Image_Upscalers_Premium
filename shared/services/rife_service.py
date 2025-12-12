@@ -20,6 +20,7 @@ from shared.path_utils import normalize_path, ffmpeg_set_fps, get_media_dimensio
 from shared.face_restore import restore_video
 from shared.logging_utils import RunLogger
 from shared.models.rife_meta import get_rife_metadata, get_rife_default_model
+from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.error_handling import logger as error_logger
 
 
@@ -606,23 +607,13 @@ def build_rife_callbacks(
             settings["input_path"] = input_path
             settings["output_override"] = settings.get("output_override") or None
 
-            # Expand "all" to device list if specified
+            # Expand "all" to device list if specified (using shared GPU utility)
             cuda_device_raw = settings.get("cuda_device", "")
             if cuda_device_raw:
-                # Define _expand_cuda_spec for RIFE service
-                def _expand_cuda_spec_local(cuda_spec: str) -> str:
-                    try:
-                        import torch
-                        if str(cuda_spec).strip().lower() == "all" and torch.cuda.is_available():
-                            return ",".join(str(i) for i in range(torch.cuda.device_count()))
-                    except Exception:
-                        pass
-                    return cuda_spec
-                
-                settings["cuda_device"] = _expand_cuda_spec_local(cuda_device_raw)
+                settings["cuda_device"] = expand_cuda_device_spec(cuda_device_raw)
 
-            # Validate CUDA devices
-            cuda_warning = _validate_cuda_devices(settings.get("cuda_device", ""))
+            # Validate CUDA devices (using shared GPU utility)
+            cuda_warning = validate_cuda_device_spec(settings.get("cuda_device", ""))
             if cuda_warning:
                 yield (f"⚠️ {cuda_warning}", "", gr.Markdown.update(value="", visible=False), None, gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), state)
                 return
