@@ -224,16 +224,6 @@ def collision_safe_dir(path: Path) -> Path:
     import time
     timestamp = int(time.time())
     return parent / f"{base_name}_{timestamp}"
-    pattern = re.compile(r"(.*)_(\d{4})$")
-    match = pattern.match(base)
-    if match:
-        base = match.group(1)
-        counter = int(match.group(2)) + 1
-    while True:
-        candidate = parent / f"{base}_{counter:04d}"
-        if not candidate.exists():
-            return candidate
-        counter += 1
 
 
 def rife_output_path(

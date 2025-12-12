@@ -1048,8 +1048,8 @@ def seedvr2_tab(
 
     # Resume status checking
     check_resume_btn.click(
-        fn=lambda fmt, gs: service["check_resume_status"](gs, fmt),
-        inputs=[output_format, global_settings],
+        fn=lambda fmt: service["check_resume_status"](global_settings, fmt),
+        inputs=[output_format],
         outputs=resume_status
     )
 
