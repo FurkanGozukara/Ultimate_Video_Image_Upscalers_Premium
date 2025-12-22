@@ -368,17 +368,22 @@ def main():
             
             # FIXED: Make model cache paths EDITABLE and persistable (not read-only)
             gr.Markdown("### 📦 Model Cache Paths")
-            gr.Markdown("""
-            **Configure where AI models are downloaded and cached.**
             
-            These paths control where models (SeedVR2, FlashVSR+, Real-ESRGAN, etc.) are stored.
-            If left empty, defaults from launcher BAT file or system defaults will be used.
-            
-            ⚠️ **IMPORTANT**: Changing these paths will NOT move existing models. You must:
-            1. Save new paths here
-            2. Restart the application
-            3. Models will re-download to new location (or manually copy from old location)
-            """)
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("""
+                    **Configure where AI models are downloaded and cached.**
+                    
+                    These paths control where models (SeedVR2, FlashVSR+, Real-ESRGAN, etc.) are stored.
+                    If left empty, defaults from launcher BAT file or system defaults will be used.
+                    """)
+                with gr.Column():
+                    gr.Markdown("""
+                    ⚠️ **IMPORTANT**: Changing these paths will NOT move existing models. You must:
+                    1. Save new paths here
+                    2. Restart the application
+                    3. Models will re-download to new location (or manually copy from old location)
+                    """)
             
             with gr.Row():
                 models_dir_box = gr.Textbox(
@@ -415,104 +420,97 @@ def main():
                 launcher_transformers_cache or "Not set (using MODELS_DIR)"
             ))
             
-            save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
-            global_status = gr.Markdown("")
-
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
-            gr.Markdown("""
-            ## 🟢 Subprocess Mode (Default & **STRONGLY RECOMMENDED**)
             
-            **What it does:**
-            - Each processing run is a **completely isolated subprocess**
-            - Models load fresh, process, then exit with **guaranteed cleanup**
-            - **Works perfectly for ALL models** (SeedVR2, GAN, RIFE, FlashVSR+)
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("""
+                    ## 🟢 Subprocess Mode
+                    **(Default & STRONGLY RECOMMENDED)**
+                    
+                    **What it does:**
+                    - Completely isolated subprocess per run
+                    - Models load fresh, process, exit with guaranteed cleanup
+                    - Works perfectly for ALL models
+                    
+                    **Benefits:**
+                    - ✅ **100% VRAM/RAM cleanup** after each run
+                    - ✅ **Full cancellation support** - kill anytime
+                    - ✅ **Automatic vcvars wrapper** (Windows torch.compile)
+                    - ✅ **Process isolation** - prevents memory leaks
+                    - ✅ **Proven stability** - production-ready
+                    - ✅ **Cross-platform** - Windows and Linux
+                    
+                    **Performance:**
+                    - ~5-10s loading overhead per run
+                    - Negligible for long videos (<1% total time)
+                    - Amortized across batch processing
+                    """)
+                
+                with gr.Column():
+                    gr.Markdown("""
+                    ## 🔴 In-App Mode
+                    **(EXPERIMENTAL - DO NOT USE)**
+                    
+                    **⚠️ CRITICAL: NON-FUNCTIONAL PLACEHOLDER**
+                    
+                    **Status**: Partially implemented with **ZERO BENEFITS** and **CRITICAL LIMITATIONS**
+                    
+                    **Why It Doesn't Work:**
+                    
+                    **1. ❌ NO MODEL PERSISTENCE**
+                    - Models reload EVERY RUN (identical to subprocess)
+                    - Expected: Models stay in VRAM for speed
+                    - Result: **ZERO SPEED BENEFIT**
+                    
+                    **2. ❌ NO CANCELLATION**
+                    - Cannot stop once started
+                    - Must wait or force-quit entire app
+                    
+                    **3. ❌ NO VCVARS WRAPPER**
+                    - torch.compile fails on Windows
+                    - Must activate vcvars before launch
+                    """)
+                
+                with gr.Column():
+                    gr.Markdown("""
+                    ## 🔴 More Issues
+                    
+                    **4. ⚠️ MEMORY LEAKS**
+                    - VRAM may not fully clear
+                    - Usage creeps up, eventual OOM crashes
+                    
+                    **5. ⚠️ MODE LOCK**
+                    - Cannot switch back without restart
+                    - Locked-in until app restart
+                    
+                    **Required for Functional Mode:**
+                    - Refactor CLIs for persistent loading
+                    - Implement VRAM caching
+                    - Add threading cancellation
+                    - Pre-activate vcvars on startup
+                    - CUDA memory profiling
+                    
+                    **Effort**: 40-60 hours + testing  
+                    **Risk**: High (CUDA complexity)  
+                    **Benefit**: Marginal (5-10% for short videos)
+                    
+                    ---
+                    
+                    **Recommendation:**
+                    
+                    ✅ **USE SUBPROCESS MODE**
+                    - Production-ready and battle-tested
+                    - Reliable cleanup and cancellation
+                    
+                    🚫 **AVOID IN-APP MODE**
+                    - Non-functional (models reload anyway)
+                    - Dangerous (memory leaks, failures)
+                    """)
             
-            **Benefits:**
-            - ✅ **100% VRAM/RAM cleanup** after each run (guaranteed by process termination)
-            - ✅ **Full cancellation support** - kill subprocess at any time, even mid-processing
-            - ✅ **Automatic vcvars wrapper** on Windows (enables torch.compile without manual setup)
-            - ✅ **Process isolation** - prevents memory leaks, CUDA errors don't crash app
-            - ✅ **Proven stability** - production-ready, no known issues
-            - ✅ **Cross-platform** - works identically on Windows and Linux
+            gr.Markdown("💡 **Note**: In-app mode exists ONLY as a code framework for potential future optimization. Consider it **disabled** for all practical purposes.")
             
-            **Performance:**
-            - Adds ~5-10s model loading overhead per run (one-time cost)
-            - For long videos (>1 min), overhead is negligible (<1% of total time)
-            - For batch processing, overhead amortized across many files
-            
-            ---
-            
-            ## 🔴 In-App Mode (**EXPERIMENTAL - DO NOT USE**)
-            
-            **⚠️ CRITICAL: This mode is a NON-FUNCTIONAL PLACEHOLDER**
-            
-            **Status**: Partially implemented framework with **ZERO BENEFITS** and **CRITICAL LIMITATIONS**
-            
-            ### Why In-App Mode Doesn't Work:
-            
-            **1. ❌ NO MODEL PERSISTENCE (Core Issue)**
-            - **Current Reality**: Models reload EVERY RUN (identical to subprocess)
-            - **Expected**: Models stay in VRAM between runs for speed
-            - **Why It Fails**: 
-              - SeedVR2/FlashVSR+ use CLI architecture → models reload by design
-              - GAN/RIFE runners don't implement persistent caching yet
-              - ModelManager tracks state but can't force CLI to keep models loaded
-            - **Result**: **ZERO SPEED BENEFIT** - same loading time as subprocess mode
-            
-            **2. ❌ NO CANCELLATION SUPPORT**
-            - **Current Reality**: Cannot stop processing once started
-            - **Why**: No subprocess to kill, threading-based cancel not implemented
-            - **Impact**: Must wait for completion or force-quit entire app
-            
-            **3. ❌ NO VCVARS WRAPPER (Windows torch.compile broken)**
-            - **Current Reality**: C++ toolchain not activated for in-app runs
-            - **Why**: vcvarsall.bat must run BEFORE Python starts (can't activate mid-app)
-            - **Impact**: torch.compile fails cryptically on Windows
-            - **Workaround**: Must activate vcvars BEFORE launching app (manual, error-prone)
-            
-            **4. ⚠️ MEMORY LEAKS & VRAM ACCUMULATION**
-            - **Current Reality**: No subprocess isolation, VRAM may not fully clear
-            - **Why**: Python GC doesn't guarantee CUDA memory release
-            - **Impact**: VRAM usage creeps up across runs, eventual OOM crashes
-            
-            **5. ⚠️ MODE LOCK (Cannot Switch Back)**
-            - **Current Reality**: Switching to in-app locks mode until app restart
-            - **Why**: Prevents unsafe mid-session mode switching
-            - **Impact**: Must restart app to return to subprocess mode
-            
-            ### What Would Be Required for Functional In-App Mode:
-            
-            **Major Architecture Changes Needed:**
-            1. Refactor SeedVR2/FlashVSR+ CLIs to expose `load_model()` and `infer()` separately
-            2. Implement ModelManager.persistent_load() with actual VRAM caching
-            3. Add intelligent model swapping (auto-unload when user switches models)
-            4. Implement threading.Event-based cancellation throughout runners
-            5. Pre-activate vcvars on Windows at app startup (before torch import)
-            6. Add CUDA memory profiling and automatic leak detection
-            7. Implement forced GC + cache clearing between runs with verification
-            
-            **Estimated Effort**: ~40-60 hours of development + extensive testing
-            **Risk**: High (CUDA/memory management complexity)
-            **Benefit**: Marginal (~5-10% speed for short videos, 0% for long videos)
-            
-            ### Current Recommendation:
-            
-            🚫 **DO NOT USE IN-APP MODE** - It is:
-            - ❌ Non-functional (models reload anyway)
-            - ❌ Slower (no cancellation = wasted time on errors)
-            - ❌ Dangerous (memory leaks, torch.compile failures)
-            - ❌ Locked-in (requires restart to escape)
-            
-            ✅ **ALWAYS USE SUBPROCESS MODE** - It is:
-            - ✅ Production-ready and battle-tested
-            - ✅ Reliable cleanup and cancellation
-            - ✅ Works for all models without exceptions
-            - ✅ Recommended by developers
-            
-            💡 **In-app mode exists ONLY as a code framework for potential future optimization.**
-            It should be considered **disabled** for all practical purposes.
-            """)
             mode_radio = gr.Radio(
                 choices=["subprocess", "in_app"],
                 value=saved_mode,  # Restore from saved settings
@@ -527,6 +525,9 @@ def main():
                 info="Enable this checkbox to confirm mode switch to in-app (cannot be undone without restart)"
             )
             apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
+            
+            save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
+            global_status = gr.Markdown("")
 
             # Wire up global settings events
             def save_global_settings(od, td, tel, face, face_str, models_dir, hf_home, trans_cache, state):

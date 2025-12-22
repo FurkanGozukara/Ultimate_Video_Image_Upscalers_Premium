@@ -25,6 +25,8 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
     
     # FIXED: Persist model cache paths for next app launch
     # These override launcher BAT file settings if user configures them in UI
+    # NOTE: Do NOT overwrite "mode" here - it's managed separately by apply_mode_selection
+    # to preserve user's restart preference (e.g., if they selected subprocess while in in_app mode)
     global_settings.update(
         {
             "output_dir": output_dir_val or global_settings.get("output_dir"),
@@ -32,7 +34,7 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
             "telemetry": telemetry_enabled,
             "face_global": bool(face_global),
             "face_strength": float(face_strength),
-            "mode": runner.get_mode(),
+            # "mode" is intentionally NOT updated here - managed by apply_mode_selection only
             "pinned_reference_path": pinned_ref,  # Persist pinned reference
             # FIXED: Save model cache paths (editable in UI)
             "models_dir": models_dir_val or global_settings.get("models_dir"),
@@ -84,11 +86,11 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
 
 def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager: PresetManager, global_settings: dict, state: dict = None):
     """
-    Apply execution mode selection with proper confirmation and locking.
+    Apply execution mode selection with proper confirmation and restart warnings.
     
     Mode switching rules:
-    - subprocess → in_app: Requires confirmation, locks until restart
-    - in_app → subprocess: BLOCKED (requires app restart)
+    - subprocess → in_app: Applies immediately with confirmation, requires restart to revert
+    - in_app → subprocess: Saves preference, requires app restart to take effect
     - subprocess → subprocess: No-op
     - in_app → in_app: No-op
     """
@@ -104,17 +106,27 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         mode_state["locked"] = True
         state["mode_state"]["locked"] = True
 
-    # Check if trying to switch FROM in-app TO subprocess (not allowed)
-    if (mode_state.get("locked") or persisted_locked) and current == "in_app" and mode_choice == "subprocess":
+    # Check if trying to switch FROM in-app TO subprocess (needs restart)
+    if current == "in_app" and mode_choice == "subprocess":
+        # Save the preference so it takes effect on restart
+        global_settings["mode"] = "subprocess"
+        global_settings["mode_locked"] = False  # Unlock on restart
+        preset_manager.save_global_settings(global_settings)
+        
         return (
-            gr.Radio.update(value=current),  # Force radio back to in_app
-            gr.Checkbox.update(value=False),  # Uncheck confirmation
+            gr.update(value=mode_choice),  # Allow selection change in UI
+            gr.update(value=False),  # Uncheck confirmation
             gr.update(value=(
-                "🔒 **In-app mode is active and locked**\n\n"
-                "You cannot switch back to subprocess mode without restarting the application.\n\n"
-                "**Why?** In-app mode keeps models loaded in VRAM. Switching back would require "
-                "full memory cleanup which is only guaranteed by app restart.\n\n"
-                "**To switch back:** Close the app and restart it. The default mode is subprocess."
+                "✅ **Subprocess mode selected - RESTART REQUIRED**\n\n"
+                "⚠️ **Your preference has been saved, but the change will NOT take effect until you restart the application.**\n\n"
+                "**Current session:** Still running in in-app mode (models loaded in VRAM)\n"
+                "**Next session:** Will start in subprocess mode (default, recommended)\n\n"
+                "**Why restart is required:**\n"
+                "In-app mode keeps models loaded in VRAM. Switching back requires full memory cleanup which is only guaranteed by app restart.\n\n"
+                "**Action needed:**\n"
+                "1. Close this application\n"
+                "2. Restart to activate subprocess mode\n\n"
+                "💡 Subprocess mode will be active on next launch."
             )),
             state
         )
@@ -122,12 +134,12 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
     # Check if trying to switch TO in-app WITHOUT confirmation
     if mode_choice == "in_app" and not confirm:
         return (
-            gr.Radio.update(value=current),  # Keep current mode
-            gr.Checkbox.update(value=False),
+            gr.update(value=current),  # Keep current mode
+            gr.update(value=False),
             gr.update(value=(
                 "⚠️ **Confirmation required to switch to in-app mode**\n\n"
                 "Please check the confirmation checkbox to proceed.\n\n"
-                "**Important:** Once you switch to in-app mode, you cannot switch back without restarting the app.\n\n"
+                "**Important:** In-app mode applies immediately but requires restart to switch back.\n\n"
                 "**In-app mode characteristics:**\n"
                 "- ✅ Faster processing (models stay loaded)\n"
                 "- ✅ No subprocess overhead\n"
@@ -141,13 +153,13 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
     # No change requested
     if mode_choice == current:
         return (
-            gr.Radio.update(value=current),
-            gr.Checkbox.update(value=False),
+            gr.update(value=current),
+            gr.update(value=False),
             gr.update(value=f"ℹ️ Already in {current} mode. No change needed."),
             state
         )
     
-    # Attempt mode switch
+    # Attempt mode switch (only for subprocess → in_app, which applies immediately)
     try:
         runner.set_mode(mode_choice)
         actual_mode = runner.get_mode()
@@ -155,8 +167,8 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         # Verify mode was set correctly
         if actual_mode != mode_choice:
             return (
-                gr.Radio.update(value=current),
-                gr.Checkbox.update(value=False),
+                gr.update(value=current),
+                gr.update(value=False),
                 gr.update(value=f"❌ Mode switch failed: Expected {mode_choice}, got {actual_mode}"),
                 state
             )
@@ -175,7 +187,8 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         
         if mode_choice == "in_app":
             success_msg = (
-                "✅ **Switched to in-app mode**\n\n"
+                "✅ **Switched to in-app mode - ACTIVE NOW**\n\n"
+                "⚠️ **The mode change is now active. To switch back to subprocess mode, you must restart the application.**\n\n"
                 "**⚠️ MODEL-SPECIFIC BEHAVIOR:**\n"
                 "- **GAN Models:** ✅ Models may persist in VRAM (faster reruns possible)\n"
                 "- **RIFE:** ✅ Models may persist in VRAM (faster reruns possible)\n"
@@ -190,14 +203,14 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
                 "1. Only use for GAN/RIFE models (not SeedVR2/FlashVSR+)\n"
                 "2. Monitor VRAM usage in GPU tools\n"
                 "3. Use 'Clear CUDA Cache' if VRAM fills up\n"
-                "4. Restart app if you encounter issues"
+                "4. Restart app if you encounter issues or want to switch back"
             )
         else:
-            success_msg = f"✅ Switched to {actual_mode} mode"
+            success_msg = f"✅ Switched to {actual_mode} mode - ACTIVE NOW"
         
         return (
-            gr.Radio.update(value=actual_mode),
-            gr.Checkbox.update(value=False),  # Uncheck after successful apply
+            gr.update(value=actual_mode),
+            gr.update(value=False),  # Uncheck after successful apply
             gr.update(value=success_msg),
             state
         )
@@ -205,16 +218,16 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
     except ValueError as e:
         # Invalid mode requested
         return (
-            gr.Radio.update(value=current),
-            gr.Checkbox.update(value=False),
+            gr.update(value=current),
+            gr.update(value=False),
             gr.update(value=f"❌ Invalid mode: {str(e)}"),
             state
         )
     except Exception as exc:
         # Unexpected error
         return (
-            gr.Radio.update(value=current),
-            gr.Checkbox.update(value=False),
+            gr.update(value=current),
+            gr.update(value=False),
             gr.update(value=f"❌ Mode change failed: {str(exc)}"),
             state
         )
