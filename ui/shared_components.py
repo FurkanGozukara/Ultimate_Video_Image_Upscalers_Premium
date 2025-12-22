@@ -33,13 +33,14 @@ def preset_section(
         label=f"{tab_name} Presets",
         choices=choices,
         value=last_used,
+        allow_custom_value=True,  # Allow saving new presets that aren't in the list yet
     )
     preset_name = gr.Textbox(label="Preset Name", placeholder="my_preset")
     with gr.Row():
         save_preset_btn = gr.Button("Save Preset")
         load_preset_btn = gr.Button("Load Preset")
     preset_status = gr.Markdown("")
-    safe_defaults_btn = gr.Button(f"🔄 {safe_defaults_label}", variant="secondary", size="sm")
+    safe_defaults_btn = gr.Button(f"🔄 {safe_defaults_label}", variant="secondary", size="lg")
     return (
         preset_dropdown,
         preset_name,

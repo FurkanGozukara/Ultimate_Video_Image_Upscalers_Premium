@@ -196,10 +196,10 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                 # Quick preset buttons
                 gr.Markdown("---\n**Quick Presets**")
                 with gr.Row():
-                    preset_youtube = gr.Button("🎬 YouTube", size="sm")
-                    preset_archival = gr.Button("💾 Archival", size="sm")
-                    preset_editing = gr.Button("✂️ Editing", size="sm")
-                    preset_web = gr.Button("🌐 Web", size="sm")
+                    preset_youtube = gr.Button("🎬 YouTube", size="lg")
+                    preset_archival = gr.Button("💾 Archival", size="lg")
+                    preset_editing = gr.Button("✂️ Editing", size="lg")
+                    preset_web = gr.Button("🌐 Web", size="lg")
 
         # Frame Handling
         with gr.TabItem("🎭 Frame Processing"):
@@ -355,12 +355,12 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
         gr.Markdown("#### Update Cached Values")
 
         with gr.Row():
-            cache_fps_btn = gr.Button("📹 Cache FPS", size="sm")
-            cache_comparison_btn = gr.Button("🔍 Cache Comparison", size="sm")
+            cache_fps_btn = gr.Button("📹 Cache FPS", size="lg")
+            cache_comparison_btn = gr.Button("🔍 Cache Comparison", size="lg")
 
         with gr.Row():
-            cache_png_btn = gr.Button("🖼️ Cache PNG Settings", size="sm")
-            cache_skip_btn = gr.Button("⏭️ Cache Skip/Cap", size="sm")
+            cache_png_btn = gr.Button("🖼️ Cache PNG Settings", size="lg")
+            cache_skip_btn = gr.Button("⏭️ Cache Skip/Cap", size="lg")
 
         cache_status = gr.Markdown("")
 

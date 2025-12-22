@@ -172,7 +172,9 @@ def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
     
     # Get model metadata if specific model is provided
     model_meta = None
-    default_model = get_seedvr2_model_names()[0] if get_seedvr2_model_names() else "seedvr2_ema_3b_fp16.safetensors"
+    # Default to 7B fp16 model (best quality/speed balance)
+    available_models = get_seedvr2_model_names()
+    default_model = "seedvr2_ema_7b_fp16.safetensors" if "seedvr2_ema_7b_fp16.safetensors" in available_models else (available_models[0] if available_models else "seedvr2_ema_3b_fp16.safetensors")
     target_model = model_name or default_model
     
     if target_model:
@@ -471,10 +473,77 @@ SEEDVR2_ORDER: List[str] = [
 ]
 
 
+# Preset Migration -------------------------------------------------------------
+def _migrate_preset_values(cfg: Dict[str, Any], defaults: Dict[str, Any], silent: bool = False) -> None:
+    """
+    Migrate old preset values to new ones for backward compatibility.
+    
+    This function modifies cfg in-place and handles:
+    - Renamed values (e.g., flash_attn → flash_attn_2)
+    - Deprecated values (replace with defaults)
+    - Type conversions (if needed)
+    
+    Args:
+        cfg: Configuration dictionary to migrate (modified in-place)
+        defaults: Default values to use as fallback
+        silent: If True, suppress migration logs (useful during bulk operations)
+    """
+    # Attention mode migration: old values to new valid choices
+    # Valid choices: ['sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', 'sageattn_3']
+    attention_migrations = {
+        "flash_attn": "flash_attn_2",  # Old generic name → v2
+        "flash_attention": "flash_attn_2",  # Alternative old name
+        "flash": "flash_attn_2",  # Short form
+        "sageattn": "sageattn_2",  # Old generic name → v2
+        "sage": "sageattn_2",  # Short form
+    }
+    
+    current_attention = cfg.get("attention_mode", "")
+    if current_attention in attention_migrations:
+        old_val = current_attention
+        new_val = attention_migrations[old_val]
+        cfg["attention_mode"] = new_val
+        if not silent:
+            error_logger.info(f"Migrated attention_mode: '{old_val}' → '{new_val}'")
+    elif current_attention and current_attention not in ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"]:
+        # Unknown/invalid value → fallback to default
+        default_attention = defaults.get("attention_mode", "sdpa")
+        error_logger.warning(f"Unknown attention_mode '{current_attention}', falling back to default '{default_attention}'")
+        cfg["attention_mode"] = default_attention
+    
+    # Video backend migration (added in v2.5.22)
+    # Valid choices: ['opencv', 'ffmpeg']
+    current_backend = cfg.get("video_backend", "")
+    if current_backend not in ["opencv", "ffmpeg"]:
+        # Old presets might have numeric values or missing values
+        default_backend = defaults.get("video_backend", "opencv")
+        if current_backend not in ["", None]:
+            error_logger.info(f"Migrated video_backend: '{current_backend}' → '{default_backend}'")
+        cfg["video_backend"] = default_backend
+    
+    # Use_10bit migration (added in v2.5.22)
+    # Must be boolean
+    current_10bit = cfg.get("use_10bit", False)
+    if not isinstance(current_10bit, bool):
+        # Convert numeric or string values to boolean
+        default_10bit = defaults.get("use_10bit", False)
+        cfg["use_10bit"] = bool(current_10bit) if current_10bit else default_10bit
+        if current_10bit not in [None, ""]:
+            error_logger.info(f"Migrated use_10bit: '{current_10bit}' → '{cfg['use_10bit']}'")
+    
+    # Add more migrations here as needed for other settings
+    # Example:
+    # if "old_setting_name" in cfg:
+    #     cfg["new_setting_name"] = cfg.pop("old_setting_name")
+    
+
 # Guardrails -------------------------------------------------------------------
-def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], state: Optional[Dict[str, Any]] = None, silent_migration: bool = False) -> Dict[str, Any]:
     """Apply SeedVR2-specific validation rules and apply resolution tab settings if available."""
     cfg = cfg.copy()
+    
+    # Migrate old preset values to new ones for backward compatibility
+    _migrate_preset_values(cfg, defaults, silent=silent_migration)
     
     # Apply model-specific metadata constraints
     model_name = cfg.get("dit_model", "")
@@ -1129,22 +1198,33 @@ def build_seedvr2_callbacks(
     """
     defaults = seedvr2_defaults()
 
-    def refresh_presets(model_name: str, select_name: Optional[str] = None):
-        """Refresh preset dropdown."""
-        presets = preset_manager.list_presets("seedvr2", model_name)
-        last_used = preset_manager.get_last_used_name("seedvr2", model_name)
+    def refresh_presets(model_name: str = None, select_name: Optional[str] = None):
+        """Refresh preset dropdown (all presets for tab, not model-specific)."""
+        presets = preset_manager.list_presets("seedvr2")  # List all presets for tab
+        
+        # If no presets exist yet, return empty choices with no value
+        if not presets:
+            return gr.update(choices=[], value=None)
+        
+        # Determine which preset to select
+        last_used = preset_manager.get_last_used_name("seedvr2", model_name) if model_name else None
         preferred = select_name if select_name in presets else None
-        value = preferred or (last_used if last_used in presets else (presets[-1] if presets else None))
+        value = preferred or (last_used if last_used and last_used in presets else presets[0])
+        
         return gr.update(choices=presets, value=value)
 
-    def save_preset(preset_name: str, model_name: str, *args):
+    def save_preset(preset_name: str, model_name: str, current_preset_selection: str, *args):
         """
         Save a preset with automatic validation.
         
+        If no name is entered, uses the currently selected preset name.
         Validates that args length matches SEEDVR2_ORDER to catch integration bugs early.
         """
-        if not preset_name.strip():
-            return gr.update(), gr.update(value="⚠️ Enter a preset name before saving"), *list(args)
+        # If no name entered, use the currently selected preset from dropdown
+        if not preset_name.strip() and current_preset_selection and current_preset_selection.strip():
+            preset_name = current_preset_selection.strip()
+        elif not preset_name.strip():
+            return gr.update(), gr.update(value="⚠️ Enter a preset name or select an existing preset to overwrite"), *list(args)
 
         try:
             # Validate component count matches ORDER
@@ -1159,16 +1239,21 @@ def build_seedvr2_callbacks(
             
             payload = _seedvr2_dict_from_args(list(args))
             validated_payload = _enforce_seedvr2_guardrails(payload, defaults, state=None)
-
+            
             preset_manager.save_preset_safe("seedvr2", model_name, preset_name.strip(), validated_payload)
-            dropdown = refresh_presets(model_name, select_name=preset_name.strip())
+            
+            # Refresh dropdown with all presets (not model-specific)
+            all_presets = preset_manager.list_presets("seedvr2")
+            dropdown = gr.update(choices=all_presets, value=preset_name.strip())
 
             # Reload the validated values to ensure UI consistency
             current_map = dict(zip(SEEDVR2_ORDER, list(args)))
             loaded_vals = _apply_preset_to_values(validated_payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}'"), *loaded_vals
         except Exception as e:
+            import traceback
+            error_logger.error(f"Error saving preset: {str(e)}\n{traceback.format_exc()}")
             return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):

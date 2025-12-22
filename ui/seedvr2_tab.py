@@ -35,18 +35,22 @@ def seedvr2_tab(
     defaults = seedvr2_defaults()
     default_model = defaults.get("dit_model")
     
+    # Import migration and guardrails for preset loading
+    from shared.services.seedvr2_service import _enforce_seedvr2_guardrails
+    
     # Try to load from startup cache first (already loaded in secourses_app.py)
     seedvr2_cache = shared_state.value.get("seed_controls", {}).get("seedvr2_cache", {})
     cached_for_model = seedvr2_cache.get(default_model)
     
     if cached_for_model:
-        # Use pre-loaded settings from startup
-        merged_defaults = cached_for_model
+        # Use pre-loaded settings from startup, but apply migration and guardrails (silent to avoid duplicate logs)
+        merged_defaults = _enforce_seedvr2_guardrails(cached_for_model, defaults, state=None, silent_migration=True)
         last_used_name = preset_manager.get_last_used_name("seedvr2", default_model)
         
         def update_success(state):
             existing = state["health_banner"]["text"]
-            success_msg = f"✅ SeedVR2: Restored last-used preset for {default_model}"
+            preset_info = f" (preset: '{last_used_name}')" if last_used_name else ""
+            success_msg = f"✅ SeedVR2: Loaded settings for {default_model}{preset_info}"
             state["health_banner"]["text"] = existing + "\n" + success_msg if existing else success_msg
             return state
         shared_state.value = update_success(shared_state.value)
@@ -63,7 +67,15 @@ def seedvr2_tab(
                 return state
             shared_state.value = update_warning(shared_state.value)
         
-        merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+        # Apply migration and guardrails to loaded preset (silent to avoid duplicate logs)
+        merged = preset_manager.merge_config(defaults, last_used or {})
+        merged_defaults = _enforce_seedvr2_guardrails(merged, defaults, state=None, silent_migration=True)
+    
+    # Ensure ALL keys from SEEDVR2_ORDER exist with valid values
+    # This handles cases where old presets are missing new parameters
+    for key in SEEDVR2_ORDER:
+        if key not in merged_defaults or merged_defaults[key] is None:
+            merged_defaults[key] = defaults[key]
     
     values = [merged_defaults[k] for k in SEEDVR2_ORDER]
 
@@ -142,7 +154,7 @@ def seedvr2_tab(
                 input_detection_result = gr.Markdown("", visible=False)
                 
                 # Detect input button
-                detect_input_btn = gr.Button("🔍 Detect Input Type", size="sm", variant="secondary")
+                detect_input_btn = gr.Button("🔍 Detect Input Type", size="lg", variant="secondary")
                 
                 input_cache_msg = gr.Markdown("", visible=False)
                 auto_res_msg = gr.Markdown("", visible=False)
@@ -187,7 +199,7 @@ def seedvr2_tab(
                     value=values[46] if len(values) > 46 else False,  # Now index 46 (was 49, removed 3 items)
                     info="Resume interrupted chunking from existing partial outputs. Useful for recovering from crashes or cancellations."
                 )
-                check_resume_btn = gr.Button("🔍 Check Resume Status", size="sm")
+                check_resume_btn = gr.Button("🔍 Check Resume Status", size="lg")
 
             # Output controls
             output_override = gr.Textbox(
@@ -196,10 +208,15 @@ def seedvr2_tab(
                 placeholder="Leave empty for auto naming",
                 info="Specify custom output path. Auto-naming creates '_upscaled' files in output folder. Supports both file paths and directories."
             )
+            # Validate output_format value
+            output_format_value = values[2] if len(values) > 2 else "auto"
+            if output_format_value not in ["auto", "mp4", "png"]:
+                output_format_value = "auto"
+            
             output_format = gr.Dropdown(
                 label="Output Format",
                 choices=["auto", "mp4", "png"],
-                value=values[2],
+                value=output_format_value,
                 info="'auto' chooses based on input type. 'mp4' for video output. 'png' exports frame sequence. Note: MP4 drops alpha channels."
             )
 
@@ -209,10 +226,23 @@ def seedvr2_tab(
                 value=values[3],
                 info="Override default model directory. Leave empty to use default ./SeedVR2/models location."
             )
+            
+            # Validate dit_model value
+            available_models = get_seedvr2_model_names()
+            
+            # Ensure we always have at least one model choice (fallback to placeholder)
+            if not available_models:
+                available_models = ["seedvr2_ema_7b_fp16.safetensors"]  # Placeholder if no models found
+                dit_model_value = available_models[0]
+            else:
+                dit_model_value = values[4] if len(values) > 4 else available_models[0]
+                if dit_model_value not in available_models:
+                    dit_model_value = available_models[0]  # Fallback to first available model
+            
             dit_model = gr.Dropdown(
                 label="SeedVR2 Model",
-                choices=get_seedvr2_model_names(),
-                value=values[4],
+                choices=available_models,
+                value=dit_model_value,
                 info="3B models are faster, 7B models higher quality. 'sharp' variants enhance edges. fp16 recommended for best speed/quality balance."
             )
             model_cache_msg = gr.Markdown("", visible=False)
@@ -228,8 +258,8 @@ def seedvr2_tab(
             - **In-app mode** (when implemented) will cache models between runs - then these buttons will actually unload persistent models
             """)
             with gr.Row():
-                unload_model_btn = gr.Button("🧹 Clear CUDA Cache", variant="secondary", size="sm")
-                unload_all_models_btn = gr.Button("🧹 Clear All CUDA Caches", variant="stop", size="sm")
+                unload_model_btn = gr.Button("🧹 Clear CUDA Cache", variant="secondary", size="lg")
+                unload_all_models_btn = gr.Button("🧹 Clear All CUDA Caches", variant="stop", size="lg")
             model_unload_status = gr.Markdown("", visible=False)
             
             # Timer for periodic model status updates
@@ -259,17 +289,18 @@ def seedvr2_tab(
                 info="SeedVR2 requires batch size to follow 4n+1 formula (5, 9, 13, 17, 21...)"
             )
             batch_size_warning = gr.Markdown("", visible=False)
-            uniform_batch_size = gr.Checkbox(
-                label="Uniform Batch Size",
-                value=values[12],  # Was 15, now 12
-                info="Force all batches to same size by padding. Improves compilation efficiency but may use more memory. Recommended ON with torch.compile."
-            )
-            seed = gr.Number(
-                label="Seed",
-                value=values[13],  # Was 16, now 13
-                precision=0,
-                info="Random seed for reproducible results. Same seed + settings = identical output. -1 or 0 = random. Try 42 for consistent testing."
-            )
+            with gr.Row():
+                uniform_batch_size = gr.Checkbox(
+                    label="Uniform Batch Size",
+                    value=values[12],  # Was 15, now 12
+                    info="Force all batches to same size by padding. Improves compilation efficiency but may use more memory. Recommended ON with torch.compile."
+                )
+                seed = gr.Number(
+                    label="Seed",
+                    value=values[13],  # Was 16, now 13
+                    precision=0,
+                    info="Random seed for reproducible results. Same seed + settings = identical output. -1 or 0 = random. Try 42 for consistent testing."
+                )
 
             # Frame controls
             with gr.Row():
@@ -298,27 +329,32 @@ def seedvr2_tab(
                     info="Overlap frames between processing batches. Improves temporal consistency. Higher = smoother but slower. Try 1-3."
                 )
 
-            # Color correction
+            # Color correction - validate value
+            color_correction_value = values[18] if len(values) > 18 else "lab"
+            if color_correction_value not in ["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"]:
+                color_correction_value = "lab"
+            
             color_correction = gr.Dropdown(
                 label="Color Correction",
                 choices=["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"],
-                value=values[18],  # Was 21, now 18
+                value=color_correction_value,
                 info="Method for maintaining color accuracy. 'lab' is default and robust. 'wavelet' preserves details better. 'none' for creative control."
             )
 
             # Noise controls
-            input_noise_scale = gr.Slider(
-                label="Input Noise Scale",
-                minimum=0.0, maximum=1.0, step=0.01,
-                value=values[19],  # Was 22, now 19
-                info="Add noise to input before encoding. Can help with smooth gradients but may reduce sharpness. 0.0 = no noise. Try 0.0-0.1."
-            )
-            latent_noise_scale = gr.Slider(
-                label="Latent Noise Scale",
-                minimum=0.0, maximum=1.0, step=0.01,
-                value=values[20],  # Was 23, now 20
-                info="Add noise in latent space during diffusion. Can improve detail generation. 0.0 = no noise. Typical: 0.0-0.05."
-            )
+            with gr.Row():
+                input_noise_scale = gr.Slider(
+                    label="Input Noise Scale",
+                    minimum=0.0, maximum=1.0, step=0.01,
+                    value=values[19],  # Was 22, now 19
+                    info="Add noise to input before encoding. Can help with smooth gradients but may reduce sharpness. 0.0 = no noise. Try 0.0-0.1."
+                )
+                latent_noise_scale = gr.Slider(
+                    label="Latent Noise Scale",
+                    minimum=0.0, maximum=1.0, step=0.01,
+                    value=values[20],  # Was 23, now 20
+                    info="Add noise in latent space during diffusion. Can improve detail generation. 0.0 = no noise. Typical: 0.0-0.05."
+                )
 
             # Device configuration
             gr.Markdown("#### 💻 Device & Offload")
@@ -334,190 +370,105 @@ def seedvr2_tab(
                     elem_classes="warning-text"
                 )
             
-            cuda_device = gr.Textbox(
-                label="CUDA Devices (e.g., 0 or 0,1,2 or 'all')",
-                value=values[21] if (cuda_available and not is_macos) else "",
-                info=f"{gpu_hint} | Single GPU: 0, 1, etc. | Multi-GPU: 0,1,2 or 'all' to use all available GPUs. Single GPU recommended for caching.",
-                placeholder="0 or all",
-                visible=not is_macos,
-                interactive=cuda_available  # Disable if CUDA not available
-            )
+            with gr.Row():
+                cuda_device = gr.Textbox(
+                    label="CUDA Devices (e.g., 0 or 0,1,2 or 'all')",
+                    value=values[21] if (cuda_available and not is_macos) else "",
+                    info=f"{gpu_hint} | Single GPU: 0, 1, etc. | Multi-GPU: 0,1,2 or 'all' to use all available GPUs. Single GPU recommended for caching.",
+                    placeholder="0 or all",
+                    visible=not is_macos,
+                    interactive=cuda_available  # Disable if CUDA not available
+                )
+                dit_offload_device = gr.Textbox(
+                    label="DiT Offload Device",
+                    value=values[22],  # Was 25, now 22
+                    placeholder="none / cpu / GPU id",
+                    info="Where to offload DiT model when not in use. 'cpu' saves VRAM, 'none' keeps on GPU. Required for BlockSwap."
+                )
             # FIXED: Live CUDA validation feedback (validates device IDs immediately on change)
             cuda_device_warning = gr.Markdown("", visible=False)
-            dit_offload_device = gr.Textbox(
-                label="DiT Offload Device",
-                value=values[22],  # Was 25, now 22
-                placeholder="none / cpu / GPU id",
-                info="Where to offload DiT model when not in use. 'cpu' saves VRAM, 'none' keeps on GPU. Required for BlockSwap."
-            )
-            vae_offload_device = gr.Textbox(
-                label="VAE Offload Device",
-                value=values[23],  # Was 26, now 23
-                placeholder="none / cpu / GPU id",
-                info="Where to offload VAE model when not in use. 'cpu' saves VRAM, 'none' keeps on GPU for faster processing."
-            )
-            tensor_offload_device = gr.Textbox(
-                label="Tensor Offload Device",
-                value=values[24],  # Was 27, now 24
-                placeholder="cpu / none / GPU id",
-                info="Where to offload intermediate tensors. 'cpu' is recommended for memory management between processing phases."
-            )
+            with gr.Row():
+                vae_offload_device = gr.Textbox(
+                    label="VAE Offload Device",
+                    value=values[23],  # Was 26, now 23
+                    placeholder="none / cpu / GPU id",
+                    info="Where to offload VAE model when not in use. 'cpu' saves VRAM, 'none' keeps on GPU for faster processing."
+                )
+                tensor_offload_device = gr.Textbox(
+                    label="Tensor Offload Device",
+                    value=values[24],  # Was 27, now 24
+                    placeholder="cpu / none / GPU id",
+                    info="Where to offload intermediate tensors. 'cpu' is recommended for memory management between processing phases."
+                )
 
             # BlockSwap configuration
             gr.Markdown("#### 🔄 BlockSwap")
-            blocks_to_swap = gr.Slider(
-                label="Blocks to Swap",
-                minimum=0, maximum=36, step=1,
-                value=values[25],  # Was 28, now 25
-                info="Number of DiT blocks to swap to CPU. Higher values save more VRAM but slow processing. Try 20-30 for 8GB GPUs."
-            )
-            swap_io_components = gr.Checkbox(
-                label="Swap I/O Components",
-                value=values[26],  # Was 29, now 26
-                info="Swap input/output layers to CPU. Enable for maximum VRAM savings on limited GPUs. Requires DiT offload to CPU."
-            )
+            with gr.Row():
+                blocks_to_swap = gr.Slider(
+                    label="Blocks to Swap",
+                    minimum=0, maximum=36, step=1,
+                    value=values[25],  # Was 28, now 25
+                    info="Number of DiT blocks to swap to CPU. Higher values save more VRAM but slow processing. Try 20-30 for 8GB GPUs."
+                )
+                swap_io_components = gr.Checkbox(
+                    label="Swap I/O Components",
+                    value=values[26],  # Was 29, now 26
+                    info="Swap input/output layers to CPU. Enable for maximum VRAM savings on limited GPUs. Requires DiT offload to CPU."
+                )
 
             # VAE Tiling
             gr.Markdown("#### 🧩 VAE Tiling")
-            vae_encode_tiled = gr.Checkbox(
-                label="VAE Encode Tiled",
-                value=values[27],  # Was 30, now 27 (shift -3)
-                info="Process VAE encoding in tiles to reduce VRAM usage. Essential for 4K+ resolutions on GPUs with <16GB VRAM."
-            )
-            vae_encode_tile_size = gr.Number(
-                label="Encode Tile Size",
-                value=values[28],  # Was 31, now 28
-                precision=0,
-                info="Size of each tile during encoding. Larger = faster but more VRAM. Try 512-1024 for 8-12GB GPUs."
-            )
-            vae_encode_tile_overlap = gr.Number(
-                label="Encode Tile Overlap",
-                value=values[29],  # Was 32, now 29
-                precision=0,
-                info="Overlap between tiles to avoid seam artifacts. Must be less than tile size. Try 64-256."
-            )
-            vae_decode_tiled = gr.Checkbox(
-                label="VAE Decode Tiled",
-                value=values[30],  # Was 33, now 30
-                info="Process VAE decoding in tiles. Recommended for high resolutions. Can use larger tiles than encoding."
-            )
-            vae_decode_tile_size = gr.Number(
-                label="Decode Tile Size",
-                value=values[31],  # Was 34, now 31
-                precision=0,
-                info="Size of each tile during decoding. Can be larger than encode tiles. Try 1024-2048."
-            )
-            vae_decode_tile_overlap = gr.Number(
-                label="Decode Tile Overlap",
-                value=values[32],  # Was 35, now 32
-                precision=0,
-                info="Overlap during decoding. Higher overlap = smoother seams but slower. Must be < tile size."
-            )
+            with gr.Row():
+                vae_encode_tiled = gr.Checkbox(
+                    label="VAE Encode Tiled",
+                    value=values[27],  # Was 30, now 27 (shift -3)
+                    info="Process VAE encoding in tiles to reduce VRAM usage. Essential for 4K+ resolutions on GPUs with <16GB VRAM."
+                )
+                vae_encode_tile_size = gr.Number(
+                    label="Encode Tile Size",
+                    value=values[28],  # Was 31, now 28
+                    precision=0,
+                    info="Size of each tile during encoding. Larger = faster but more VRAM. Try 512-1024 for 8-12GB GPUs."
+                )
+                vae_encode_tile_overlap = gr.Number(
+                    label="Encode Tile Overlap",
+                    value=values[29],  # Was 32, now 29
+                    precision=0,
+                    info="Overlap between tiles to avoid seam artifacts. Must be less than tile size. Try 64-256."
+                )
+            with gr.Row():
+                vae_decode_tiled = gr.Checkbox(
+                    label="VAE Decode Tiled",
+                    value=values[30],  # Was 33, now 30
+                    info="Process VAE decoding in tiles. Recommended for high resolutions. Can use larger tiles than encoding."
+                )
+                vae_decode_tile_size = gr.Number(
+                    label="Decode Tile Size",
+                    value=values[31],  # Was 34, now 31
+                    precision=0,
+                    info="Size of each tile during decoding. Can be larger than encode tiles. Try 1024-2048."
+                )
+                vae_decode_tile_overlap = gr.Number(
+                    label="Decode Tile Overlap",
+                    value=values[32],  # Was 35, now 32
+                    precision=0,
+                    info="Overlap during decoding. Higher overlap = smoother seams but slower. Must be < tile size."
+                )
             
             # Tile validation warnings
             tile_encode_warning = gr.Markdown("", visible=False)
             tile_decode_warning = gr.Markdown("", visible=False)
             
+            # Validate tile_debug value
+            tile_debug_value = values[33] if len(values) > 33 else "false"
+            if tile_debug_value not in ["false", "encode", "decode"]:
+                tile_debug_value = "false"
+            
             tile_debug = gr.Dropdown(
                 label="Tile Debug",
                 choices=["false", "encode", "decode"],
-                value=values[33],  # Was 36, now 33
+                value=tile_debug_value,
                 info="Debug tiling process. 'false' = normal operation. Use 'encode'/'decode' to save intermediate tiles for troubleshooting."
-            )
-
-            # Performance & Compile
-            gr.Markdown("#### ⚡ Performance & Compile")
-            
-            # Show compile availability warning if not available
-            if not compile_available:
-                gr.Markdown(
-                    f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
-                    f'<strong>⚠️ Torch.compile Unavailable</strong><br>'
-                    f'Compile options are disabled. Install Visual Studio Build Tools (Windows) or ensure CUDA is available.<br>'
-                    f'Compilation provides 2-3x speedup but is not required for processing.'
-                    f'</div>',
-                    elem_classes="warning-text"
-                )
-            
-            attention_mode = gr.Dropdown(
-                label="Attention Backend",
-                choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
-                value=values[34],  # Was 37, now 34
-                info="sdpa (default, most compatible) | flash_attn_2/3 (faster, requires flash-attn install) | sageattn_2/3 (optimized, requires sageattention install). Auto-falls back to sdpa if unavailable.",
-                interactive=cuda_available  # Disable if no CUDA (attention backends need GPU)
-            )
-            compile_dit = gr.Checkbox(
-                label="Compile DiT",
-                value=values[35] if compile_available else False,  # Force False if compile unavailable
-                info="Use torch.compile for DiT model. 2-3x faster after warmup. Requires VS Build Tools on Windows. First run is slow.",
-                interactive=compile_available  # Disable if compile not available
-            )
-            compile_vae = gr.Checkbox(
-                label="Compile VAE",
-                value=values[36] if compile_available else False,  # Force False if compile unavailable
-                info="Use torch.compile for VAE model. Significant speedup for decoding. Requires VS Build Tools on Windows.",
-                interactive=compile_available  # Disable if compile not available
-            )
-            compile_backend = gr.Dropdown(
-                label="Compile Backend",
-                choices=["inductor", "cudagraphs"],
-                value=values[37],  # Was 40, now 37
-                info="'inductor' is default and most compatible. 'cudagraphs' may be faster but less flexible. Use inductor unless you know what you're doing.",
-                interactive=compile_available
-            )
-            compile_mode = gr.Dropdown(
-                label="Compile Mode",
-                choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
-                value=values[38],  # Was 41, now 38
-                info="'default' balanced. 'reduce-overhead' faster warmup. 'max-autotune' best performance but slow compilation. Start with default.",
-                interactive=compile_available
-            )
-            compile_fullgraph = gr.Checkbox(
-                label="Compile Fullgraph",
-                value=values[39] if compile_available else False,
-                info="Compile entire model graph at once. May fail on complex models. Leave unchecked unless you need maximum performance.",
-                interactive=compile_available
-            )
-            compile_dynamic = gr.Checkbox(
-                label="Compile Dynamic Shapes",
-                value=values[40] if compile_available else False,
-                info="Support varying input shapes with compilation. Slower compilation but more flexible. Enable if processing mixed resolutions.",
-                interactive=compile_available
-            )
-            compile_dynamo_cache_size_limit = gr.Number(
-                label="Compile Dynamo Cache Size Limit",
-                value=values[41],  # Was 44, now 41
-                precision=0,
-                info="Max cached compiled graphs. Higher = more memory but fewer recompilations. Default 64 is good for most cases.",
-                interactive=compile_available
-            )
-            compile_dynamo_recompile_limit = gr.Number(
-                label="Compile Dynamo Recompile Limit",
-                value=values[42],  # Was 45, now 42
-                precision=0,
-                info="Max recompilations allowed. Prevents infinite recompile loops. Default 128 is safe. Lower if compilation is slow.",
-                interactive=compile_available
-            )
-            cache_dit = gr.Checkbox(
-                label="Cache DiT (single GPU only)",
-                value=values[43] if (cuda_available and compile_available) else False,
-                info="Keep DiT model in CUDA graphs cache for maximum speed. Only works with single GPU. Significant speedup for repeated processing.",
-                interactive=(cuda_available and compile_available)
-            )
-            cache_vae = gr.Checkbox(
-                label="Cache VAE (single GPU only)",
-                value=values[44] if (cuda_available and compile_available) else False,
-                info="Keep VAE model in CUDA graphs cache. Single GPU only. Faster encoding/decoding at cost of higher baseline VRAM usage.",
-                interactive=(cuda_available and compile_available)
-            )
-            
-            # Cache warning for multi-GPU
-            cache_warning = gr.Markdown("", visible=False)
-            
-            debug = gr.Checkbox(
-                label="Debug Logging",
-                value=values[45],  # Was 48, now 45
-                info="Enable detailed debug output. Useful for troubleshooting but creates verbose logs. Enable if encountering errors."
             )
 
             # Output & Metadata controls (shared settings from Output tab)
@@ -552,16 +503,26 @@ def seedvr2_tab(
             """)
             
             with gr.Row():
+                # Validate video_backend value before using it
+                backend_value = values[48] if len(values) > 48 else "opencv"
+                if backend_value not in ["opencv", "ffmpeg"]:
+                    backend_value = "opencv"  # Fallback to default if invalid
+                
                 video_backend = gr.Dropdown(
                     label="Video Backend",
                     choices=["opencv", "ffmpeg"],
-                    value=values[48] if len(values) > 48 else "opencv",
+                    value=backend_value,
                     info="opencv: Fast 8-bit encoding (libx264) | ffmpeg: Subprocess-based, enables 10-bit support"
                 )
                 
+                # Validate use_10bit value before using it
+                use_10bit_value = values[49] if len(values) > 49 else False
+                if not isinstance(use_10bit_value, bool):
+                    use_10bit_value = False  # Fallback to default if invalid
+                
                 use_10bit = gr.Checkbox(
                     label="Enable 10-bit Encoding",
-                    value=values[49] if len(values) > 49 else False,
+                    value=use_10bit_value,
                     info="Use x265 with yuv420p10le for 10-bit color depth. Requires 'ffmpeg' backend. Reduces banding in gradients."
                 )
             
@@ -588,6 +549,30 @@ def seedvr2_tab(
             # Progress tracking
             progress_indicator = gr.Markdown(value="", visible=True)
             eta_display = gr.Markdown(value="", visible=True)
+            
+            # Action buttons - MOVED HERE: just above run log section
+            with gr.Row():
+                upscale_btn = gr.Button(
+                    "🚀 Upscale" if ffmpeg_available else "❌ Upscale (ffmpeg required)",
+                    variant="primary" if ffmpeg_available else "stop",
+                    size="lg",
+                    interactive=ffmpeg_available
+                )
+                cancel_confirm = gr.Checkbox(
+                    label="⚠️ Confirm cancel (subprocess mode only)",
+                    value=False,
+                    info="Cancel only works in subprocess mode. Check Global Settings to verify mode."
+                )
+                cancel_btn = gr.Button(
+                    "⏹️ Cancel (subprocess only)",
+                    variant="stop",
+                    size="lg"
+                )
+                preview_btn = gr.Button(
+                    "👁️ First-frame Preview" if ffmpeg_available else "❌ Preview (ffmpeg required)",
+                    size="lg",
+                    interactive=ffmpeg_available
+                )
             
             log_box = gr.Textbox(
                 label="📋 Run Log",
@@ -701,30 +686,6 @@ def seedvr2_tab(
                 value=global_settings.get("face_global", False)
             )
 
-            # Action buttons with ffmpeg gating
-            with gr.Row():
-                upscale_btn = gr.Button(
-                    "🚀 Upscale" if ffmpeg_available else "❌ Upscale (ffmpeg required)",
-                    variant="primary" if ffmpeg_available else "stop",
-                    size="lg",
-                    interactive=ffmpeg_available
-                )
-                cancel_confirm = gr.Checkbox(
-                    label="⚠️ Confirm cancel (subprocess mode only)",
-                    value=False,
-                    info="Cancel only works in subprocess mode. Check Global Settings to verify mode."
-                )
-                cancel_btn = gr.Button(
-                    "⏹️ Cancel (subprocess only)",
-                    variant="stop",
-                    scale=1
-                )
-                preview_btn = gr.Button(
-                    "👁️ First-frame Preview" if ffmpeg_available else "❌ Preview (ffmpeg required)",
-                    size="lg",
-                    interactive=ffmpeg_available
-                )
-            
             if not ffmpeg_available:
                 gr.Markdown("""
                 <div style="background: #ffebee; padding: 12px; border-radius: 8px; border: 2px solid #f44336;">
@@ -740,14 +701,125 @@ def seedvr2_tab(
                 </div>
                 """)
 
-            # Preset management
+            # Preset management (presets are shared across all models)
             preset_dropdown, preset_name, save_preset_btn, load_preset_btn, preset_status, safe_defaults_btn = preset_section(
                 "SeedVR2",
                 preset_manager,
                 values[4],  # dit_model
-                preset_manager.list_presets("seedvr2", defaults["dit_model"]),
+                preset_manager.list_presets("seedvr2"),  # All presets for tab (not model-specific)
                 last_used_name or "",
                 safe_defaults_label="🔄 Safe Defaults (SeedVR2)"
+            )
+
+            # Performance & Compile - MOVED HERE: after Safe Defaults button
+            gr.Markdown("#### ⚡ Performance & Compile")
+            
+            # Show compile availability warning if not available
+            if not compile_available:
+                gr.Markdown(
+                    f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
+                    f'<strong>⚠️ Torch.compile Unavailable</strong><br>'
+                    f'Compile options are disabled. Install Visual Studio Build Tools (Windows) or ensure CUDA is available.<br>'
+                    f'Compilation provides 2-3x speedup but is not required for processing.'
+                    f'</div>',
+                    elem_classes="warning-text"
+                )
+            
+            # Validate attention_mode value before using it
+            attention_value = values[34] if len(values) > 34 else "sdpa"
+            if attention_value not in ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"]:
+                attention_value = "sdpa"  # Fallback to default if invalid
+            
+            attention_mode = gr.Dropdown(
+                label="Attention Backend",
+                choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
+                value=attention_value,
+                info="sdpa (default, most compatible) | flash_attn_2/3 (faster, requires flash-attn install) | sageattn_2/3 (optimized, requires sageattention install). Auto-falls back to sdpa if unavailable.",
+                interactive=cuda_available  # Disable if no CUDA (attention backends need GPU)
+            )
+            compile_dit = gr.Checkbox(
+                label="Compile DiT",
+                value=values[35] if compile_available else False,  # Force False if compile unavailable
+                info="Use torch.compile for DiT model. 2-3x faster after warmup. Requires VS Build Tools on Windows. First run is slow.",
+                interactive=compile_available  # Disable if compile not available
+            )
+            compile_vae = gr.Checkbox(
+                label="Compile VAE",
+                value=values[36] if compile_available else False,  # Force False if compile unavailable
+                info="Use torch.compile for VAE model. Significant speedup for decoding. Requires VS Build Tools on Windows.",
+                interactive=compile_available  # Disable if compile not available
+            )
+            # Validate compile_backend value
+            compile_backend_value = values[37] if len(values) > 37 else "inductor"
+            if compile_backend_value not in ["inductor", "cudagraphs"]:
+                compile_backend_value = "inductor"
+            
+            compile_backend = gr.Dropdown(
+                label="Compile Backend",
+                choices=["inductor", "cudagraphs"],
+                value=compile_backend_value,
+                info="'inductor' is default and most compatible. 'cudagraphs' may be faster but less flexible. Use inductor unless you know what you're doing.",
+                interactive=compile_available
+            )
+            
+            # Validate compile_mode value
+            compile_mode_value = values[38] if len(values) > 38 else "default"
+            if compile_mode_value not in ["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"]:
+                compile_mode_value = "default"
+            
+            compile_mode = gr.Dropdown(
+                label="Compile Mode",
+                choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+                value=compile_mode_value,
+                info="'default' balanced. 'reduce-overhead' faster warmup. 'max-autotune' best performance but slow compilation. Start with default.",
+                interactive=compile_available
+            )
+            compile_fullgraph = gr.Checkbox(
+                label="Compile Fullgraph",
+                value=values[39] if compile_available else False,
+                info="Compile entire model graph at once. May fail on complex models. Leave unchecked unless you need maximum performance.",
+                interactive=compile_available
+            )
+            compile_dynamic = gr.Checkbox(
+                label="Compile Dynamic Shapes",
+                value=values[40] if compile_available else False,
+                info="Support varying input shapes with compilation. Slower compilation but more flexible. Enable if processing mixed resolutions.",
+                interactive=compile_available
+            )
+            compile_dynamo_cache_size_limit = gr.Number(
+                label="Compile Dynamo Cache Size Limit",
+                value=values[41],  # Was 44, now 41
+                precision=0,
+                info="Max cached compiled graphs. Higher = more memory but fewer recompilations. Default 64 is good for most cases.",
+                interactive=compile_available
+            )
+            compile_dynamo_recompile_limit = gr.Number(
+                label="Compile Dynamo Recompile Limit",
+                value=values[42],  # Was 45, now 42
+                precision=0,
+                info="Max recompilations allowed. Prevents infinite recompile loops. Default 128 is safe. Lower if compilation is slow.",
+                interactive=compile_available
+            )
+            cache_dit = gr.Checkbox(
+                label="Cache DiT (single GPU only)",
+                value=values[43] if (cuda_available and compile_available) else False,
+                info="Keep DiT model in CUDA graphs cache for maximum speed. Only works with single GPU. Significant speedup for repeated processing.",
+                interactive=(cuda_available and compile_available)
+            )
+            cache_vae = gr.Checkbox(
+                label="Cache VAE (single GPU only)",
+                value=values[44] if (cuda_available and compile_available) else False,
+                info="Keep VAE model in CUDA graphs cache. Single GPU only. Faster encoding/decoding at cost of higher baseline VRAM usage.",
+                interactive=(cuda_available and compile_available)
+            )
+            
+            # Cache warning for multi-GPU
+            cache_warning = gr.Markdown("", visible=False)
+            
+            debug = gr.Checkbox(
+                label="Debug Logging",
+                value=values[45],  # Was 48, now 45
+                info="Enable detailed debug output. Useful for troubleshooting but creates verbose logs. Enable if encountering errors."
             )
 
             # Mode information
@@ -783,7 +855,8 @@ def seedvr2_tab(
     # ✅ BACKWARD COMPATIBILITY:
     # Old presets automatically get new defaults via merge_config() - no migration needed!
     #
-    # Current count: len(SEEDVR2_ORDER) = 49, len(inputs_list) must also = 49 (added save_metadata, fps_override)
+    # Current count: len(SEEDVR2_ORDER) = 51, len(inputs_list) must also = 51
+    # (includes: save_metadata, fps_override, video_backend, use_10bit)
     # ============================================================================
     
     inputs_list = [
@@ -1019,7 +1092,7 @@ def seedvr2_tab(
 
     # Add a refresh button for model status
     with gr.Row():
-        refresh_model_status_btn = gr.Button("🔄 Refresh Model Status", size="sm", variant="secondary")
+        refresh_model_status_btn = gr.Button("🔄 Refresh Model Status", size="lg", variant="secondary")
         toggle_auto_refresh = gr.Checkbox(label="Auto-refresh (2s)", value=False, scale=0)
     
     refresh_model_status_btn.click(
@@ -1157,8 +1230,8 @@ def seedvr2_tab(
 
     # Preset management - FIXED: Proper argument passing and output alignment
     save_preset_btn.click(
-        fn=lambda name, model, *vals: service["save_preset"](name, model, *vals[:-1]) + (vals[-1],),
-        inputs=[preset_name, dit_model] + inputs_list + [shared_state],
+        fn=lambda name, model, selected_preset, *vals: service["save_preset"](name, model, selected_preset, *vals[:-1]) + (vals[-1],),
+        inputs=[preset_name, dit_model, preset_dropdown] + inputs_list + [shared_state],
         outputs=[preset_dropdown, preset_status] + inputs_list + [shared_state]
     )
 
@@ -1166,6 +1239,13 @@ def seedvr2_tab(
         fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals[:-1])) + (vals[-1],),
         inputs=[preset_dropdown, dit_model] + inputs_list + [shared_state],
         outputs=inputs_list + [preset_status, shared_state]  # FIXED: status is now second-to-last
+    )
+    
+    # Auto-load preset when dropdown selection changes
+    preset_dropdown.change(
+        fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals[:-1])) + (vals[-1],) if preset else (vals[:-1] + (gr.update(value=""), vals[-1])),
+        inputs=[preset_dropdown, dit_model] + inputs_list + [shared_state],
+        outputs=inputs_list + [preset_status, shared_state]
     )
 
     safe_defaults_btn.click(

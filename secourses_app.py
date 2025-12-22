@@ -185,7 +185,7 @@ def main():
         from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names, get_rife_model_names
         from shared.services.resolution_service import resolution_defaults
         from shared.services.output_service import output_defaults
-        from shared.services.seedvr2_service import seedvr2_defaults
+        from shared.services.seedvr2_service import seedvr2_defaults, _enforce_seedvr2_guardrails
         from shared.services.gan_service import gan_defaults
         from shared.services.rife_service import rife_defaults
         from shared.services.flashvsr_service import flashvsr_defaults
@@ -237,10 +237,27 @@ def main():
         
         # === SEEDVR2 TAB ===
         seedvr2_cache = {}
+        migrations_performed = set()  # Track which presets were migrated
+        
         for model in seedvr2_models:
             model_last_used = preset_manager.load_last_used("seedvr2", model)
             model_defaults = seedvr2_defaults(model)
-            seedvr2_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
+            merged = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
+            
+            # Apply migration and guardrails (silent for bulk operations to avoid spam)
+            migrated = _enforce_seedvr2_guardrails(merged, model_defaults, state=None, silent_migration=True)
+            seedvr2_cache[model] = migrated
+            
+            # Auto-save migrated preset if migration occurred (to prevent repeated migration logs)
+            if model_last_used and migrated != model_last_used:
+                last_used_name = preset_manager.get_last_used_name("seedvr2", model)
+                if last_used_name and last_used_name not in migrations_performed:
+                    migrations_performed.add(last_used_name)
+                    try:
+                        preset_manager.save_preset_safe("seedvr2", model, last_used_name, migrated)
+                        print(f"✅ Auto-migrated SeedVR2 preset '{last_used_name}' for model {model}")
+                    except Exception as e:
+                        print(f"⚠️ Could not auto-save migrated preset '{last_used_name}': {e}")
         
         # === GAN TAB ===
         gan_cache = {}

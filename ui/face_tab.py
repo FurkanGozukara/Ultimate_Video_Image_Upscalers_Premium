@@ -104,7 +104,7 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
         apply_global_btn = gr.Button(
             "💾 Save Global Face Setting",
             variant="secondary",
-            size="sm"
+            size="lg"
         )
         global_status = gr.Markdown("")
 

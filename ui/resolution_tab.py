@@ -186,8 +186,8 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
             gr.Markdown("#### ⚡ Quick Actions")
             
             with gr.Row():
-                use_seedvr2_input_btn = gr.Button("📥 Use SeedVR2 Input", size="sm")
-                refresh_calc_btn = gr.Button("🔄 Refresh", size="sm")
+                use_seedvr2_input_btn = gr.Button("📥 Use SeedVR2 Input", size="lg")
+                refresh_calc_btn = gr.Button("🔄 Refresh", size="lg")
 
     # Preset management
     with gr.Accordion("💾 Preset Management", open=True):

@@ -171,7 +171,27 @@ def get_seedvr2_models() -> List[SeedVR2Model]:
 
 
 def get_seedvr2_model_names() -> List[str]:
-    return [m.name for m in get_seedvr2_models()]
+    """
+    Get list of available SeedVR2 model names.
+    Filtered to show only preferred production-ready models.
+    """
+    # Preferred models to display (in order of preference)
+    preferred_models = [
+        "seedvr2_ema_7b_fp16.safetensors",  # Default
+        "seedvr2_ema_7b_sharp_fp16.safetensors",
+        "seedvr2_ema_3b_fp16.safetensors",
+        "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors",
+        "seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors",
+    ]
+    
+    # Get all available models
+    all_models = [m.name for m in get_seedvr2_models()]
+    
+    # Filter to only show preferred models that exist
+    filtered_models = [model for model in preferred_models if model in all_models]
+    
+    # If no preferred models found, fall back to all models
+    return filtered_models if filtered_models else all_models
 
 
 def model_meta_map() -> Dict[str, SeedVR2Model]:

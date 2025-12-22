@@ -18,14 +18,18 @@ class PresetManager:
     presets/
       global.json
       <tab>/
-        <model>/
-          last_used_preset.txt
-          <preset_name>.json
+        <preset_name>.json
+        .last_used/
+          <model>.txt  (tracks last used preset per model)
+    
+    Each preset file contains the model name as part of its data.
     """
 
     def __init__(self, base_dir: Path):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        # Auto-migrate old preset structure on first load
+        self._migrate_old_preset_structure()
 
     # ------------------------------------------------------------------ #
     # Core helpers
@@ -33,15 +37,16 @@ class PresetManager:
     def _tab_dir(self, tab: str) -> Path:
         return self.base_dir / _sanitize_name(tab)
 
-    def _model_dir(self, tab: str, model: Optional[str]) -> Path:
-        model_name = _sanitize_name(model) if model else "default"
-        return self._tab_dir(tab) / model_name
-
-    def _preset_path(self, tab: str, model: Optional[str], preset_name: str) -> Path:
-        return self._model_dir(tab, model) / f"{_sanitize_name(preset_name)}.json"
+    def _preset_path(self, tab: str, preset_name: str) -> Path:
+        """Preset files are stored directly in tab folder (no model subfolder)"""
+        return self._tab_dir(tab) / f"{_sanitize_name(preset_name)}.json"
 
     def _last_used_path(self, tab: str, model: Optional[str]) -> Path:
-        return self._model_dir(tab, model) / "last_used_preset.txt"
+        """Last used tracking is per-model, stored in .last_used subfolder"""
+        last_used_dir = self._tab_dir(tab) / ".last_used"
+        last_used_dir.mkdir(parents=True, exist_ok=True)
+        model_name = _sanitize_name(model) if model else "default"
+        return last_used_dir / f"{model_name}.txt"
 
     # ------------------------------------------------------------------ #
     # Global settings
@@ -70,26 +75,39 @@ class PresetManager:
     # ------------------------------------------------------------------ #
     # Preset operations
     # ------------------------------------------------------------------ #
-    def list_presets(self, tab: str, model: Optional[str]) -> List[str]:
-        folder = self._model_dir(tab, model)
+    def list_presets(self, tab: str, model: Optional[str] = None) -> List[str]:
+        """List all presets for a tab (model parameter kept for compatibility but not used)"""
+        folder = self._tab_dir(tab)
         if not folder.exists():
             return []
+        # List all JSON files in tab folder (excluding .last_used subfolder)
         return sorted([p.stem for p in folder.glob("*.json")])
 
     def save_preset(self, tab: str, model: Optional[str], preset_name: str, data: Dict[str, Any]) -> str:
-        folder = self._model_dir(tab, model)
+        """Save preset in tab folder (not model-specific subfolder)"""
+        folder = self._tab_dir(tab)
         folder.mkdir(parents=True, exist_ok=True)
-        preset_path = self._preset_path(tab, model, preset_name)
+        preset_path = self._preset_path(tab, preset_name)
         tmp_path = preset_path.with_suffix(".json.tmp")
+        
+        # Ensure model name is stored in the preset data itself
+        if model and "dit_model" in data:
+            # Model is already in data for seedvr2/gan/rife tabs
+            pass
+        elif model:
+            # For other tabs, store model reference
+            data["_model"] = model
+        
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         tmp_path.replace(preset_path)
-        # Track last used
+        # Track last used per model
         self.set_last_used(tab, model, preset_name)
         return preset_path.stem
 
     def load_preset(self, tab: str, model: Optional[str], preset_name: str) -> Optional[Dict[str, Any]]:
-        preset_path = self._preset_path(tab, model, preset_name)
+        """Load preset from tab folder (model parameter kept for compatibility)"""
+        preset_path = self._preset_path(tab, preset_name)
         if not preset_path.exists():
             return None
         try:
@@ -187,7 +205,8 @@ class PresetManager:
             return None
 
     def delete_preset(self, tab: str, model: Optional[str], preset_name: str) -> bool:
-        preset_path = self._preset_path(tab, model, preset_name)
+        """Delete preset (model parameter kept for compatibility but not used)"""
+        preset_path = self._preset_path(tab, preset_name)
         if preset_path.exists():
             preset_path.unlink()
             return True
@@ -212,10 +231,11 @@ class PresetManager:
             return None
 
     def load_last_used(self, tab: str, model: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Load last used preset for a model (model used for tracking, not storage location)"""
         name = self.get_last_used_name(tab, model)
         if not name:
             return None
-        return self.load_preset(tab, model, name)
+        return self.load_preset(tab, None, name)  # Load from tab folder (not model subfolder)
 
     # ------------------------------------------------------------------ #
     # Utilities
@@ -548,5 +568,59 @@ class PresetManager:
                 validated["scale"] = 1.0
         
         return validated
+
+    def _migrate_old_preset_structure(self):
+        """
+        Migrate presets from old structure (per-model subfolders) to new structure (flat per-tab).
+        
+        Old: presets/<tab>/<model>/<preset>.json
+        New: presets/<tab>/<preset>.json
+        
+        This runs once on startup and moves all presets to the new location.
+        """
+        try:
+            for tab_dir in self.base_dir.iterdir():
+                if not tab_dir.is_dir() or tab_dir.name.startswith("."):
+                    continue
+                
+                # Check for model subfolders (old structure)
+                for model_dir in tab_dir.iterdir():
+                    if not model_dir.is_dir() or model_dir.name == ".last_used":
+                        continue
+                    
+                    # Move preset files from model subfolder to tab folder
+                    for preset_file in model_dir.glob("*.json"):
+                        target_path = tab_dir / preset_file.name
+                        
+                        # Only move if target doesn't exist (avoid overwriting newer presets)
+                        if not target_path.exists():
+                            try:
+                                preset_file.rename(target_path)
+                                print(f"✅ Migrated preset: {preset_file.name} → {tab_dir.name}/")
+                            except Exception as e:
+                                print(f"⚠️ Could not migrate {preset_file}: {e}")
+                    
+                    # Move last_used_preset.txt to .last_used subfolder
+                    last_used_file = model_dir / "last_used_preset.txt"
+                    if last_used_file.exists():
+                        try:
+                            last_used_dir = tab_dir / ".last_used"
+                            last_used_dir.mkdir(exist_ok=True)
+                            target_last_used = last_used_dir / f"{model_dir.name}.txt"
+                            if not target_last_used.exists():
+                                last_used_file.rename(target_last_used)
+                        except Exception:
+                            pass  # Non-critical
+                    
+                    # Remove empty model subfolder
+                    try:
+                        if not any(model_dir.iterdir()):
+                            model_dir.rmdir()
+                    except Exception:
+                        pass  # Non-critical
+        
+        except Exception as e:
+            print(f"⚠️ Preset migration warning: {e}")
+            # Non-fatal - continue even if migration fails
 
 
