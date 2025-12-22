@@ -420,6 +420,26 @@ def main():
                 launcher_transformers_cache or "Not set (using MODELS_DIR)"
             ))
             
+            # Processing mode selection controls (placed before Execution Mode explanation)
+            mode_radio = gr.Radio(
+                choices=["subprocess", "in_app"],
+                value=saved_mode,  # Restore from saved settings
+                label="Processing Mode",
+                info="⚠️ Changing to in-app requires confirmation and persists until app restart",
+                interactive=True
+            )
+            mode_confirm = gr.Checkbox(
+                label="⚠️ I understand that in-app mode requires app restart to revert",
+                value=False,
+                visible=True,
+                info="Enable this checkbox to confirm mode switch to in-app (cannot be undone without restart)"
+            )
+            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
+            mode_status = gr.Markdown("")  # Status display for mode changes
+            
+            save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
+            global_status = gr.Markdown("")
+            
             # Execution mode controls
             gr.Markdown("### ⚙️ Execution Mode")
             
@@ -510,24 +530,6 @@ def main():
                     """)
             
             gr.Markdown("💡 **Note**: In-app mode exists ONLY as a code framework for potential future optimization. Consider it **disabled** for all practical purposes.")
-            
-            mode_radio = gr.Radio(
-                choices=["subprocess", "in_app"],
-                value=saved_mode,  # Restore from saved settings
-                label="Processing Mode",
-                info="⚠️ Changing to in-app requires confirmation and persists until app restart",
-                interactive=True
-            )
-            mode_confirm = gr.Checkbox(
-                label="⚠️ I understand that in-app mode requires app restart to revert",
-                value=False,
-                visible=True,
-                info="Enable this checkbox to confirm mode switch to in-app (cannot be undone without restart)"
-            )
-            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
-            
-            save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
-            global_status = gr.Markdown("")
 
             # Wire up global settings events
             def save_global_settings(od, td, tel, face, face_str, models_dir, hf_home, trans_cache, state):
@@ -537,9 +539,6 @@ def main():
             def apply_mode_selection(mode_choice, confirm, state):
                 from shared.services.global_service import apply_mode_selection
                 return apply_mode_selection(mode_choice, confirm, runner, preset_manager, global_settings, state)
-
-            # Add status display for mode changes
-            mode_status = gr.Markdown("")
 
             save_global.click(
                 fn=save_global_settings,
