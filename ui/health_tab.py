@@ -71,7 +71,7 @@ def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir
 
     health_report = gr.Markdown(
         "Click 'Run Health Check' to verify system components.",
-        show_copy_button=True
+        buttons=["copy"]
     )
 
     # Info sections
@@ -114,13 +114,13 @@ def health_tab(global_settings: Dict[str, Any], shared_state: gr.State, temp_dir
         gr.Markdown("Scan installed Gradio package for components and features")
         
         gradio_scan_btn = gr.Button("🔍 Scan Gradio Installation", variant="secondary")
-        gradio_scan_report = gr.Markdown("Click button to scan Gradio source...", show_copy_button=True)
+        gradio_scan_report = gr.Markdown("Click button to scan Gradio source...", buttons=["copy"])
     
     with gr.Accordion("📦 Repository Scan (SeedVR2, Real-ESRGAN, OMDB)", open=False):
         gr.Markdown("Scan external repositories for recent commits and features")
         
         repo_scan_btn = gr.Button("🔍 Scan Repositories", variant="secondary")
-        repo_scan_report = gr.Markdown("Click button to scan repositories...", show_copy_button=True)
+        repo_scan_report = gr.Markdown("Click button to scan repositories...", buttons=["copy"])
     
     # Wire up the health check
     # The banner updates automatically via shared_state.change() in main app

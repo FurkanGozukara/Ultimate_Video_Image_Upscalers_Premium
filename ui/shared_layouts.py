@@ -60,8 +60,7 @@ def create_input_section(
         input_file = gr.File(
             label=upload_label,
             type="filepath",
-            file_types=file_types or ["video", "image"],
-            info=f"Upload {', '.join(file_types or ['video', 'image'])} file"
+            file_types=file_types or ["video", "image"]
         )
         
         input_path = gr.Textbox(
@@ -120,7 +119,7 @@ def create_output_section(
         label="📋 Processing Log",
         value="",
         lines=10,
-        show_copy_button=True
+        buttons=["copy"]
     )
     
     output_video = None
@@ -128,7 +127,7 @@ def create_output_section(
         output_video = gr.Video(
             label="🎬 Upscaled Video",
             interactive=False,
-            show_download_button=True
+            buttons=["download"]
         )
     
     output_image = None
@@ -136,7 +135,7 @@ def create_output_section(
         output_image = gr.Image(
             label="🖼️ Upscaled Image",
             interactive=False,
-            show_download_button=True
+            buttons=["download"]
         )
     
     batch_gallery = None
@@ -148,7 +147,7 @@ def create_output_section(
             rows=2,
             height="auto",
             object_fit="contain",
-            show_download_button=True
+            buttons=["download"]
         )
     
     # Enhanced comparison slider

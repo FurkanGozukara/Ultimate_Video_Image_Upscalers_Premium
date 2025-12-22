@@ -109,8 +109,7 @@ def rife_tab(
                 input_file = gr.File(
                     label="Upload Video or Image",
                     type="filepath",
-                    file_types=["video", "image"],
-                    info="Select video file or image sequence for processing"
+                    file_types=["video", "image"]
                 )
                 input_path = gr.Textbox(
                     label="Input Path",
@@ -229,9 +228,9 @@ def rife_tab(
                                 if metadata.notes:
                                     info_lines.append(f"\n💡 {metadata.notes}")
                                 
-                                return gr.Markdown.update(value="\n".join(info_lines), visible=True)
+                                return gr.update(value="\n".join(info_lines), visible=True)
                             else:
-                                return gr.Markdown.update(value="Model metadata not available", visible=False)
+                                return gr.update(value="Model metadata not available", visible=False)
                         
                         # Wire up model info update
                         rife_model.change(
@@ -346,7 +345,7 @@ def rife_tab(
 
                         concat_videos = gr.Textbox(
                             label="Additional Videos for Concatenation",
-                            value=values[33],  # Updated index for concat_videos
+                            value=values[31],  # Fixed: concat_videos is at index 31 in RIFE_ORDER
                             placeholder="C:/path/to/video1.mp4, C:/path/to/video2.mp4",
                             info="Comma-separated list of video files to concatenate with the main input",
                             lines=2
@@ -413,14 +412,14 @@ def rife_tab(
                 label="📋 Processing Log",
                 value="",
                 lines=10,
-                show_copy_button=True
+                buttons=["copy"]
             )
 
             # Output displays
             output_video = gr.Video(
                 label="🎬 Processed Video",
                 interactive=False,
-                show_download_button=True
+                buttons=["download"]
             )
             
             # Comparison outputs (matching SeedVR2/GAN tabs)
@@ -568,19 +567,19 @@ def rife_tab(
     def validate_cuda_device_live_rife(cuda_device_val):
         """Live CUDA validation for RIFE (enforces single GPU)"""
         if not cuda_device_val or not cuda_device_val.strip():
-            return gr.Markdown.update(value="", visible=False)
+            return gr.update(value="", visible=False)
         
         try:
             import torch
             
             if not torch.cuda.is_available():
-                return gr.Markdown.update(value="⚠️ CUDA not available. CPU mode will be used (very slow).", visible=True)
+                return gr.update(value="⚠️ CUDA not available. CPU mode will be used (very slow).", visible=True)
             
             device_str = str(cuda_device_val).strip()
             device_count = torch.cuda.device_count()
             
             if device_str.lower() == "all":
-                return gr.Markdown.update(value=f"⚠️ RIFE uses single GPU only. Will use GPU 0 (ignoring 'all')", visible=True)
+                return gr.update(value=f"⚠️ RIFE uses single GPU only. Will use GPU 0 (ignoring 'all')", visible=True)
             
             devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
             
@@ -598,25 +597,25 @@ def rife_tab(
                         valid_devices.append(device_id)
             
             if invalid_devices:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"❌ Invalid device ID(s): {', '.join(invalid_devices)}. Available: 0-{device_count-1}",
                     visible=True
                 )
             
             if len(valid_devices) > 1:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"⚠️ RIFE single GPU only. Will use GPU {valid_devices[0]} (ignoring {', '.join(map(str, valid_devices[1:]))})",
                     visible=True
                 )
             elif len(valid_devices) == 1:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"✅ Using GPU {valid_devices[0]}",
                     visible=True
                 )
             
-            return gr.Markdown.update(value="", visible=False)
+            return gr.update(value="", visible=False)
         except Exception as e:
-            return gr.Markdown.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
+            return gr.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
     
     # Wire up live CUDA validation
     rife_gpu.change(
@@ -628,7 +627,7 @@ def rife_tab(
     # Input handling
     def cache_input(val, state):
         state["seed_controls"]["last_input_path"] = val if val else ""
-        return val or "", gr.Markdown.update(value="✅ Input cached for processing.", visible=True), state
+        return val or "", gr.update(value="✅ Input cached for processing.", visible=True), state
 
     input_file.upload(
         fn=lambda val, state: cache_input(val, state),
@@ -637,7 +636,7 @@ def rife_tab(
     )
 
     input_path.change(
-        fn=lambda val, state: (gr.Markdown.update(value="✅ Input path updated.", visible=True), state),
+        fn=lambda val, state: (gr.update(value="✅ Input path updated.", visible=True), state),
         inputs=[input_path, shared_state],
         outputs=[input_cache_msg, shared_state]
     )
@@ -650,7 +649,7 @@ def rife_tab(
     )
 
     cancel_btn.click(
-        fn=lambda ok, state: (service["cancel_action"](), state) if ok else (gr.Markdown.update(value="⚠️ Enable 'Confirm cancel' to stop."), "", state),
+        fn=lambda ok, state: (service["cancel_action"](), state) if ok else (gr.update(value="⚠️ Enable 'Confirm cancel' to stop."), "", state),
         inputs=[cancel_confirm, shared_state],
         outputs=[status_box, log_box, shared_state]
     )

@@ -214,12 +214,12 @@ def build_flashvsr_callbacks(
         last_used = preset_manager.get_last_used_name("flashvsr", model_name)
         preferred = select_name if select_name in presets else None
         value = preferred or (last_used if last_used in presets else (presets[-1] if presets else None))
-        return gr.Dropdown.update(choices=presets, value=value)
+        return gr.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
         """Save a preset."""
         if not preset_name.strip():
-            return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name"), *list(args)
+            return gr.update(), gr.update(value="⚠️ Enter a preset name"), *list(args)
 
         try:
             payload = _flashvsr_dict_from_args(list(args))
@@ -231,9 +231,9 @@ def build_flashvsr_callbacks(
             current_map = dict(zip(FLASHVSR_ORDER, list(args)))
             loaded_vals = _apply_flashvsr_preset(payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}'"), *loaded_vals
+            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}'"), *loaded_vals
         except Exception as e:
-            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f"❌ Error: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, version: str, mode: str, current_values: List[Any]):
         """
@@ -253,11 +253,11 @@ def build_flashvsr_callbacks(
             
             # Return values + status message (status is LAST)
             status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
-            return (*values, gr.Markdown.update(value=status_msg))
+            return (*values, gr.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
             # Return current values + error status
-            return (*current_values, gr.Markdown.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values, gr.update(value=f"❌ Error: {str(e)}"))
 
     def safe_defaults():
         """Get safe default values."""
@@ -306,8 +306,8 @@ def build_flashvsr_callbacks(
                     ffmpeg_msg or "Install ffmpeg and add to PATH before processing",
                     None,
                     None,
-                    gr.ImageSlider.update(visible=False),
-                    gr.HTML.update(value="", visible=False),
+                    gr.update(visible=False),
+                    gr.update(value="", visible=False),
                     state
                 )
                 return
@@ -321,8 +321,8 @@ def build_flashvsr_callbacks(
                     space_warning or "Free up at least 5GB disk space before processing",
                     None,
                     None,
-                    gr.ImageSlider.update(visible=False),
-                    gr.HTML.update(value="", visible=False),
+                    gr.update(visible=False),
+                    gr.update(value="", visible=False),
                     state
                 )
                 return
@@ -335,8 +335,8 @@ def build_flashvsr_callbacks(
                     "",
                     None,
                     None,
-                    gr.ImageSlider.update(visible=False),
-                    gr.HTML.update(value="", visible=False),
+                    gr.update(visible=False),
+                    gr.update(value="", visible=False),
                     state
                 )
                 return
@@ -425,8 +425,8 @@ def build_flashvsr_callbacks(
                         "\n".join(log_buffer[-50:]) + "\n\n[Cancelled by user]",
                         None,
                         None,
-                        gr.ImageSlider.update(visible=False),
-                        gr.HTML.update(value="", visible=False),
+                        gr.update(visible=False),
+                        gr.update(value="", visible=False),
                         state
                     )
                     return
@@ -455,8 +455,8 @@ def build_flashvsr_callbacks(
                         "\n".join(log_buffer[-50:]),
                         None,
                         None,
-                        gr.ImageSlider.update(visible=False),
-                        gr.HTML.update(value="Processing...", visible=False),
+                        gr.update(visible=False),
+                        gr.update(value="Processing...", visible=False),
                         state
                     )
             
@@ -471,8 +471,8 @@ def build_flashvsr_callbacks(
                     f"Error: {result_holder['error']}",
                     None,
                     None,
-                    gr.ImageSlider.update(visible=False),
-                    gr.HTML.update(value="", visible=False),
+                    gr.update(visible=False),
+                    gr.update(value="", visible=False),
                     state
                 )
                 return
@@ -484,8 +484,8 @@ def build_flashvsr_callbacks(
                     "Processing did not complete",
                     None,
                     None,
-                    gr.ImageSlider.update(visible=False),
-                    gr.HTML.update(value="", visible=False),
+                    gr.update(visible=False),
+                    gr.update(value="", visible=False),
                     state
                 )
                 return
@@ -560,8 +560,8 @@ def build_flashvsr_callbacks(
                 result.log,
                 output_path if output_path and output_path.endswith(".mp4") else None,
                 output_path if output_path and not output_path.endswith(".mp4") else None,
-                img_slider if img_slider else gr.ImageSlider.update(visible=False),
-                html_comp if html_comp else gr.HTML.update(value="", visible=False),
+                img_slider if img_slider else gr.update(visible=False),
+                html_comp if html_comp else gr.update(value="", visible=False),
                 state
             )
             
@@ -573,15 +573,15 @@ def build_flashvsr_callbacks(
                 f"Error: {str(e)}",
                 None,
                 None,
-                gr.ImageSlider.update(visible=False),
-                gr.HTML.update(value="", visible=False),
+                gr.update(visible=False),
+                gr.update(value="", visible=False),
                 state or {}
             )
 
     def cancel_action():
         """Cancel FlashVSR+ processing"""
         _flashvsr_cancel_event.set()
-        return gr.Markdown.update(value="⏹️ Cancellation requested - FlashVSR+ will stop at next checkpoint"), "Cancelling..."
+        return gr.update(value="⏹️ Cancellation requested - FlashVSR+ will stop at next checkpoint"), "Cancelling..."
 
     def open_outputs_folder_flashvsr():
         """Open outputs folder - delegates to shared utility (no code duplication)"""

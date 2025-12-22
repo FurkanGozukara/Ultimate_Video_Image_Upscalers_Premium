@@ -209,11 +209,11 @@ def build_comparison_selector(
     
     # Convert to legacy format
     if html_comp:
-        return html_comp.value if hasattr(html_comp, 'value') else str(html_comp), gr.ImageSlider.update(visible=False)
+        return html_comp.value if hasattr(html_comp, 'value') else str(html_comp), gr.update(visible=False)
     elif image_slider:
         return "", image_slider
     else:
-        return "", gr.ImageSlider.update(visible=False)
+        return "", gr.update(visible=False)
 
 
 # Expose commonly used functions directly

@@ -105,11 +105,11 @@ def build_output_callbacks(
         last_used = preset_manager.get_last_used_name("output", model_name)
         preferred = select_name if select_name in presets else None
         value = preferred or (last_used if last_used in presets else (presets[-1] if presets else None))
-        return gr.Dropdown.update(choices=presets, value=value)
+        return gr.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
         if not preset_name.strip():
-            return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
+            return gr.update(), gr.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
             payload = _output_dict_from_args(list(args))
@@ -120,9 +120,9 @@ def build_output_callbacks(
             current_map = dict(zip(OUTPUT_ORDER, list(args)))
             loaded_vals = _apply_output_preset(payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
         except Exception as e:
-            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
         try:
@@ -135,11 +135,11 @@ def build_output_callbacks(
             defaults_with_model["model"] = model_name
             current_map = dict(zip(OUTPUT_ORDER, current_values))
             values = _apply_output_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
-            status = gr.Markdown.update(value=f"✅ Loaded preset '{preset_name}' for {model_name}")
+            status = gr.update(value=f"✅ Loaded preset '{preset_name}' for {model_name}")
             return values + [status]
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
-            error_status = gr.Markdown.update(value=f"❌ Error loading preset: {str(e)}")
+            error_status = gr.update(value=f"❌ Error loading preset: {str(e)}")
             return current_values + [error_status]
 
     def safe_defaults():
@@ -165,57 +165,57 @@ def build_output_callbacks(
     
     def update_codec_info(codec_key: str):
         """Update codec information display"""
-        return gr.Markdown.update(value=get_codec_info(codec_key))
+        return gr.update(value=get_codec_info(codec_key))
     
     def update_pixel_format_info(pix_fmt: str):
         """Update pixel format information display"""
-        return gr.Markdown.update(value=get_pixel_format_info(pix_fmt))
+        return gr.update(value=get_pixel_format_info(pix_fmt))
 
     # Cache helpers used by tab_output UI
     def cache_output(fmt, state):
         state["seed_controls"]["output_format_val"] = fmt
-        return gr.Markdown.update(value="Output format cached for runs."), state
+        return gr.update(value="Output format cached for runs."), state
 
     def cache_fps(fps_val, state):
         state["seed_controls"]["fps_override_val"] = fps_val
-        return gr.Markdown.update(value="FPS override cached for runs."), state
+        return gr.update(value="FPS override cached for runs."), state
 
     def cache_comparison(mode, state):
         state["seed_controls"]["comparison_mode_val"] = mode
-        return gr.Markdown.update(value="Comparison mode cached for runs."), state
+        return gr.update(value="Comparison mode cached for runs."), state
 
     def cache_pin(val, state):
         state["seed_controls"]["pin_reference_val"] = bool(val)
-        return gr.Markdown.update(value="Pin reference preference cached."), state
+        return gr.update(value="Pin reference preference cached."), state
 
     def cache_fullscreen(val, state):
         state["seed_controls"]["fullscreen_val"] = bool(val)
-        return gr.Markdown.update(value="Fullscreen preference cached."), state
+        return gr.update(value="Fullscreen preference cached."), state
 
     def cache_png_padding(val, state):
         try:
             state["seed_controls"]["png_padding_val"] = max(1, int(val))
         except Exception:
             state["seed_controls"]["png_padding_val"] = defaults["png_padding"]
-        return gr.Markdown.update(value="PNG padding cached for runs."), state
+        return gr.update(value="PNG padding cached for runs."), state
 
     def cache_png_basename(val, state):
         state["seed_controls"]["png_keep_basename_val"] = bool(val)
-        return gr.Markdown.update(value="PNG base-name preference cached."), state
+        return gr.update(value="PNG base-name preference cached."), state
 
     def cache_skip(val, state):
         try:
             state["seed_controls"]["skip_first_frames_val"] = max(0, int(val))
         except Exception:
             state["seed_controls"]["skip_first_frames_val"] = 0
-        return gr.Markdown.update(value="Skip-first-frames cached for runs."), state
+        return gr.update(value="Skip-first-frames cached for runs."), state
 
     def cache_cap(val, state):
         try:
             state["seed_controls"]["load_cap_val"] = max(0, int(val))
         except Exception:
             state["seed_controls"]["load_cap_val"] = 0
-        return gr.Markdown.update(value="Load-cap cached for runs."), state
+        return gr.update(value="Load-cap cached for runs."), state
 
     def apply_to_pipeline(*args):
         """Apply all output settings to pipeline at once"""
@@ -239,7 +239,7 @@ def build_output_callbacks(
         state["seed_controls"] = seed_controls
         
         status = f"✅ Applied output settings\n- Format: {seed_controls['output_format_val']}\n- Comparison: {seed_controls['comparison_mode_val']}\n- Metadata: {seed_controls['save_metadata_val']}"
-        return gr.Markdown.update(value=status), state
+        return gr.update(value=status), state
 
     def pin_reference_frame(image_path, state):
         """
@@ -260,7 +260,7 @@ def build_output_callbacks(
             seed_controls["pinned_reference_path"] = None
             msg = "⚠️ No valid image to pin"
         state["seed_controls"] = seed_controls
-        return gr.Markdown.update(value=msg), state
+        return gr.update(value=msg), state
 
     def unpin_reference(state):
         """
@@ -274,7 +274,7 @@ def build_output_callbacks(
             global_settings["pinned_reference_path"] = None
             preset_manager.save_global_settings(global_settings)
         state["seed_controls"] = seed_controls
-        return gr.Markdown.update(value="✅ Reference unpinned and cleared from global settings"), state
+        return gr.update(value="✅ Reference unpinned and cleared from global settings"), state
 
     return {
         "defaults": defaults,

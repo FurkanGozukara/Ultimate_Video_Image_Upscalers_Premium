@@ -87,11 +87,11 @@ def build_face_callbacks(
         last_used = preset_manager.get_last_used_name("face", model_name)
         preferred = select_name if select_name in presets else None
         value = preferred or (last_used if last_used in presets else (presets[-1] if presets else None))
-        return gr.Dropdown.update(choices=presets, value=value)
+        return gr.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
         if not preset_name.strip():
-            return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
+            return gr.update(), gr.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
             payload = _face_dict_from_args(list(args))
@@ -102,9 +102,9 @@ def build_face_callbacks(
             current_map = dict(zip(FACE_ORDER, list(args)))
             loaded_vals = _apply_face_preset(payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
         except Exception as e:
-            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
         """
@@ -133,11 +133,11 @@ def build_face_callbacks(
             # Return values + status message (status is LAST)
             # Face tab skips model_selector in outputs, so return values[1:] + status
             status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
-            return (*values[1:], gr.Markdown.update(value=status_msg))
+            return (*values[1:], gr.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
             # Return current values + error status (skip first value for model_selector)
-            return (*current_values[1:], gr.Markdown.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values[1:], gr.update(value=f"❌ Error: {str(e)}"))
 
     def safe_defaults():
         return [defaults[k] for k in FACE_ORDER]
@@ -147,7 +147,7 @@ def build_face_callbacks(
         preset_manager.save_global_settings(global_settings)
         if state:
             state["seed_controls"]["face_strength_val"] = global_settings.get("face_strength", 0.5)
-        return gr.Markdown.update(value="✅ Global face restoration updated"), state or {}
+        return gr.update(value="✅ Global face restoration updated"), state or {}
 
     def cache_strength(strength_val: float, state=None):
         try:
@@ -159,7 +159,7 @@ def build_face_callbacks(
         preset_manager.save_global_settings(global_settings)
         if state:
             state["seed_controls"]["face_strength_val"] = strength_num
-        return gr.Markdown.update(value=f"✅ Face strength set to {strength_num}"), state or {}
+        return gr.update(value=f"✅ Face strength set to {strength_num}"), state or {}
 
     return {
         "defaults": defaults,

@@ -90,8 +90,7 @@ def flashvsr_tab(
             input_file = gr.File(
                 label="Upload Video or Image Folder",
                 type="filepath",
-                file_types=["video"],
-                info="Select video file or folder containing image sequence"
+                file_types=["video"]
             )
             input_path = gr.Textbox(
                 label="Input Path",
@@ -144,9 +143,9 @@ def flashvsr_tab(
                     if metadata.notes:
                         info_lines.append(f"\n💡 {metadata.notes}")
                     
-                    return gr.Markdown.update(value="\n".join(info_lines), visible=True)
+                    return gr.update(value="\n".join(info_lines), visible=True)
                 else:
-                    return gr.Markdown.update(value="Model metadata not available", visible=False)
+                    return gr.update(value="Model metadata not available", visible=False)
             
             # Wire up model info updates
             for component in [version, mode, scale]:
@@ -260,19 +259,19 @@ def flashvsr_tab(
                 label="📋 Processing Log",
                 value="",
                 lines=12,
-                show_copy_button=True
+                buttons=["copy"]
             )
             
             # Output displays
             output_video = gr.Video(
                 label="🎬 Upscaled Video",
                 interactive=False,
-                show_download_button=True
+                buttons=["download"]
             )
             output_image = gr.Image(
                 label="🖼️ Output Image",
                 interactive=False,
-                show_download_button=True
+                buttons=["download"]
             )
             
             # Comparison
@@ -375,7 +374,7 @@ def flashvsr_tab(
     
     # Wire up events
     def cache_input(val, state):
-        return val or "", gr.Markdown.update(value="✅ Input cached", visible=True), state
+        return val or "", gr.update(value="✅ Input cached", visible=True), state
     
     input_file.upload(
         fn=cache_input,
@@ -391,7 +390,7 @@ def flashvsr_tab(
     )
     
     cancel_btn.click(
-        fn=lambda ok: service["cancel_action"]() if ok else (gr.Markdown.update(value="⚠️ Enable 'Confirm cancel' to stop."), ""),
+        fn=lambda ok: service["cancel_action"]() if ok else (gr.update(value="⚠️ Enable 'Confirm cancel' to stop."), ""),
         inputs=[cancel_confirm],
         outputs=[status_box, log_box]
     )

@@ -63,7 +63,7 @@ def create_preset_callbacks(
         preferred = select_name if select_name in presets else None
         value = preferred or (last_used if last_used in presets else (presets[-1] if presets else None))
         
-        return gr.Dropdown.update(choices=presets, value=value)
+        return gr.update(choices=presets, value=value)
     
     def save_preset(preset_name: str, model_name: str, *args):
         """
@@ -79,8 +79,8 @@ def create_preset_callbacks(
         """
         if not preset_name.strip():
             return (
-                gr.Dropdown.update(),
-                gr.Markdown.update(value="⚠️ Enter a preset name before saving"),
+                gr.update(),
+                gr.update(value="⚠️ Enter a preset name before saving"),
                 *list(args)
             )
         
@@ -92,8 +92,8 @@ def create_preset_callbacks(
                     f"Check inputs_list in {tab_name}_tab.py"
                 )
                 return (
-                    gr.Dropdown.update(),
-                    gr.Markdown.update(value=error_msg),
+                    gr.update(),
+                    gr.update(value=error_msg),
                     *list(args)
                 )
             
@@ -117,14 +117,14 @@ def create_preset_callbacks(
             
             return (
                 dropdown,
-                gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"),
+                gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"),
                 *loaded_vals
             )
             
         except Exception as e:
             return (
-                gr.Dropdown.update(),
-                gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"),
+                gr.update(),
+                gr.update(value=f"❌ Error saving preset: {str(e)}"),
                 *list(args)
             )
     
@@ -172,12 +172,12 @@ def create_preset_callbacks(
             
             # Return values + status message (status LAST to match UI expectations)
             status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found, using defaults"
-            return (*values, gr.Markdown.update(value=status_msg))
+            return (*values, gr.update(value=status_msg))
             
         except Exception as e:
             print(f"Error loading preset {preset_name} for {tab_name}/{model_name}: {e}")
             # Return current values + error status
-            return (*current_values, gr.Markdown.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values, gr.update(value=f"❌ Error: {str(e)}"))
     
     def safe_defaults():
         """Get safe default values in order"""

@@ -92,7 +92,7 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
             info="When enabled, face restoration is automatically applied to ALL video and image upscaling operations"
         )
 
-        with gr.Box():
+        with gr.Group():
             gr.Markdown("""
             **ℹ️ Global Mode Info:**
             - Face restoration will be applied to SeedVR2, GAN, and RIFE processing
@@ -367,7 +367,7 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
     # Wire up callbacks
     def refresh_presets(model):
         presets = preset_manager.list_presets("face", model)
-        return gr.Dropdown.update(choices=presets, value="")
+        return gr.update(choices=presets, value="")
 
     model_selector.change(
         fn=refresh_presets,

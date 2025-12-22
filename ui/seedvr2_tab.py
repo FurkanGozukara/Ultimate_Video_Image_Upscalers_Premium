@@ -593,19 +593,19 @@ def seedvr2_tab(
                 label="📋 Run Log",
                 value="",
                 lines=12,
-                show_copy_button=True
+                buttons=["copy"]
             )
 
             # Output display with enhanced comparison
             output_video = gr.Video(
                 label="🎬 Upscaled Video",
                 interactive=False,
-                show_download_button=True
+                buttons=["download"]
             )
             output_image = gr.Image(
                 label="🖼️ Upscaled Image / Preview",
                 interactive=False,
-                show_download_button=True
+                buttons=["download"]
             )
             
             # Gallery for batch results
@@ -616,7 +616,7 @@ def seedvr2_tab(
                 rows=2,
                 height="auto",
                 object_fit="contain",
-                show_download_button=True
+                buttons=["download"]
             )
 
             # Enhanced ImageSlider with latest Gradio features
@@ -680,7 +680,7 @@ def seedvr2_tab(
                     rows=2,
                     height="auto",
                     object_fit="contain",
-                    show_download_button=False,
+                    buttons=[],
                     allow_preview=True
                 )
 
@@ -822,9 +822,9 @@ def seedvr2_tab(
             from shared.model_manager import get_model_manager
             model_manager = get_model_manager()
             status_text = service.get("get_model_loading_status", lambda: "No models loaded")()
-            return gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
+            return gr.update(value=f"### 🔧 Model Status\n{status_text}")
         except Exception:
-            return gr.Markdown.update(value="### 🔧 Model Status\nStatus unavailable")
+            return gr.update(value="### 🔧 Model Status\nStatus unavailable")
 
     # Wire up all the event handlers
 
@@ -842,7 +842,7 @@ def seedvr2_tab(
                 # Use the service's auto-resolution function
                 res_slider, max_res_slider, calc_msg, updated_state = service["auto_res_on_input"](val, state)
                 return (
-                    gr.Markdown.update(value="✅ Input cached. Auto-resolution calculated.", visible=True),
+                    gr.update(value="✅ Input cached. Auto-resolution calculated.", visible=True),
                     updated_state,
                     res_slider,
                     max_res_slider,
@@ -851,20 +851,20 @@ def seedvr2_tab(
             except Exception as e:
                 # Fallback if auto-calc fails
                 return (
-                    gr.Markdown.update(value=f"✅ Input cached. Auto-calc warning: {str(e)[:50]}", visible=True),
+                    gr.update(value=f"✅ Input cached. Auto-calc warning: {str(e)[:50]}", visible=True),
                     state,
-                    gr.Slider.update(),
-                    gr.Slider.update(),
-                    gr.Markdown.update(visible=False)
+                    gr.update(),
+                    gr.update(),
+                    gr.update(visible=False)
                 )
         else:
             # Just cache without auto-calc
             return (
-                gr.Markdown.update(value="✅ Input cached for resolution/chunk estimates.", visible=True),
+                gr.update(value="✅ Input cached for resolution/chunk estimates.", visible=True),
                 state,
-                gr.Slider.update(),
-                gr.Slider.update(),
-                gr.Markdown.update(visible=False)
+                gr.update(),
+                gr.update(),
+                gr.update(visible=False)
             )
 
     def cache_upload(val, state):
@@ -880,7 +880,7 @@ def seedvr2_tab(
                 res_slider, max_res_slider, calc_msg, updated_state = service["auto_res_on_input"](val, state)
                 return (
                     val or "",
-                    gr.Markdown.update(value="✅ File uploaded. Auto-resolution calculated.", visible=True),
+                    gr.update(value="✅ File uploaded. Auto-resolution calculated.", visible=True),
                     updated_state,
                     res_slider,
                     max_res_slider,
@@ -889,20 +889,20 @@ def seedvr2_tab(
             except Exception:
                 return (
                     val or "",
-                    gr.Markdown.update(value="✅ File uploaded and cached.", visible=True),
+                    gr.update(value="✅ File uploaded and cached.", visible=True),
                     state,
-                    gr.Slider.update(),
-                    gr.Slider.update(),
-                    gr.Markdown.update(visible=False)
+                    gr.update(),
+                    gr.update(),
+                    gr.update(visible=False)
                 )
         else:
             return (
                 val or "",
-                gr.Markdown.update(value="✅ File uploaded and cached.", visible=True),
+                gr.update(value="✅ File uploaded and cached.", visible=True),
                 state,
-                gr.Slider.update(),
-                gr.Slider.update(),
-                gr.Markdown.update(visible=False)
+                gr.update(),
+                gr.update(),
+                gr.update(visible=False)
             )
 
     # Wire up input events with resolution auto-calculation
@@ -966,9 +966,9 @@ def seedvr2_tab(
                     warnings.append(multi_gpu_warning)
                 status_text += "\n\n" + "\n".join(warnings)
             
-            model_status_update = gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
+            model_status_update = gr.update(value=f"### 🔧 Model Status\n{status_text}")
         except Exception as e:
-            model_status_update = gr.Markdown.update(value=f"### 🔧 Model Status\nError: {str(e)}")
+            model_status_update = gr.update(value=f"### 🔧 Model Status\nError: {str(e)}")
         
         # If last-used preset exists, merge with current values
         if last_used_preset:
@@ -981,7 +981,7 @@ def seedvr2_tab(
                 merged["compile_vae"] = False
             
             new_vals = [merged[k] for k in SEEDVR2_ORDER]
-            cache_msg = gr.Markdown.update(
+            cache_msg = gr.update(
                 value=f"✅ Model '{m}' selected - loaded last-used preset\n{compile_warning}\n{multi_gpu_warning}", 
                 visible=True
             )
@@ -995,7 +995,7 @@ def seedvr2_tab(
             
             new_vals = [current_dict[k] for k in SEEDVR2_ORDER]
             
-            cache_msg = gr.Markdown.update(
+            cache_msg = gr.update(
                 value=f"✅ Model '{m}' selected (no saved preset)\n{compile_warning}\n{multi_gpu_warning}", 
                 visible=True
             )
@@ -1013,9 +1013,9 @@ def seedvr2_tab(
             from shared.model_manager import get_model_manager
             model_manager = get_model_manager()
             status_text = service.get("get_model_loading_status", lambda: "Model status unavailable")()
-            return gr.Markdown.update(value=f"### 🔧 Model Status\n{status_text}")
+            return gr.update(value=f"### 🔧 Model Status\n{status_text}")
         except Exception:
-            return gr.Markdown.update(value="### 🔧 Model Status\nStatus unavailable")
+            return gr.update(value="### 🔧 Model Status\nStatus unavailable")
 
     # Add a refresh button for model status
     with gr.Row():
@@ -1058,9 +1058,9 @@ def seedvr2_tab(
             model_manager = get_model_manager()
             model_manager.unload_all_models()  # Update tracking state
             
-            return gr.Markdown.update(value=msg, visible=True), service["get_model_loading_status"]()
+            return gr.update(value=msg, visible=True), service["get_model_loading_status"]()
         except Exception as e:
-            return gr.Markdown.update(value=f"❌ Error: {str(e)}", visible=True), service["get_model_loading_status"]()
+            return gr.update(value=f"❌ Error: {str(e)}", visible=True), service["get_model_loading_status"]()
     
     def unload_all_models():
         """Clear all CUDA caches (subprocess mode) or unload all models (in-app mode when implemented)"""
@@ -1078,9 +1078,9 @@ def seedvr2_tab(
             model_manager = get_model_manager()
             model_manager.unload_all_models()
             
-            return gr.Markdown.update(value=msg, visible=True), service["get_model_loading_status"]()
+            return gr.update(value=msg, visible=True), service["get_model_loading_status"]()
         except Exception as e:
-            return gr.Markdown.update(value=f"❌ Error: {str(e)}", visible=True), service["get_model_loading_status"]()
+            return gr.update(value=f"❌ Error: {str(e)}", visible=True), service["get_model_loading_status"]()
     
     unload_model_btn.click(
         fn=unload_current_model,
@@ -1123,16 +1123,16 @@ def seedvr2_tab(
         """Handle cancel with explicit confirmation check"""
         if not confirm_checked:
             return (
-                gr.Markdown.update(value="⚠️ Cancellation not confirmed. Enable 'Confirm cancel' checkbox and click again."),
-                gr.Textbox.update(value="Cancellation requires confirmation. Please enable the checkbox above."),
+                gr.update(value="⚠️ Cancellation not confirmed. Enable 'Confirm cancel' checkbox and click again."),
+                gr.update(value="Cancellation requires confirmation. Please enable the checkbox above."),
                 state
             )
         
         # User confirmed - proceed with cancellation
         cancel_result = service["cancel_action"]()
         return (
-            gr.Markdown.update(value="⏹️ Cancellation requested. Subprocess will be terminated."),
-            gr.Textbox.update(value="Cancellation signal sent. Process terminating..."),
+            gr.update(value="⏹️ Cancellation requested. Subprocess will be terminated."),
+            gr.update(value="Cancellation signal sent. Process terminating..."),
             state
         )
     
@@ -1176,7 +1176,7 @@ def seedvr2_tab(
     # Update health display from shared state
     def update_health_display(state):
         health_text = state.get("health_banner", {}).get("text", "")
-        return gr.Markdown.update(value=health_text)
+        return gr.update(value=health_text)
 
     shared_state.change(
         fn=update_health_display,
@@ -1196,8 +1196,8 @@ def seedvr2_tab(
                                      path_lower.endswith('.tif') or
                                      'png' in path_lower or
                                      'alpha' in path_lower)
-            return gr.Markdown.update(visible=True)
-        return gr.Markdown.update(visible=False)
+            return gr.update(visible=True)
+        return gr.update(visible=False)
 
     output_format.change(
         fn=update_alpha_warning,
@@ -1215,7 +1215,7 @@ def seedvr2_tab(
     # FPS metadata checking
     def check_fps_metadata(input_path_val):
         if not input_path_val or not input_path_val.strip():
-            return gr.Markdown.update(visible=False)
+            return gr.update(visible=False)
 
         from shared.path_utils import get_media_fps, detect_input_type
         try:
@@ -1223,11 +1223,11 @@ def seedvr2_tab(
             if input_type == "video":
                 fps = get_media_fps(input_path_val)
                 if fps is None or fps <= 0:
-                    return gr.Markdown.update(visible=True)
+                    return gr.update(visible=True)
         except Exception:
-            return gr.Markdown.update(visible=True)
+            return gr.update(visible=True)
 
-        return gr.Markdown.update(visible=False)
+        return gr.update(visible=False)
 
     input_path.change(
         fn=check_fps_metadata,
@@ -1238,13 +1238,13 @@ def seedvr2_tab(
     # Tile validation helpers
     def validate_tile_encode(tile_size, overlap):
         if tile_size > 0 and overlap >= tile_size:
-            return gr.Markdown.update(value=f"⚠️ Encode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
-        return gr.Markdown.update(value="", visible=False)
+            return gr.update(value=f"⚠️ Encode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
+        return gr.update(value="", visible=False)
     
     def validate_tile_decode(tile_size, overlap):
         if tile_size > 0 and overlap >= tile_size:
-            return gr.Markdown.update(value=f"⚠️ Decode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
-        return gr.Markdown.update(value="", visible=False)
+            return gr.update(value=f"⚠️ Decode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
+        return gr.update(value="", visible=False)
     
     # Wire up tile validation
     vae_encode_tile_overlap.change(
@@ -1272,16 +1272,16 @@ def seedvr2_tab(
     def validate_10bit_settings(backend, use_10bit_val):
         """Validate that 10-bit encoding has required backend"""
         if use_10bit_val and backend != "ffmpeg":
-            return gr.Markdown.update(
+            return gr.update(
                 value="⚠️ 10-bit encoding requires 'ffmpeg' backend. Please select 'ffmpeg' from Video Backend dropdown or disable 10-bit encoding.",
                 visible=True
             )
         elif use_10bit_val and backend == "ffmpeg":
-            return gr.Markdown.update(
+            return gr.update(
                 value="✅ 10-bit encoding enabled: Using x265 codec with yuv420p10le pixel format for reduced banding in gradients.",
                 visible=True
             )
-        return gr.Markdown.update(value="", visible=False)
+        return gr.update(value="", visible=False)
     
     # Wire up 10-bit validation
     video_backend.change(
@@ -1308,20 +1308,20 @@ def seedvr2_tab(
         - Multi-GPU compatibility warnings
         """
         if not cuda_device_val or not cuda_device_val.strip():
-            return gr.Markdown.update(value="", visible=False)
+            return gr.update(value="", visible=False)
         
         try:
             import torch
             
             if not torch.cuda.is_available():
-                return gr.Markdown.update(value="⚠️ CUDA not available on this system. GPU acceleration disabled.", visible=True)
+                return gr.update(value="⚠️ CUDA not available on this system. GPU acceleration disabled.", visible=True)
             
             # Parse device spec (handle "all" and comma-separated IDs)
             device_str = str(cuda_device_val).strip()
             
             if device_str.lower() == "all":
                 device_count = torch.cuda.device_count()
-                return gr.Markdown.update(value=f"✅ Using all {device_count} available GPU(s)", visible=True)
+                return gr.update(value=f"✅ Using all {device_count} available GPU(s)", visible=True)
             
             # Parse comma-separated device IDs
             devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
@@ -1342,35 +1342,35 @@ def seedvr2_tab(
                         valid_devices.append(device_id)
             
             if invalid_devices:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"❌ Invalid CUDA device ID(s): {', '.join(invalid_devices)}. Available devices: 0-{device_count-1}",
                     visible=True
                 )
             
             if len(valid_devices) > 1:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"✅ Multi-GPU: Using {len(valid_devices)} GPUs ({', '.join(map(str, valid_devices))})\n⚠️ Note: Multi-GPU disables model caching (cache_dit/cache_vae auto-disabled)",
                     visible=True
                 )
             elif len(valid_devices) == 1:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"✅ Single GPU: Using GPU {valid_devices[0]}",
                     visible=True
                 )
             else:
-                return gr.Markdown.update(value="", visible=False)
+                return gr.update(value="", visible=False)
                 
         except Exception as e:
-            return gr.Markdown.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
+            return gr.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
     
     # Cache + GPU validation (enhanced with comprehensive checks)
     def validate_cache_gpu(cache_dit_val, cache_vae_val, cuda_device_val):
         if not cuda_device_val:
-            return gr.Markdown.update(value="", visible=False)
+            return gr.update(value="", visible=False)
         devices = [d.strip() for d in str(cuda_device_val).split(",") if d.strip()]
         if len(devices) > 1 and (cache_dit_val or cache_vae_val):
-            return gr.Markdown.update(value="⚠️ Model caching (cache_dit/cache_vae) only works with single GPU. Multi-GPU detected - caching will be auto-disabled.", visible=True)
-        return gr.Markdown.update(value="", visible=False)
+            return gr.update(value="⚠️ Model caching (cache_dit/cache_vae) only works with single GPU. Multi-GPU detected - caching will be auto-disabled.", visible=True)
+        return gr.update(value="", visible=False)
     
     # Wire up LIVE CUDA device validation (validates on every change)
     cuda_device.change(
@@ -1402,13 +1402,13 @@ def seedvr2_tab(
         from shared.input_detector import detect_input
         
         if not input_path_val or not input_path_val.strip():
-            return gr.Markdown.update(value="⚠️ No input path provided", visible=True)
+            return gr.update(value="⚠️ No input path provided", visible=True)
         
         try:
             input_info = detect_input(input_path_val)
             
             if not input_info.is_valid:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"❌ **Invalid Input**\n\n{input_info.error_message}",
                     visible=True
                 )
@@ -1429,10 +1429,10 @@ def seedvr2_tab(
                 info_lines.append(f"\n**Format:** {input_info.format.upper()}")
             
             result_md = "\n".join(info_lines)
-            return gr.Markdown.update(value=result_md, visible=True)
+            return gr.update(value=result_md, visible=True)
             
         except Exception as e:
-            return gr.Markdown.update(
+            return gr.update(
                 value=f"❌ **Detection Error**\n\n{str(e)}",
                 visible=True
             )
@@ -1474,8 +1474,8 @@ def seedvr2_tab(
     def validate_batch_size_ui(val):
         is_valid, message, corrected = validate_batch_size_seedvr2(val)
         if not is_valid:
-            return corrected, gr.Markdown.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
-        return val, gr.Markdown.update(value="", visible=False)
+            return corrected, gr.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
+        return val, gr.update(value="", visible=False)
     
     batch_size.change(
         fn=validate_batch_size_ui,
@@ -1487,8 +1487,8 @@ def seedvr2_tab(
     def validate_resolution_ui(val):
         is_valid, message, corrected = validate_resolution(val, must_be_multiple_of=16)
         if not is_valid:
-            return corrected, gr.Markdown.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
-        return val, gr.Markdown.update(value="", visible=False)
+            return corrected, gr.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
+        return val, gr.update(value="", visible=False)
     
     resolution.change(
         fn=validate_resolution_ui,
@@ -1500,7 +1500,7 @@ def seedvr2_tab(
     def auto_estimate_chunks(input_path_val, state):
         """Automatically estimate chunks based on Resolution tab settings and current input"""
         if not input_path_val or not input_path_val.strip():
-            return gr.Markdown.update(value="", visible=False), state
+            return gr.update(value="", visible=False), state
         
         # Get chunk settings from Resolution tab (via shared state)
         seed_controls = state.get("seed_controls", {})
@@ -1508,7 +1508,7 @@ def seedvr2_tab(
         
         if chunk_size_sec <= 0:
             # PySceneDetect chunking disabled
-            return gr.Markdown.update(value="", visible=False), state
+            return gr.update(value="", visible=False), state
         
         # Calculate chunk estimate
         try:
@@ -1516,11 +1516,11 @@ def seedvr2_tab(
             
             input_type = detect_input_type(input_path_val)
             if input_type != "video":
-                return gr.Markdown.update(value="", visible=False), state
+                return gr.update(value="", visible=False), state
             
             duration = get_media_duration_seconds(input_path_val)
             if not duration or duration <= 0:
-                return gr.Markdown.update(value="⚠️ Could not detect video duration for chunk estimation", visible=True), state
+                return gr.update(value="⚠️ Could not detect video duration for chunk estimation", visible=True), state
             
             chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0.5) or 0.5)
             
@@ -1540,10 +1540,10 @@ def seedvr2_tab(
                 "💡 *Actual chunk count may vary based on scene detection (cuts, transitions)*"
             ]
             
-            return gr.Markdown.update(value="\n".join(info_lines), visible=True), state
+            return gr.update(value="\n".join(info_lines), visible=True), state
             
         except Exception as e:
-            return gr.Markdown.update(value=f"⚠️ Estimation error: {str(e)[:100]}", visible=True), state
+            return gr.update(value=f"⚠️ Estimation error: {str(e)[:100]}", visible=True), state
     
     # Wire up automatic chunk estimation
     input_path.change(
@@ -1559,6 +1559,5 @@ def seedvr2_tab(
         outputs=[chunk_estimate_display, shared_state]
     )
 
-    # Initialize comparison slider and model status
-    comparison_note.update(service["comparison_html_slider"]())
-    model_status.update(initialize_model_status())
+    # Note: In Gradio 6.2.0, component.update() is removed
+    # Components are initialized with their default values in constructors above

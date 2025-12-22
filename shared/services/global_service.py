@@ -79,7 +79,7 @@ def save_global_settings(output_dir_val: str, temp_dir_val: str, telemetry_enabl
         status_lines.append("💡 Models will download to new location on next run.")
         status_lines.append("To keep existing models, manually copy them from old to new location.")
 
-    return gr.Markdown.update(value="\n".join(status_lines)), state or {}
+    return gr.update(value="\n".join(status_lines)), state or {}
 
 
 def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager: PresetManager, global_settings: dict, state: dict = None):
@@ -109,7 +109,7 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         return (
             gr.Radio.update(value=current),  # Force radio back to in_app
             gr.Checkbox.update(value=False),  # Uncheck confirmation
-            gr.Markdown.update(value=(
+            gr.update(value=(
                 "🔒 **In-app mode is active and locked**\n\n"
                 "You cannot switch back to subprocess mode without restarting the application.\n\n"
                 "**Why?** In-app mode keeps models loaded in VRAM. Switching back would require "
@@ -124,7 +124,7 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         return (
             gr.Radio.update(value=current),  # Keep current mode
             gr.Checkbox.update(value=False),
-            gr.Markdown.update(value=(
+            gr.update(value=(
                 "⚠️ **Confirmation required to switch to in-app mode**\n\n"
                 "Please check the confirmation checkbox to proceed.\n\n"
                 "**Important:** Once you switch to in-app mode, you cannot switch back without restarting the app.\n\n"
@@ -143,7 +143,7 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         return (
             gr.Radio.update(value=current),
             gr.Checkbox.update(value=False),
-            gr.Markdown.update(value=f"ℹ️ Already in {current} mode. No change needed."),
+            gr.update(value=f"ℹ️ Already in {current} mode. No change needed."),
             state
         )
     
@@ -157,7 +157,7 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
             return (
                 gr.Radio.update(value=current),
                 gr.Checkbox.update(value=False),
-                gr.Markdown.update(value=f"❌ Mode switch failed: Expected {mode_choice}, got {actual_mode}"),
+                gr.update(value=f"❌ Mode switch failed: Expected {mode_choice}, got {actual_mode}"),
                 state
             )
         
@@ -198,7 +198,7 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         return (
             gr.Radio.update(value=actual_mode),
             gr.Checkbox.update(value=False),  # Uncheck after successful apply
-            gr.Markdown.update(value=success_msg),
+            gr.update(value=success_msg),
             state
         )
         
@@ -207,7 +207,7 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         return (
             gr.Radio.update(value=current),
             gr.Checkbox.update(value=False),
-            gr.Markdown.update(value=f"❌ Invalid mode: {str(e)}"),
+            gr.update(value=f"❌ Invalid mode: {str(e)}"),
             state
         )
     except Exception as exc:
@@ -215,7 +215,7 @@ def apply_mode_selection(mode_choice: str, confirm: bool, runner, preset_manager
         return (
             gr.Radio.update(value=current),
             gr.Checkbox.update(value=False),
-            gr.Markdown.update(value=f"❌ Mode change failed: {str(exc)}"),
+            gr.update(value=f"❌ Mode change failed: {str(exc)}"),
             state
         )
 
@@ -230,14 +230,14 @@ def open_outputs_folder(path: str):
             subprocess.run(["open", str(path_obj)])
         else:
             subprocess.run(["xdg-open", str(path_obj)])
-        return gr.Markdown.update(value=f"Opened: {path_obj}")
+        return gr.update(value=f"Opened: {path_obj}")
     except Exception as exc:
-        return gr.Markdown.update(value=f"⚠️ Could not open folder: {exc}")
+        return gr.update(value=f"⚠️ Could not open folder: {exc}")
 
 
 def clear_temp_folder(path: str, confirm: bool = False):
     if not confirm:
-        return gr.Markdown.update(value="⚠️ Enable 'Confirm delete' before clearing temp.")
+        return gr.update(value="⚠️ Enable 'Confirm delete' before clearing temp.")
     target = Path(path)
     if target.exists():
         for child in target.iterdir():
@@ -246,6 +246,6 @@ def clear_temp_folder(path: str, confirm: bool = False):
             else:
                 import shutil
                 shutil.rmtree(child, ignore_errors=True)
-    return gr.Markdown.update(value=f"Temp cleared at {target}")
+    return gr.update(value=f"Temp cleared at {target}")
 
 

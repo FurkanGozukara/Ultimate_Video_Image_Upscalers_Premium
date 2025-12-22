@@ -222,14 +222,14 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
 
                 temporal_padding = gr.Number(
                     label="Temporal Padding",
-                    value=values[11],
+                    value=values[14],
                     precision=0,
                     info="Extra frames for temporal processing"
                 )
 
                 frame_interpolation = gr.Checkbox(
                     label="Enable Frame Interpolation",
-                    value=values[12],
+                    value=values[15],
                     info="Smooth motion between frames"
                 )
 
@@ -241,32 +241,32 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                 comparison_mode = gr.Dropdown(
                     label="Comparison Mode",
                     choices=["native", "slider", "side_by_side", "overlay"],
-                    value=values[13],
+                    value=values[16],
                     info="How to display before/after comparison"
                 )
 
                 pin_reference = gr.Checkbox(
                     label="Pin Reference Image",
-                    value=values[14],
+                    value=values[17],
                     info="Keep original as fixed reference when changing settings"
                 )
 
                 fullscreen_enabled = gr.Checkbox(
                     label="Enable Fullscreen Comparison",
-                    value=values[15],
+                    value=values[18],
                     info="Allow fullscreen viewing of comparisons"
                 )
 
                 comparison_zoom = gr.Slider(
                     label="Default Zoom Level",
                     minimum=25, maximum=400, step=25,
-                    value=values[16],
+                    value=values[19],
                     info="Default zoom percentage for comparison viewer"
                 )
 
                 show_difference = gr.Checkbox(
                     label="Show Difference Overlay",
-                    value=values[17],
+                    value=values[20],
                     info="Highlight differences between original and upscaled"
                 )
 
@@ -277,27 +277,27 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
             with gr.Group():
                 save_metadata = gr.Checkbox(
                     label="Save Processing Metadata",
-                    value=values[18],
+                    value=values[21],
                     info="Embed processing info in output files"
                 )
 
                 metadata_format = gr.Dropdown(
                     label="Metadata Format",
                     choices=["json", "xml", "exif", "none"],
-                    value=values[19],
+                    value=values[22],
                     info="Format for embedded metadata"
                 )
 
                 telemetry_enabled = gr.Checkbox(
                     label="Enable Run Telemetry",
-                    value=values[20],
+                    value=values[23],
                     info="Log processing stats for troubleshooting"
                 )
 
                 log_level = gr.Dropdown(
                     label="Log Verbosity",
                     choices=["error", "warning", "info", "debug"],
-                    value=values[21],
+                    value=values[24],
                     info="Detail level for processing logs"
                 )
 
@@ -377,7 +377,7 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     # Wire up callbacks
     def refresh_presets(model):
         presets = preset_manager.list_presets("output", model)
-        return gr.Dropdown.update(choices=presets, value="")
+        return gr.update(choices=presets, value="")
 
     model_selector.change(
         fn=refresh_presets,
@@ -438,12 +438,12 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     def cache_png_wrapper(padding, basename, state):
         msg1, state1 = service["cache_png_padding"](padding, state)
         msg2, state2 = service["cache_png_basename"](basename, state1)
-        return gr.Markdown.update(value=msg1 + "\n" + msg2), state2
+        return gr.update(value=msg1 + "\n" + msg2), state2
     
     def cache_skip_wrapper(skip_val, cap_val, state):
         msg1, state1 = service["cache_skip"](skip_val, state)
         msg2, state2 = service["cache_cap"](cap_val, state1)
-        return gr.Markdown.update(value=msg1 + "\n" + msg2), state2
+        return gr.update(value=msg1 + "\n" + msg2), state2
     
     cache_fps_btn.click(
         fn=cache_fps_wrapper,

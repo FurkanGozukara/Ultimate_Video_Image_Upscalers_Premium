@@ -231,7 +231,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     # Wire up callbacks
     def refresh_presets(model):
         presets = preset_manager.list_presets("resolution", model)
-        return gr.Dropdown.update(choices=presets, value="")
+        return gr.update(choices=presets, value="")
 
     model_selector.change(
         fn=refresh_presets,
@@ -270,7 +270,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
             # Try to get from shared state
             input_path = state.get("seed_controls", {}).get("last_input_path", "")
             if not input_path:
-                return "⚠️ No input path provided. Upload in SeedVR2 tab or enter path above.", state, gr.Markdown.update(visible=False)
+                return "⚠️ No input path provided. Upload in SeedVR2 tab or enter path above.", state, gr.update(visible=False)
         
         # Call service function
         info, updated_state = service["calculate_auto_resolution"](
@@ -284,7 +284,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
             state
         )
         
-        return gr.Markdown.update(value=info, visible=True), updated_state, gr.Markdown.update(visible=False)
+        return gr.update(value=info, visible=True), updated_state, gr.update(visible=False)
 
     def calculate_chunks_wrapper(input_path, chunk_size, chunk_overlap, state):
         """Wrapper for chunk estimation"""
@@ -303,9 +303,9 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         # Check for disk space warnings in the info
         if "⚠️" in info and "disk space" in info.lower():
             disk_warning = "⚠️ **DISK SPACE WARNING**: Insufficient space detected!"
-            return gr.Markdown.update(value=info, visible=True), updated_state, gr.Markdown.update(value=disk_warning, visible=True)
+            return gr.update(value=info, visible=True), updated_state, gr.update(value=disk_warning, visible=True)
         
-        return gr.Markdown.update(value=info, visible=True), updated_state, gr.Markdown.update(visible=False)
+        return gr.update(value=info, visible=True), updated_state, gr.update(visible=False)
 
     calc_resolution_btn.click(
         fn=calculate_resolution_wrapper,
@@ -325,9 +325,9 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     def use_seedvr2_input(state):
         input_path = state.get("seed_controls", {}).get("last_input_path", "")
         if input_path:
-            return gr.Textbox.update(value=input_path), gr.Markdown.update(value=f"✅ Using input from SeedVR2 tab: {input_path}", visible=True)
+            return gr.update(value=input_path), gr.update(value=f"✅ Using input from SeedVR2 tab: {input_path}", visible=True)
         else:
-            return gr.Textbox.update(), gr.Markdown.update(value="⚠️ No input set in SeedVR2 tab yet", visible=True)
+            return gr.update(), gr.update(value="⚠️ No input set in SeedVR2 tab yet", visible=True)
 
     use_seedvr2_input_btn.click(
         fn=use_seedvr2_input,
@@ -338,6 +338,6 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     # Auto-update calculation when settings change
     for component in [target_resolution, max_target_resolution, auto_resolution, enable_max_target, ratio_downscale_then_upscale]:
         component.change(
-            fn=lambda *args: gr.Markdown.update(value="ℹ️ Settings changed. Click 'Calculate Resolution' to update.", visible=True),
+            fn=lambda *args: gr.update(value="ℹ️ Settings changed. Click 'Calculate Resolution' to update.", visible=True),
             outputs=calc_result
         )

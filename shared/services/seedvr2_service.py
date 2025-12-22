@@ -1135,7 +1135,7 @@ def build_seedvr2_callbacks(
         last_used = preset_manager.get_last_used_name("seedvr2", model_name)
         preferred = select_name if select_name in presets else None
         value = preferred or (last_used if last_used in presets else (presets[-1] if presets else None))
-        return gr.Dropdown.update(choices=presets, value=value)
+        return gr.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, model_name: str, *args):
         """
@@ -1144,7 +1144,7 @@ def build_seedvr2_callbacks(
         Validates that args length matches SEEDVR2_ORDER to catch integration bugs early.
         """
         if not preset_name.strip():
-            return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
+            return gr.update(), gr.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
             # Validate component count matches ORDER
@@ -1155,7 +1155,7 @@ def build_seedvr2_callbacks(
                     f"Preset saving aborted to prevent corruption."
                 )
                 error_logger.error(error_msg)
-                return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ {error_msg[:200]}..."), *list(args)
+                return gr.update(), gr.update(value=f"❌ {error_msg[:200]}..."), *list(args)
             
             payload = _seedvr2_dict_from_args(list(args))
             validated_payload = _enforce_seedvr2_guardrails(payload, defaults, state=None)
@@ -1167,9 +1167,9 @@ def build_seedvr2_callbacks(
             current_map = dict(zip(SEEDVR2_ORDER, list(args)))
             loaded_vals = _apply_preset_to_values(validated_payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
         except Exception as e:
-            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
         """
@@ -1191,11 +1191,11 @@ def build_seedvr2_callbacks(
             
             # Return values + status message (status is second-to-last, before shared_state)
             status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
-            return (*values, gr.Markdown.update(value=status_msg))
+            return (*values, gr.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
             # Return current values + error status
-            return (*current_values, gr.Markdown.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values, gr.update(value=f"❌ Error: {str(e)}"))
 
     def safe_defaults():
         """Get safe default values."""
@@ -1206,9 +1206,9 @@ def build_seedvr2_callbacks(
         temp_dir_path = Path(global_settings["temp_dir"])
         available, message = check_resume_available(temp_dir_path, output_format or "mp4")
         if available:
-            return gr.Markdown.update(value=f"✅ {message}", visible=True)
+            return gr.update(value=f"✅ {message}", visible=True)
         else:
-            return gr.Markdown.update(value=f"ℹ️ {message}", visible=True)
+            return gr.update(value=f"ℹ️ {message}", visible=True)
 
     def cancel():
         """
@@ -1221,7 +1221,7 @@ def build_seedvr2_callbacks(
         """
         canceled = runner.cancel()
         if not canceled:
-            return gr.Markdown.update(value="No active process to cancel"), ""
+            return gr.update(value="No active process to cancel"), ""
 
         # Check multiple locations for partial outputs:
         # 1. External chunked processing (PySceneDetect chunks) - PREFERRED (uses proper merge)
@@ -1364,12 +1364,12 @@ def build_seedvr2_callbacks(
             }.get(merge_method, "Unknown merge method")
             
             return (
-                gr.Markdown.update(value=f"⏹️ Cancelled - Partial output saved: {Path(compiled_output).name}\n**Merge method:** {merge_info}"),
+                gr.update(value=f"⏹️ Cancelled - Partial output saved: {Path(compiled_output).name}\n**Merge method:** {merge_info}"),
                 f"Partial results saved to: {compiled_output}\n\nMerge method: {merge_info}"
             )
         else:
             return (
-                gr.Markdown.update(value="⏹️ Cancelled - No partial outputs found"),
+                gr.update(value="⏹️ Cancelled - No partial outputs found"),
                 "Processing was cancelled. No recoverable partial outputs were found in temp directories."
             )
 
@@ -1418,7 +1418,7 @@ def build_seedvr2_callbacks(
             return (
                 gr.Slider.update(),
                 gr.Slider.update(),
-                gr.Markdown.update(value="Provide an input to auto-calc resolution/chunks."),
+                gr.update(value="Provide an input to auto-calc resolution/chunks."),
                 state
             )
 
@@ -1427,7 +1427,7 @@ def build_seedvr2_callbacks(
             return (
                 gr.Slider.update(),
                 gr.Slider.update(),
-                gr.Markdown.update(value="Input path not found; keeping current resolution."),
+                gr.update(value="Input path not found; keeping current resolution."),
                 state
             )
 
@@ -1474,7 +1474,7 @@ def build_seedvr2_callbacks(
         return (
             gr.Slider.update(value=new_res),
             gr.Slider.update(value=max_target_res),
-            gr.Markdown.update(value="\n".join(msg_lines)),
+            gr.update(value="\n".join(msg_lines)),
             state
         )
 

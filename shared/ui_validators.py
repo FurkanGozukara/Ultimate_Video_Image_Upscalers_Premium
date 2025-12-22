@@ -215,26 +215,26 @@ def create_validation_callback(validator_func, update_component_func=None):
             if update_component_func:
                 return (
                     update_component_func(corrected),
-                    gr.Markdown.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
+                    gr.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
                 )
             else:
                 return (
                     corrected,
-                    gr.Markdown.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
+                    gr.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
                 )
         elif not is_valid:
             # Return error message
             import gradio as gr
             return (
                 value,
-                gr.Markdown.update(value=f"<span style='color: red;'>{message}</span>", visible=True)
+                gr.update(value=f"<span style='color: red;'>{message}</span>", visible=True)
             )
         else:
             # Valid
             import gradio as gr
             return (
                 value,
-                gr.Markdown.update(value="", visible=False)
+                gr.update(value="", visible=False)
             )
     
     return callback

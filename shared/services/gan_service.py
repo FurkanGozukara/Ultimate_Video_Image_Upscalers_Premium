@@ -273,18 +273,18 @@ def build_gan_callbacks(
         last_used = preset_manager.get_last_used_name("gan", model_name)
         preferred = select_name if select_name in presets else None
         value = preferred or (last_used if last_used in presets else (presets[-1] if presets else None))
-        return gr.Dropdown.update(choices=presets, value=value)
+        return gr.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
         """Save preset with validation"""
         if not preset_name.strip():
-            return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
+            return gr.update(), gr.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
             # Validate component count
             if len(args) != len(GAN_ORDER):
                 error_msg = f"⚠️ Preset mismatch: {len(args)} values vs {len(GAN_ORDER)} expected. Check inputs_list in gan_tab.py"
-                return gr.Dropdown.update(), gr.Markdown.update(value=error_msg), *list(args)
+                return gr.update(), gr.update(value=error_msg), *list(args)
             
             payload = _gan_dict_from_args(list(args))
             model_name = payload["model"]
@@ -294,9 +294,9 @@ def build_gan_callbacks(
             current_map = dict(zip(GAN_ORDER, list(args)))
             loaded_vals = _apply_gan_preset(payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
         except Exception as e:
-            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
         """
@@ -320,11 +320,11 @@ def build_gan_callbacks(
             
             # Return values + status message (status is LAST)
             status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
-            return (*values, gr.Markdown.update(value=status_msg))
+            return (*values, gr.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
             # Return current values + error status
-            return (*current_values, gr.Markdown.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values, gr.update(value=f"❌ Error: {str(e)}"))
 
     def safe_defaults():
         return [defaults[k] for k in GAN_ORDER]
@@ -439,13 +439,13 @@ def build_gan_callbacks(
             yield (
                 "❌ ffmpeg not found in PATH",
                 ffmpeg_msg or "Install ffmpeg and add to PATH before processing",
-                gr.Markdown.update(value="", visible=False),
+                gr.update(value="", visible=False),
                 None,
                 None,
                 "ffmpeg missing",
-                gr.ImageSlider.update(value=None),
-                gr.HTML.update(value="", visible=False),
-                gr.Gallery.update(visible=False),
+                gr.update(value=None),
+                gr.update(value="", visible=False),
+                gr.update(visible=False),
                 state or {}
             )
             return
@@ -457,13 +457,13 @@ def build_gan_callbacks(
             yield (
                 "❌ Insufficient disk space",
                 space_warning or f"Free up disk space before processing. Required: 5GB+, Available: {output_path_check}",
-                gr.Markdown.update(value="", visible=False),
+                gr.update(value="", visible=False),
                 None,
                 None,
                 "Low disk space",
-                gr.ImageSlider.update(value=None),
-                gr.HTML.update(value="", visible=False),
-                gr.Gallery.update(visible=False),
+                gr.update(value=None),
+                gr.update(value="", visible=False),
+                gr.update(visible=False),
                 state or {}
             )
             return
@@ -484,7 +484,7 @@ def build_gan_callbacks(
             outputs = []
             logs = []
             last_cmp = ""
-            last_slider = gr.ImageSlider.update(value=None)
+            last_slider = gr.update(value=None)
             
             # Create batch jobs
             jobs = []
@@ -617,11 +617,11 @@ def build_gan_callbacks(
             inp = normalize_path(upload if upload else settings["input_path"])
             if settings.get("batch_enable"):
                 if not inp or not Path(inp).exists() or not Path(inp).is_dir():
-                    yield ("❌ Batch input folder missing", "", gr.Markdown.update(value="", visible=False), None, None, "Error", gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), gr.Gallery.update(visible=False), state)
+                    yield ("❌ Batch input folder missing", "", gr.update(value="", visible=False), None, None, "Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
                     return
             else:
                 if not inp or not Path(inp).exists():
-                    yield ("❌ Input missing", "", gr.Markdown.update(value="", visible=False), None, None, "Error", gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), gr.Gallery.update(visible=False), state)
+                    yield ("❌ Input missing", "", gr.update(value="", visible=False), None, None, "Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
                     return
 
             settings["input_path"] = inp
@@ -633,20 +633,20 @@ def build_gan_callbacks(
 
             cuda_warn = validate_cuda_device_spec(settings.get("cuda_device", ""))
             if cuda_warn:
-                yield (f"⚠️ {cuda_warn}", "", gr.Markdown.update(value="", visible=False), None, None, "CUDA Error", gr.ImageSlider.update(value=None), gr.HTML.update(value="", visible=False), gr.Gallery.update(visible=False), state)
+                yield (f"⚠️ {cuda_warn}", "", gr.update(value="", visible=False), None, None, "CUDA Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
                 return
             devices = [d.strip() for d in str(settings.get("cuda_device") or "").split(",") if d.strip()]
             if len(devices) > 1:
                 yield (
                     "⚠️ GAN backends currently use a single GPU; select one CUDA device.",
                     "",
-                    gr.Markdown.update(value="", visible=False),
+                    gr.update(value="", visible=False),
                     None,
                     None,
                     "Multi-GPU Error",
-                    gr.ImageSlider.update(value=None),
-                    gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),
+                    gr.update(value=None),
+                    gr.update(value="", visible=False),
+                    gr.update(visible=False),
                     state
                 )
                 return
@@ -743,8 +743,8 @@ def build_gan_callbacks(
                 status = "✅ GAN chunked upscale complete" if rc == 0 else f"⚠️ GAN chunking failed (code {rc})"
                 
                 # Build comparison for chunked output
-                video_comp_html_update = gr.HTML.update(value="", visible=False)
-                slider_update = gr.ImageSlider.update(value=None)
+                video_comp_html_update = gr.update(value="", visible=False)
+                slider_update = gr.update(value=None)
                 
                 if final_output and Path(final_output).exists():
                     if Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'):
@@ -754,20 +754,20 @@ def build_gan_callbacks(
                             height=600,
                             slider_position=50.0
                         )
-                        video_comp_html_update = gr.HTML.update(value=video_comp_html_value, visible=True)
+                        video_comp_html_update = gr.update(value=video_comp_html_value, visible=True)
                     elif not Path(final_output).is_dir():
-                        slider_update = gr.ImageSlider.update(value=(settings["input_path"], final_output), visible=True)
+                        slider_update = gr.update(value=(settings["input_path"], final_output), visible=True)
                 
                 yield (
                     status,
                     clog,
-                    gr.Markdown.update(value="", visible=False),
+                    gr.update(value="", visible=False),
                     final_output if final_output and Path(final_output).suffix.lower() in ('.png', '.jpg', '.jpeg') else None,
                     final_output if final_output and Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv') else None,
                     f"Processed {chunk_count} chunks via PySceneDetect",
                     slider_update,
                     video_comp_html_update,
-                    gr.Gallery.update(visible=False),
+                    gr.update(visible=False),
                     state
                 )
                 return
@@ -793,7 +793,7 @@ def build_gan_callbacks(
             # Define run_single function (moved outside try block)
             def run_single(prepped_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
                 if cancel_event.is_set():
-                    return ("⏹️ Canceled", "\n".join(["Canceled before start"]), None, "", gr.ImageSlider.update(value=None), state)
+                    return ("⏹️ Canceled", "\n".join(["Canceled before start"]), None, "", gr.update(value=None), state)
                 header_log = [
                     f"Model: {prepped_settings['model_name']}",
                     f"Backend: {backend_val}",
@@ -809,7 +809,7 @@ def build_gan_callbacks(
                     # Use new unified GAN runner
                     model_path_check = base_dir / "Image_Upscale_Models" / prepped_settings["model_name"]
                     if not model_path_check.exists() and not _is_realesrgan_builtin(prepped_settings["model_name"]):
-                        return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.ImageSlider.update(value=None), state)
+                        return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.update(value=None), state)
                     
                     # Add face restoration settings
                     prepped_settings["face_restore"] = face_apply
@@ -830,7 +830,7 @@ def build_gan_callbacks(
                     err_msg = f"❌ GAN upscale failed: {exc}"
                     if progress_cb:
                         progress_cb(err_msg)
-                    return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.ImageSlider.update(value=None), state)
+                    return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.update(value=None), state)
                 if cancel_event.is_set():
                     status = "⏹️ Canceled"
                 else:
@@ -859,7 +859,7 @@ def build_gan_callbacks(
                     },
                 )
                 cmp_html = ""
-                slider_update = gr.ImageSlider.update(value=None)
+                slider_update = gr.update(value=None)
                 if relocated or result.output_path:
                     src = prepped_settings.get("input_path")
                     outp = relocated or result.output_path
@@ -876,7 +876,7 @@ def build_gan_callbacks(
                             cmp_html = f"<p>PNG frames saved to {outp}</p>"
                         else:
                             # For images, use ImageSlider directly
-                            slider_update = gr.ImageSlider.update(value=(src, outp), visible=True)
+                            slider_update = gr.update(value=(src, outp), visible=True)
                             cmp_html = ""  # No HTML comparison for images, use slider instead
                 return status, full_log, relocated if relocated else (result.output_path if result.output_path else None), cmp_html, slider_update
 
@@ -895,7 +895,7 @@ def build_gan_callbacks(
                     items = image_files + video_files
 
                 if not items:
-                    return ("❌ No media files or frame folders found in batch folder", "", None, "", gr.ImageSlider.update(value=None), state)
+                    return ("❌ No media files or frame folders found in batch folder", "", None, "", gr.update(value=None), state)
                 t = threading.Thread(target=worker_batch, args=(items,), daemon=True)
             else:
                 prepped = maybe_downscale(prepare_single(settings["input_path"]))
@@ -937,11 +937,11 @@ def build_gan_callbacks(
                     last_yield = now
                     live_logs = result_holder.get("live_logs", [])
                     yield (
-                        gr.Markdown.update(value="⏳ Running GAN upscale..."),
+                        gr.update(value="⏳ Running GAN upscale..."),
                         "\n".join(live_logs[-400:]),
                         None,
                         None,
-                        gr.ImageSlider.update(value=None),
+                        gr.update(value=None),
                         state
                     )
                 time.sleep(0.1)
@@ -949,7 +949,7 @@ def build_gan_callbacks(
 
             status, lg, outp, cmp_html, slider_upd = result_holder.get(
                 "payload",
-                ("❌ Failed", "", None, "", gr.ImageSlider.update(value=None)),
+                ("❌ Failed", "", None, "", gr.update(value=None)),
             )
             live_logs = result_holder.get("live_logs", [])
             merged_logs = lg if lg else "\n".join(live_logs)
@@ -962,7 +962,7 @@ def build_gan_callbacks(
                     progress(0, desc="Failed")
             
             # Build video comparison for videos
-            video_comp_html_update = gr.HTML.update(value="", visible=False)
+            video_comp_html_update = gr.update(value="", visible=False)
             if outp and Path(outp).exists() and Path(outp).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'):
                 original_path = settings.get("input_path", "")
                 if original_path and Path(original_path).exists():
@@ -972,18 +972,18 @@ def build_gan_callbacks(
                         height=600,
                         slider_position=50.0
                     )
-                    video_comp_html_update = gr.HTML.update(value=video_comp_html_value, visible=True)
+                    video_comp_html_update = gr.update(value=video_comp_html_value, visible=True)
             
             yield (
                 status,
                 merged_logs,
-                gr.Markdown.update(value="", visible=False),
+                gr.update(value="", visible=False),
                 outp if outp and not Path(outp).is_dir() and Path(outp).suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp') else None,
                 outp if outp and str(outp).endswith(".mp4") else None,
                 f"Output: {outp}" if outp else "No output",
                 slider_upd,
                 video_comp_html_update,
-                gr.Gallery.update(visible=False),
+                gr.update(visible=False),
                 state
             )
         except Exception as e:
@@ -991,13 +991,13 @@ def build_gan_callbacks(
             yield (
                 "❌ Critical error",
                 error_msg,
-                gr.Markdown.update(value="", visible=False),
+                gr.update(value="", visible=False),
                 None,
                 None,
                 "Error",
-                gr.ImageSlider.update(value=None),
-                gr.HTML.update(value="", visible=False),
-                gr.Gallery.update(visible=False),
+                gr.update(value=None),
+                gr.update(value="", visible=False),
+                gr.update(visible=False),
                 state or {}
             )
 
@@ -1048,14 +1048,14 @@ def build_gan_callbacks(
                     compiled_output = str(partial_target)
                 
                 if compiled_output:
-                    return gr.Markdown.update(value=f"⏹️ Cancelled - Partial GAN output compiled: {Path(compiled_output).name}"), f"Partial results saved to: {compiled_output}", state or {}
+                    return gr.update(value=f"⏹️ Cancelled - Partial GAN output compiled: {Path(compiled_output).name}"), f"Partial results saved to: {compiled_output}", state or {}
                 else:
-                    return gr.Markdown.update(value="⏹️ Cancelled - No partial outputs to compile"), "Processing was cancelled before any chunks were completed", state or {}
+                    return gr.update(value="⏹️ Cancelled - No partial outputs to compile"), "Processing was cancelled before any chunks were completed", state or {}
                     
             except Exception as e:
-                return gr.Markdown.update(value=f"⏹️ Cancelled - Error compiling partials: {str(e)}"), "Cancellation successful but partial compilation failed", state or {}
+                return gr.update(value=f"⏹️ Cancelled - Error compiling partials: {str(e)}"), "Cancellation successful but partial compilation failed", state or {}
         
-        return gr.Markdown.update(value="⏹️ GAN processing cancelled"), "No partial outputs found to compile", state or {}
+        return gr.update(value="⏹️ GAN processing cancelled"), "No partial outputs found to compile", state or {}
 
     def get_model_scale(model_name: str) -> int:
         """Get the scale factor for a specific model"""

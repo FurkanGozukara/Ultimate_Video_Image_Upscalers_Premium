@@ -95,10 +95,10 @@ def _get_aspect_ratio_str(aspect_ratio: float) -> Tuple[int, int]:
 
 def chunk_estimate(chunk_size: float, chunk_overlap: float):
     if chunk_size <= 0:
-        return gr.Markdown.update(value="Chunking disabled.")
+        return gr.update(value="Chunking disabled.")
     if chunk_overlap >= chunk_size:
-        return gr.Markdown.update(value="⚠️ Chunk overlap must be smaller than chunk size.")
-    return gr.Markdown.update(
+        return gr.update(value="⚠️ Chunk overlap must be smaller than chunk size.")
+    return gr.update(
         value=f"Chunking enabled: size={chunk_size}s, overlap={chunk_overlap}s. Estimated chunks = ceil(duration / (size-overlap))."
     )
 
@@ -120,11 +120,11 @@ def build_resolution_callbacks(
         last_used = preset_manager.get_last_used_name("resolution", model_name)
         preferred = select_name if select_name in presets else None
         value = preferred or (last_used if last_used in presets else (presets[-1] if presets else None))
-        return gr.Dropdown.update(choices=presets, value=value)
+        return gr.update(choices=presets, value=value)
 
     def save_preset(preset_name: str, *args):
         if not preset_name.strip():
-            return gr.Dropdown.update(), gr.Markdown.update(value="⚠️ Enter a preset name before saving"), *list(args)
+            return gr.update(), gr.update(value="⚠️ Enter a preset name before saving"), *list(args)
 
         try:
             payload = _res_dict_from_args(list(args))
@@ -135,9 +135,9 @@ def build_resolution_callbacks(
             current_map = dict(zip(RESOLUTION_ORDER, list(args)))
             loaded_vals = _apply_resolution_preset(payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.Markdown.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
         except Exception as e:
-            return gr.Dropdown.update(), gr.Markdown.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
         """
@@ -158,11 +158,11 @@ def build_resolution_callbacks(
             
             # Return values + status message (status is LAST)
             status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
-            return (*values, gr.Markdown.update(value=status_msg))
+            return (*values, gr.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
             # Return current values + error status
-            return (*current_values, gr.Markdown.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values, gr.update(value=f"❌ Error: {str(e)}"))
 
     def safe_defaults():
         return [defaults[k] for k in RESOLUTION_ORDER]
@@ -339,14 +339,14 @@ def build_resolution_callbacks(
         if model_name:
             status_msg += f"\n💾 Settings also saved for model: {model_name}"
         
-        return gr.Markdown.update(value=status_msg), state
+        return gr.update(value=status_msg), state
 
     def estimate_from_input(size, ov, state):
         """Estimate chunks from cached input path in shared state"""
         seed_controls = state.get("seed_controls", {})
         path = seed_controls.get("last_input_path")
         if not path:
-            return gr.Markdown.update(value="Provide input path (upload or textbox) to estimate chunks."), state
+            return gr.update(value="Provide input path (upload or textbox) to estimate chunks."), state
         path = normalize_path(path)
         dur = get_media_duration_seconds(path) if path else None
         if not dur:
@@ -356,13 +356,13 @@ def build_resolution_callbacks(
         import math
 
         est = math.ceil(dur / max(0.001, size - ov))
-        return gr.Markdown.update(value=f"Duration ~{dur:.1f}s → est. {est} chunks (size {size}s, overlap {ov}s)."), state
+        return gr.update(value=f"Duration ~{dur:.1f}s → est. {est} chunks (size {size}s, overlap {ov}s)."), state
 
     def cache_resolution(t_res, m_res, model, state):
         model_cache = _ensure_model_cache(model, state)
         model_cache["resolution_val"] = t_res
         model_cache["max_resolution_val"] = m_res
-        return gr.Markdown.update(value=f"Resolution cached for {model}."), state
+        return gr.update(value=f"Resolution cached for {model}."), state
 
     def cache_resolution_flags(auto_res, enable_max, chunk_sz, chunk_ov, ratio_down, per_cleanup, scene_thresh, min_scene, model, state):
         model_cache = _ensure_model_cache(model, state)
@@ -374,7 +374,7 @@ def build_resolution_callbacks(
         model_cache["per_chunk_cleanup"] = per_cleanup
         model_cache["scene_threshold"] = float(scene_thresh or 27.0)
         model_cache["min_scene_len"] = float(min_scene or 2.0)
-        return gr.Markdown.update(value=f"Resolution options cached for {model}."), state
+        return gr.update(value=f"Resolution options cached for {model}."), state
 
     return {
         "defaults": defaults,

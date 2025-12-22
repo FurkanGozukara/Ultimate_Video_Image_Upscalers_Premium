@@ -111,8 +111,7 @@ def gan_tab(
                 input_file = gr.File(
                     label="Upload Image or Video",
                     type="filepath",
-                    file_types=["image", "video"],
-                    info="Upload single image or video (videos processed frame-by-frame)"
+                    file_types=["image", "video"]
                 )
                 input_path = gr.Textbox(
                     label="Image/Video Path",
@@ -321,19 +320,19 @@ def gan_tab(
                 label="📋 Processing Log",
                 value="",
                 lines=10,
-                show_copy_button=True
+                buttons=["copy"]
             )
 
             # Output displays
             output_image = gr.Image(
                 label="🖼️ Upscaled Image",
                 interactive=False,
-                show_download_button=True
+                buttons=["download"]
             )
             output_video = gr.Video(
                 label="🎬 Upscaled Video",
                 interactive=False,
-                show_download_button=True
+                buttons=["download"]
             )
 
             # Enhanced comparison
@@ -454,19 +453,19 @@ def gan_tab(
     def validate_cuda_device_live_gan(cuda_device_val):
         """Live CUDA validation for GAN models (enforces single GPU)"""
         if not cuda_device_val or not cuda_device_val.strip():
-            return gr.Markdown.update(value="", visible=False)
+            return gr.update(value="", visible=False)
         
         try:
             import torch
             
             if not torch.cuda.is_available():
-                return gr.Markdown.update(value="⚠️ CUDA not available. GPU acceleration disabled.", visible=True)
+                return gr.update(value="⚠️ CUDA not available. GPU acceleration disabled.", visible=True)
             
             device_str = str(cuda_device_val).strip()
             device_count = torch.cuda.device_count()
             
             if device_str.lower() == "all":
-                return gr.Markdown.update(value=f"⚠️ GAN models use single GPU. 'all' will use GPU 0 (of {device_count} available)", visible=True)
+                return gr.update(value=f"⚠️ GAN models use single GPU. 'all' will use GPU 0 (of {device_count} available)", visible=True)
             
             devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
             
@@ -484,25 +483,25 @@ def gan_tab(
                         valid_devices.append(device_id)
             
             if invalid_devices:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"❌ Invalid device ID(s): {', '.join(invalid_devices)}. Available: 0-{device_count-1}",
                     visible=True
                 )
             
             if len(valid_devices) > 1:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"⚠️ GAN models use single GPU. Will use GPU {valid_devices[0]} (ignoring others)",
                     visible=True
                 )
             elif len(valid_devices) == 1:
-                return gr.Markdown.update(
+                return gr.update(
                     value=f"✅ Using GPU {valid_devices[0]}",
                     visible=True
                 )
             
-            return gr.Markdown.update(value="", visible=False)
+            return gr.update(value="", visible=False)
         except Exception as e:
-            return gr.Markdown.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
+            return gr.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
     
     # Wire up live CUDA validation
     gpu_device.change(
@@ -514,7 +513,7 @@ def gan_tab(
     # Input handling
     def cache_input(val, state):
         state["seed_controls"]["last_input_path"] = val if val else ""
-        return val or "", gr.Markdown.update(value="✅ Input cached for processing.", visible=True), state
+        return val or "", gr.update(value="✅ Input cached for processing.", visible=True), state
 
     input_file.upload(
         fn=lambda val, state: cache_input(val, state),
@@ -523,7 +522,7 @@ def gan_tab(
     )
 
     input_path.change(
-        fn=lambda val, state: (gr.Markdown.update(value="✅ Input path updated.", visible=True), state),
+        fn=lambda val, state: (gr.update(value="✅ Input path updated.", visible=True), state),
         inputs=[input_path, shared_state],
         outputs=[input_cache_msg, shared_state]
     )
@@ -536,7 +535,7 @@ def gan_tab(
         rows=2,
         height="auto",
         object_fit="contain",
-        show_download_button=True
+        buttons=["download"]
     )
 
     # Main processing with gr.Progress - include input_file upload
@@ -562,8 +561,8 @@ def gan_tab(
     def validate_target_res_ui(val):
         is_valid, message, corrected = validate_resolution(val, must_be_multiple_of=64)
         if not is_valid:
-            return corrected, gr.Markdown.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
-        return val, gr.Markdown.update(value="", visible=False)
+            return corrected, gr.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
+        return val, gr.update(value="", visible=False)
     
     target_resolution.change(
         fn=validate_target_res_ui,
@@ -572,7 +571,7 @@ def gan_tab(
     )
 
     cancel_btn.click(
-        fn=lambda ok, state: (service["cancel_action"](), state) if ok else (gr.Markdown.update(value="⚠️ Enable 'Confirm cancel' to stop."), "", state),
+        fn=lambda ok, state: (service["cancel_action"](), state) if ok else (gr.update(value="⚠️ Enable 'Confirm cancel' to stop."), "", state),
         inputs=[cancel_confirm, shared_state],
         outputs=[status_box, log_box, shared_state]
     )
@@ -620,7 +619,7 @@ def gan_tab(
     
     # Auto-sync preset model selector with main model selection
     gan_model.change(
-        fn=lambda m: gr.Dropdown.update(value=m),
+        fn=lambda m: gr.update(value=m),
         inputs=gan_model,
         outputs=preset_model_selector
     )
@@ -628,7 +627,7 @@ def gan_tab(
     # Refresh presets when preset model selector changes
     def refresh_presets_for_model(model):
         presets = preset_manager.list_presets("gan", model)
-        return gr.Dropdown.update(choices=presets, value="")
+        return gr.update(choices=presets, value="")
     
     preset_model_selector.change(
         fn=refresh_presets_for_model,

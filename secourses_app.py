@@ -158,124 +158,18 @@ def main():
         body_text_size="16px",
         body_text_weight="400",
         button_large_text_size="18px",
+        button_large_text_weight="600",
         button_large_padding="16px 28px",
-        button_primary_text_weight="600",
         button_border_width="2px",
-        button_shadow="0 2px 8px rgba(0,0,0,0.1)",
-        button_shadow_hover="0 4px 12px rgba(0,0,0,0.15)",
+        button_primary_shadow="0 2px 8px rgba(0,0,0,0.1)",
+        button_primary_shadow_hover="0 4px 12px rgba(0,0,0,0.15)",
         input_border_width="2px",
         input_shadow="0 1px 3px rgba(0,0,0,0.05)",
         block_label_text_size="16px",
         block_label_text_weight="600",
         block_title_text_size="18px",
         block_title_text_weight="700",
-        # Spacing for better UX
-        spacing_md="12px",
-        spacing_lg="16px",
-        spacing_xl="20px",
-        # Border radius for modern look
-        radius_sm="6px",
-        radius_md="8px",
-        radius_lg="12px",
     )
-    
-    css_overrides = """
-    /* Enhanced button styling with better visibility */
-    .gr-button { 
-        padding: 14px 20px !important; 
-        font-size: 16px !important; 
-        font-weight: 600 !important;
-        border-radius: 8px !important;
-        transition: all 0.2s ease !important;
-    }
-    .gr-button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
-    }
-    .gr-button-lg { 
-        padding: 18px 28px !important; 
-        font-size: 18px !important;
-        font-weight: 700 !important;
-    }
-    
-    /* Enhanced text readability */
-    .gr-markdown, .gr-textbox label, .gr-number label, .gr-dropdown label, .gr-slider label { 
-        font-size: 16px !important;
-        font-weight: 500 !important;
-        line-height: 1.6 !important;
-        letter-spacing: 0.01em !important;
-    }
-    .gr-markdown p {
-        line-height: 1.7 !important;
-        margin-bottom: 0.8em !important;
-    }
-    
-    /* Tab styling for better navigation */
-    .gr-tab { 
-        font-size: 16px !important; 
-        font-weight: 600 !important;
-        padding: 12px 20px !important;
-        border-radius: 8px 8px 0 0 !important;
-    }
-    .gr-tab.selected {
-        font-weight: 700 !important;
-    }
-    
-    /* Form spacing */
-    .gr-form { gap: 18px !important; }
-    .gr-panel { padding: 20px !important; }
-    
-    /* Status banners with gradients */
-    .health-banner { 
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-        color: white; 
-        padding: 16px 20px !important; 
-        border-radius: 10px !important; 
-        margin: 12px 0 !important;
-        font-size: 15px !important;
-        font-weight: 500 !important;
-        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3) !important;
-    }
-    
-    /* Colored text helpers */
-    .warning-text { color: #fa5252 !important; font-weight: 600 !important; }
-    .success-text { color: #51cf66 !important; font-weight: 600 !important; }
-    .info-text { color: #339af0 !important; font-weight: 600 !important; }
-    
-    /* Model status display */
-    .model-status { 
-        background: #f8f9fa !important; 
-        border: 2px solid #dee2e6 !important; 
-        border-radius: 10px !important; 
-        padding: 14px 18px !important; 
-        margin: 10px 0 !important; 
-        font-family: 'JetBrains Mono', 'Courier New', monospace !important; 
-        font-size: 14px !important;
-        line-height: 1.6 !important;
-    }
-    
-    /* Input field enhancements */
-    .gr-textbox, .gr-number, .gr-dropdown {
-        border-width: 2px !important;
-        border-radius: 8px !important;
-        font-size: 15px !important;
-    }
-    .gr-textbox:focus, .gr-number:focus, .gr-dropdown:focus {
-        border-color: #667eea !important;
-        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1) !important;
-    }
-    
-    /* Accordion improvements */
-    .gr-accordion {
-        border-radius: 10px !important;
-        border-width: 2px !important;
-    }
-    
-    /* Slider improvements */
-    .gr-slider {
-        margin: 20px 0 !important;
-    }
-    """
 
     # Auto-apply last-used presets on startup for ALL tabs
     # This ensures settings are restored automatically when app starts
@@ -383,7 +277,7 @@ def main():
     (startup_res_settings, startup_res_cache, startup_output_settings, startup_output_cache,
      startup_seedvr2_cache, startup_gan_cache, startup_rife_cache, startup_flashvsr_cache, startup_face_cache) = load_all_startup_presets()
     
-    with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=css_overrides) as demo:
+    with gr.Blocks(title=APP_TITLE, theme=modern_theme) as demo:
         # Shared state for cross-tab communication
         # AUTO-POPULATED with last-used presets for ALL tabs on startup (Resolution, Output, SeedVR2, GAN, RIFE, FlashVSR+, Face)
         shared_state = gr.State({
@@ -742,7 +636,7 @@ def main():
         def update_health_banner(state):
             """Update health banner with current state"""
             health_text = state.get("health_banner", {}).get("text", "System ready")
-            return gr.Markdown.update(value=f'<div class="health-banner">{health_text}</div>')
+            return gr.update(value=f'<div class="health-banner">{health_text}</div>')
 
         # Update on load
         demo.load(fn=update_health_banner, inputs=shared_state, outputs=health_banner)
@@ -750,7 +644,7 @@ def main():
         # Update when shared state changes (for dynamic updates from tabs)
         shared_state.change(fn=update_health_banner, inputs=shared_state, outputs=health_banner)
 
-    demo.launch()
+    demo.launch(inbrowser=True)
 
 
 if __name__ == "__main__":
