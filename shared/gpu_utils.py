@@ -3,7 +3,96 @@ GPU utility functions shared across all model services.
 
 Provides consistent CUDA device handling for SeedVR2, GAN, RIFE, FlashVSR+.
 """
-from typing import Optional
+from typing import Optional, List, Tuple
+from dataclasses import dataclass
+import platform
+
+
+@dataclass
+class GPUInfo:
+    """GPU information dataclass for health checks"""
+    id: int
+    name: str
+    total_memory_gb: float
+    available_memory_gb: float
+    compute_capability: Optional[Tuple[int, int]]
+    is_available: bool
+
+
+def is_apple_silicon() -> bool:
+    """Check if running on Apple Silicon (M1/M2/M3)"""
+    if platform.system() != "Darwin":
+        return False
+    
+    try:
+        # Check for ARM64 architecture
+        import subprocess
+        result = subprocess.run(["uname", "-m"], capture_output=True, text=True)
+        return "arm64" in result.stdout.lower()
+    except Exception:
+        return False
+
+
+def get_cuda_version() -> Optional[str]:
+    """Get CUDA version string"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.version.cuda
+    except Exception:
+        pass
+    return None
+
+
+def get_gpu_info() -> List[GPUInfo]:
+    """
+    Get detailed information about all available GPUs.
+    
+    Returns:
+        List of GPUInfo objects, one per GPU
+    """
+    gpus = []
+    
+    try:
+        import torch
+        
+        if not torch.cuda.is_available():
+            return []
+        
+        device_count = torch.cuda.device_count()
+        
+        for i in range(device_count):
+            try:
+                props = torch.cuda.get_device_properties(i)
+                allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)  # GB
+                reserved = torch.cuda.memory_reserved(i) / (1024 ** 3)  # GB
+                total = props.total_memory / (1024 ** 3)  # GB
+                available = total - allocated
+                
+                compute_cap = (props.major, props.minor)
+                
+                gpus.append(GPUInfo(
+                    id=i,
+                    name=props.name,
+                    total_memory_gb=total,
+                    available_memory_gb=available,
+                    compute_capability=compute_cap,
+                    is_available=True
+                ))
+            except Exception:
+                # If individual GPU fails, create unavailable entry
+                gpus.append(GPUInfo(
+                    id=i,
+                    name=f"GPU {i}",
+                    total_memory_gb=0.0,
+                    available_memory_gb=0.0,
+                    compute_capability=None,
+                    is_available=False
+                ))
+    except Exception:
+        pass
+    
+    return gpus
 
 
 def expand_cuda_device_spec(cuda_spec: str) -> str:

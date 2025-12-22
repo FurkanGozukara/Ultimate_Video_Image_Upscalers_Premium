@@ -120,6 +120,66 @@ class PresetManager:
                         validated["cache_dit"] = False
                         validated["cache_vae"] = False
                         print(f"⚠️ Preset '{preset_name}' had cache enabled with multi-GPU, auto-disabled caching")
+                
+                # ENHANCED: Model-specific validation
+                model_name = str(model or validated.get("dit_model", ""))
+                
+                # GGUF model limitations
+                if model_name.lower().endswith(".gguf"):
+                    # GGUF models don't support torch.compile
+                    if validated.get("compile_dit") or validated.get("compile_vae"):
+                        validated["compile_dit"] = False
+                        validated["compile_vae"] = False
+                        print(f"⚠️ Preset '{preset_name}': GGUF models don't support torch.compile, auto-disabled")
+                    
+                    # GGUF models don't support multi-GPU
+                    if cuda_device and "," in cuda_device:
+                        # Keep only first GPU
+                        first_gpu = cuda_device.split(",")[0].strip()
+                        validated["cuda_device"] = first_gpu
+                        print(f"⚠️ Preset '{preset_name}': GGUF models don't support multi-GPU, using GPU {first_gpu} only")
+                
+                # BlockSwap requires dit_offload_device != none
+                blocks_to_swap = int(validated.get("blocks_to_swap", 0))
+                dit_offload = str(validated.get("dit_offload_device", "none"))
+                if blocks_to_swap > 0 and dit_offload == "none":
+                    validated["blocks_to_swap"] = 0
+                    print(f"⚠️ Preset '{preset_name}': BlockSwap requires dit_offload_device != 'none', auto-disabled BlockSwap")
+                
+                # VAE tiling overlap must be < tile size
+                vae_encode_tiled = validated.get("vae_encode_tiled", False)
+                vae_encode_tile_size = int(validated.get("vae_encode_tile_size", 1024))
+                vae_encode_overlap = int(validated.get("vae_encode_tile_overlap", 128))
+                if vae_encode_tiled and vae_encode_overlap >= vae_encode_tile_size:
+                    validated["vae_encode_tile_overlap"] = vae_encode_tile_size // 2
+                    print(f"⚠️ Preset '{preset_name}': VAE encode overlap must be < tile size, auto-corrected to {vae_encode_tile_size // 2}")
+                
+                vae_decode_tiled = validated.get("vae_decode_tiled", False)
+                vae_decode_tile_size = int(validated.get("vae_decode_tile_size", 1024))
+                vae_decode_overlap = int(validated.get("vae_decode_tile_overlap", 128))
+                if vae_decode_tiled and vae_decode_overlap >= vae_decode_tile_size:
+                    validated["vae_decode_tile_overlap"] = vae_decode_tile_size // 2
+                    print(f"⚠️ Preset '{preset_name}': VAE decode overlap must be < tile size, auto-corrected to {vae_decode_tile_size // 2}")
+                
+                # Attention mode GPU compatibility check
+                attention_mode = str(validated.get("attention_mode", "sdpa"))
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        device_props = torch.cuda.get_device_properties(0)
+                        compute_cap = (device_props.major, device_props.minor)
+                        
+                        # flash_attn_3 and sageattn_3 require Hopper+ (9.0+)
+                        if attention_mode in ("flash_attn_3", "sageattn_3") and compute_cap[0] < 9:
+                            validated["attention_mode"] = "flash_attn_2" if compute_cap[0] >= 8 else "sdpa"
+                            print(f"⚠️ Preset '{preset_name}': {attention_mode} requires Hopper+ GPU (9.0+), falling back to {validated['attention_mode']}")
+                        
+                        # flash_attn_2 works best on Ampere+ (8.0+)
+                        elif attention_mode == "flash_attn_2" and compute_cap[0] < 8:
+                            validated["attention_mode"] = "sdpa"
+                            print(f"⚠️ Preset '{preset_name}': flash_attn_2 requires Ampere+ GPU (8.0+), falling back to sdpa")
+                except Exception:
+                    pass  # Skip GPU check if torch unavailable
             
             return validated
         except Exception as e:

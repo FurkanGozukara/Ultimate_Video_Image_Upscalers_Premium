@@ -53,56 +53,109 @@ SEEDVR2_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 # Defaults and ordering --------------------------------------------------------
 def _get_default_attention_mode() -> str:
     """
-    Get default attention mode with actual runtime testing.
+    Get optimal default attention mode with GPU compute capability detection.
     
-    DEFAULT PRIORITY: flash_attn_2 > sdpa
+    INTELLIGENT PRIORITY based on GPU architecture:
+    - **Blackwell (12.x)**: sageattn_3 > flash_attn_3 > flash_attn_2 > sdpa
+    - **Hopper (9.x)**: flash_attn_3 > sageattn_2 > flash_attn_2 > sdpa
+    - **Ada/Ampere (8.x-8.9)**: flash_attn_2 > sdpa
+    - **Turing (7.5-7.x)**: sdpa (flash_attn slower on older arch)
+    - **Older (<7.5)**: sdpa only
     
-    Attempts to use flash_attn_2 if available and working, otherwise falls back to sdpa.
-    This is more robust than just checking import - actually tests CUDA compatibility.
+    Automatically selects the fastest attention backend for detected GPU.
     
     Returns:
-        "flash_attn_2" if available and CUDA compatible (SeedVR2 v2.5.20+ uses flash_attn_2)
-        "sdpa" as fallback (always available in PyTorch 2.0+)
+        Best attention mode for detected GPU architecture
     """
     try:
-        import flash_attn
         import torch
         
-        # Check if CUDA is available (flash_attn requires CUDA)
+        # Check if CUDA is available (all attention modes except sdpa require CUDA)
         if not torch.cuda.is_available():
             return "sdpa"
         
-        # Test flash_attn compatibility with actual CUDA device
-        try:
-            # Verify flash_attn has minimum required version
-            version = getattr(flash_attn, '__version__', '')
-            if not version:
-                # No version attribute, try import test
-                from flash_attn import flash_attn_func
-                
-            # Check GPU compute capability (flash_attn requires 8.0+ for optimal performance)
-            # But will work on 7.5+ (Turing) with reduced performance
-            device_props = torch.cuda.get_device_properties(0)
-            compute_cap = (device_props.major, device_props.minor)
+        # Get GPU compute capability
+        device_props = torch.cuda.get_device_properties(0)
+        compute_cap = (device_props.major, device_props.minor)
+        gpu_name = device_props.name
+        
+        # Blackwell GPUs (12.0+) - Latest architecture
+        if compute_cap[0] >= 12:
+            # Check for SageAttention 3 (optimized for Blackwell)
+            try:
+                import sageattn3
+                return "sageattn_3"  # Fastest for Blackwell
+            except ImportError:
+                pass
             
-            # Flash attention works best on Ampere (8.0+) and Ada/Hopper (8.9+, 9.0+)
-            # But also functional on Turing (7.5)
-            if compute_cap[0] >= 7 and compute_cap[1] >= 5:
-                # GPU supports flash attention - use flash_attn_2 (current SeedVR2 default)
+            # Fall back to Flash Attention 3
+            try:
+                import flash_attn
+                if hasattr(flash_attn, '__version__'):
+                    # FA3 available in flash-attn 2.7.0+
+                    return "flash_attn_3"
+            except ImportError:
+                pass
+            
+            # Last resort: Flash Attention 2 (still fast)
+            try:
+                import flash_attn
                 return "flash_attn_2"
-            else:
-                # Older GPU, use sdpa
+            except ImportError:
                 return "sdpa"
-                
-        except (AttributeError, ImportError, RuntimeError):
-            # Flash attention import succeeded but functionality test failed
+        
+        # Hopper GPUs (9.0-11.x) - H100, etc.
+        elif compute_cap[0] >= 9:
+            # Check for Flash Attention 3 (optimized for Hopper)
+            try:
+                import flash_attn
+                if hasattr(flash_attn, '__version__'):
+                    return "flash_attn_3"  # Best for Hopper
+            except ImportError:
+                pass
+            
+            # Fall back to SageAttention 2
+            try:
+                import sageattention
+                return "sageattn_2"
+            except ImportError:
+                pass
+            
+            # Flash Attention 2 still good
+            try:
+                import flash_attn
+                return "flash_attn_2"
+            except ImportError:
+                return "sdpa"
+        
+        # Ada Lovelace / Ampere GPUs (8.0-8.9) - RTX 40xx, RTX 30xx, A100
+        elif compute_cap[0] == 8:
+            # Flash Attention 2 is optimal for Ampere/Ada
+            try:
+                import flash_attn
+                # Verify it's actually functional
+                from flash_attn import flash_attn_func
+                return "flash_attn_2"  # Best for Ampere/Ada
+            except ImportError:
+                return "sdpa"
+        
+        # Turing GPUs (7.5) - RTX 20xx, GTX 16xx
+        elif compute_cap[0] == 7 and compute_cap[1] >= 5:
+            # Flash attention CAN run on Turing but sdpa is often faster
+            # Use sdpa by default for compatibility
+            return "sdpa"
+        
+        # Older GPUs (<7.5) - Pascal, Maxwell, Kepler
+        else:
+            # Flash attention not supported, sdpa only option
             return "sdpa"
             
     except ImportError:
-        # Flash attention not installed
+        # PyTorch not available
         return "sdpa"
-    except Exception:
+    except Exception as e:
         # Any other error, fall back safely to sdpa
+        print(f"Warning: Attention mode detection failed ({e}), using sdpa")
         return "sdpa"
 
 
@@ -778,16 +831,72 @@ def _process_single_file(
             completed_chunks = 0
             total_chunks_estimate = 1
             chunk_progress_updates = []
+            chunk_thumbnail_list = []  # Store (path, caption) tuples for gallery
 
             def chunk_progress_callback(progress_val, desc=""):
-                nonlocal completed_chunks, total_chunks_estimate
+                nonlocal completed_chunks, total_chunks_estimate, chunk_thumbnail_list
                 
                 # Extract total chunks from description if available
                 import re
                 total_match = re.search(r'(\d+)/(\d+)', desc)
                 if total_match:
-                    completed_chunks = int(total_match.group(1))
+                    new_completed = int(total_match.group(1))
                     total_chunks_estimate = int(total_match.group(2))
+                    
+                    # NEW chunk completed - generate thumbnail
+                    if new_completed > completed_chunks:
+                        completed_chunks = new_completed
+                        
+                        # Generate thumbnail for newly completed chunk
+                        try:
+                            temp_path = Path(global_settings["temp_dir"])
+                            chunk_work_dir = temp_path / "chunks" / "work"
+                            
+                            if chunk_work_dir.exists():
+                                # Find chunk outputs (videos or PNG dirs)
+                                chunk_videos = sorted(chunk_work_dir.glob("chunk_*.mp4"))
+                                chunk_png_dirs = sorted([d for d in chunk_work_dir.glob("chunk_*") if d.is_dir()])
+                                
+                                target = None
+                                if chunk_videos and len(chunk_videos) >= completed_chunks:
+                                    target = chunk_videos[completed_chunks - 1]
+                                elif chunk_png_dirs and len(chunk_png_dirs) >= completed_chunks:
+                                    png_dir = chunk_png_dirs[completed_chunks - 1]
+                                    pngs = sorted(png_dir.glob("*.png"))
+                                    if pngs:
+                                        target = pngs[0]
+                                
+                                if target:
+                                    from shared.frame_utils import extract_video_thumbnail
+                                    import PIL.Image
+                                    
+                                    thumb_dir = temp_path / "chunk_thumbs"
+                                    thumb_dir.mkdir(parents=True, exist_ok=True)
+                                    thumb_out = thumb_dir / f"chunk_{completed_chunks:04d}.jpg"
+                                    
+                                    if target.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']:
+                                        # Video: extract with ffmpeg
+                                        success, thumb_path, _ = extract_video_thumbnail(
+                                            str(target),
+                                            output_path=str(thumb_out),
+                                            timestamp=0.5,
+                                            width=320
+                                        )
+                                        if success:
+                                            chunk_thumbnail_list.append((thumb_path, f"Chunk {completed_chunks}"))
+                                            state["chunk_thumbnails"] = list(chunk_thumbnail_list)
+                                    else:
+                                        # Image: resize with PIL
+                                        img = PIL.Image.open(target)
+                                        img.thumbnail((320, 320), PIL.Image.Resampling.LANCZOS)
+                                        img.convert('RGB').save(thumb_out, "JPEG", quality=85)
+                                        chunk_thumbnail_list.append((str(thumb_out), f"Chunk {completed_chunks}"))
+                                        state["chunk_thumbnails"] = list(chunk_thumbnail_list)
+                        except Exception:
+                            pass  # Silent fail
+                    else:
+                        completed_chunks = new_completed
+                        
                 elif "Completed chunk" in desc or "chunk" in desc.lower():
                     completed_chunks += 1
                 
@@ -835,6 +944,36 @@ def _process_single_file(
             chunk_progress_detailed = "\n".join(chunk_progress_updates[-10:]) if chunk_progress_updates else "Chunking in progress..."
             chunk_info_msg = f"**Chunks Completed:** {completed_chunks}/{total_chunks_estimate}\n**Native Streaming:** {'Yes' if settings.get('chunk_size', 0) > 0 else 'No'}\n**Latest Progress:**\n{chunk_progress_detailed}"
             chunk_progress_msg = f"Chunks: {completed_chunks}/{total_chunks_estimate}"
+            
+            # Generate thumbnails for completed chunks (if not already generated during processing)
+            if chunk_count > 0 and not chunk_thumbnail_list:
+                try:
+                    temp_path = Path(global_settings["temp_dir"])
+                    chunk_work_dir = temp_path / "chunks" / "work"
+                    
+                    if chunk_work_dir.exists():
+                        # Find all chunk video files
+                        chunk_video_files = sorted(chunk_work_dir.glob("chunk_*.mp4"))
+                        
+                        if chunk_video_files:
+                            from shared.frame_utils import extract_multiple_thumbnails
+                            
+                            # Extract thumbnails from all chunks
+                            chunk_thumbnail_list = extract_multiple_thumbnails(
+                                [str(f) for f in chunk_video_files],
+                                output_dir=str(temp_path / "chunk_thumbs"),
+                                width=320
+                            )
+                            
+                            # Store in state for UI display
+                            if chunk_thumbnail_list:
+                                state["chunk_thumbnails"] = chunk_thumbnail_list
+                                if progress_cb:
+                                    progress_cb(f"✅ Generated {len(chunk_thumbnail_list)} chunk thumbnails\n")
+                except Exception as e:
+                    # Don't fail processing if thumbnail generation fails
+                    if progress_cb:
+                        progress_cb(f"⚠️ Thumbnail generation failed: {str(e)}\n")
             
             result = RunResult(rc, output_path, clog)
         else:
@@ -1375,7 +1514,9 @@ def build_seedvr2_callbacks(
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
                     gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),
+                    gr.Gallery.update(visible=False),  # chunk_gallery
+                    gr.Gallery.update(visible=False),  # chunk_gallery
+                    gr.Gallery.update(visible=False),  # batch_gallery
                     state
                 )
                 return
@@ -1400,6 +1541,7 @@ def build_seedvr2_callbacks(
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
                     gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),  # chunk_gallery
                     gr.Gallery.update(visible=False),
                     state
                 )
@@ -1419,6 +1561,7 @@ def build_seedvr2_callbacks(
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
                     gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),  # chunk_gallery
                     gr.Gallery.update(visible=False),
                     state
                 )
@@ -1440,6 +1583,7 @@ def build_seedvr2_callbacks(
                     gr.HTML.update(value="No comparison"),
                     gr.ImageSlider.update(value=None),
                     gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),  # chunk_gallery
                     gr.Gallery.update(visible=False),
                     state
                 )
@@ -1458,6 +1602,7 @@ def build_seedvr2_callbacks(
                     gr.HTML.update(value=""),
                     gr.ImageSlider.update(value=None),
                     gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),  # chunk_gallery
                     gr.Gallery.update(visible=False),
                     state
                 )
@@ -1557,6 +1702,7 @@ def build_seedvr2_callbacks(
                         gr.HTML.update(value="No comparison"),
                         gr.ImageSlider.update(value=None),
                         gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),  # chunk_gallery
                         gr.Gallery.update(visible=False),
                         state
                     )
@@ -1589,6 +1735,98 @@ def build_seedvr2_callbacks(
                         gr.HTML.update(value="No comparison"),
                         gr.ImageSlider.update(value=None),
                         gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),  # chunk_gallery
+                        gr.Gallery.update(visible=False),
+                        state
+                    )
+                    return
+                
+                # ADDED: Disk space pre-check before batch processing
+                from shared.path_utils import get_disk_free_gb
+                try:
+                    temp_dir_path = Path(global_settings.get("temp_dir", "temp"))
+                    output_dir_path = batch_output_path if batch_output_path.exists() else output_dir
+                    
+                    temp_free_gb = get_disk_free_gb(temp_dir_path)
+                    output_free_gb = get_disk_free_gb(output_dir_path)
+                    
+                    # Estimate required space (rough: 10GB per video, 100MB per image)
+                    estimated_gb = (video_count * 10.0) + (image_count * 0.1)
+                    
+                    warnings = []
+                    errors = []
+                    
+                    # Critical: Less than 5GB free
+                    if temp_free_gb < 5.0:
+                        errors.append(f"❌ CRITICAL: Only {temp_free_gb:.1f}GB free in temp directory. Need at least 5GB for processing.")
+                    elif temp_free_gb < estimated_gb:
+                        warnings.append(f"⚠️ LOW TEMP SPACE: {temp_free_gb:.1f}GB free, estimated need: {estimated_gb:.1f}GB. May fail during processing.")
+                    
+                    if output_free_gb < 5.0:
+                        errors.append(f"❌ CRITICAL: Only {output_free_gb:.1f}GB free in output directory. Need at least 5GB.")
+                    elif output_free_gb < estimated_gb * 0.5:
+                        warnings.append(f"⚠️ LOW OUTPUT SPACE: {output_free_gb:.1f}GB free, estimated need: {estimated_gb * 0.5:.1f}GB")
+                    
+                    if errors:
+                        error_msg = "🛑 INSUFFICIENT DISK SPACE - Cannot start batch processing:\n" + "\n".join(errors)
+                        if warnings:
+                            error_msg += "\n\nAdditional warnings:\n" + "\n".join(warnings)
+                        
+                        yield (
+                            error_msg,
+                            "",
+                            "",
+                            None,
+                            None,
+                            f"Batch aborted: {len(batch_files)} files (insufficient disk space)",
+                            "",
+                            "",
+                            gr.HTML.update(value="Insufficient disk space"),
+                            gr.ImageSlider.update(value=None),
+                            gr.HTML.update(value="", visible=False),
+                            gr.Gallery.update(visible=False),  # chunk_gallery
+                            gr.Gallery.update(visible=False),
+                            state
+                        )
+                        return
+                    
+                    if warnings:
+                        warning_msg = "⚠️ DISK SPACE WARNINGS:\n" + "\n".join(warnings) + "\n\nProceeding with batch processing..."
+                        yield (
+                            warning_msg,
+                            f"Starting batch: {len(batch_files)} files\nTemp: {temp_free_gb:.1f}GB free | Output: {output_free_gb:.1f}GB free",
+                            "",
+                            None,
+                            None,
+                            f"Batch: {len(batch_files)} files queued",
+                            "",
+                            "",
+                            gr.HTML.update(value="Disk space warnings"),
+                            gr.ImageSlider.update(value=None),
+                            gr.HTML.update(value="", visible=False),
+                            gr.Gallery.update(visible=False),  # chunk_gallery
+                            gr.Gallery.update(visible=False),
+                            state
+                        )
+                except Exception as e:
+                    # Disk check failed - log warning but don't block processing
+                    print(f"Warning: Disk space check failed: {e}")
+                
+                # Continue with batch processing
+                if not batch_files:
+                    yield (
+                        "❌ No supported files found after validation",
+                        "",
+                        "",
+                        None,
+                        None,
+                        "No chunks",
+                        "",
+                        "",
+                        gr.HTML.update(value="No comparison"),
+                        gr.ImageSlider.update(value=None),
+                        gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),  # chunk_gallery
                         gr.Gallery.update(visible=False),
                         state
                     )
@@ -1650,6 +1888,7 @@ def build_seedvr2_callbacks(
                         gr.HTML.update(value="Batch processing in progress..."),
                         gr.ImageSlider.update(value=None),
                         gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),  # chunk_gallery
                         gr.Gallery.update(visible=False),
                         state
                     )
@@ -1809,6 +2048,7 @@ def build_seedvr2_callbacks(
                     gr.HTML.update(value=f"Batch processing complete. {len(batch_outputs)} files saved."),
                     gr.ImageSlider.update(value=None),
                     gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),  # chunk_gallery
                     gr.Gallery.update(value=batch_outputs[:50], visible=True) if batch_outputs else gr.Gallery.update(visible=False),  # Show first 50
                     state
                 )
@@ -1837,6 +2077,7 @@ def build_seedvr2_callbacks(
                         gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{message}</div>'),
                         gr.ImageSlider.update(value=None),
                         gr.HTML.update(value="", visible=False),
+                        gr.Gallery.update(visible=False),  # chunk_gallery
                         gr.Gallery.update(visible=False),
                         state
                     )
@@ -1854,6 +2095,7 @@ def build_seedvr2_callbacks(
                 gr.HTML.update(value="Starting processing..."),
                 gr.ImageSlider.update(value=None),
                 gr.HTML.update(value="", visible=False),
+                gr.Gallery.update(visible=False),  # chunk_gallery
                 gr.Gallery.update(visible=False),
                 state
             )
@@ -1965,8 +2207,16 @@ def build_seedvr2_callbacks(
                             recent_messages = accumulated_messages[-5:]
                             display_text = "\n".join(recent_messages[-3:])  # Show last 3 lines
                             
+                            # Get current chunk thumbnails from state (updated by chunk_progress_callback)
+                            current_chunk_thumbs = state.get("chunk_thumbnails", [])
+                            chunk_gallery_update = gr.Gallery.update(
+                                value=current_chunk_thumbs,
+                                visible=len(current_chunk_thumbs) > 0,
+                                columns=4
+                            ) if current_chunk_thumbs else gr.Gallery.update(visible=False)
+                            
                             yield (
-                                f"⚙️ Processing...",
+                                f"⚙️ Processing... ({len(current_chunk_thumbs)} chunks completed)",
                                 f"Progress: {display_text}",
                                 "",
                                 None,
@@ -1977,7 +2227,8 @@ def build_seedvr2_callbacks(
                                 gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px; white-space: pre-wrap;">{display_text}</div>'),
                                 gr.ImageSlider.update(value=None),
                                 gr.HTML.update(value="", visible=False),
-                                gr.Gallery.update(visible=False),
+                                chunk_gallery_update,  # chunk_gallery - LIVE UPDATE with thumbnails!
+                                gr.Gallery.update(visible=False),  # batch_gallery
                                 state
                             )
                             last_ui_update_time = current_time
@@ -2006,6 +2257,7 @@ def build_seedvr2_callbacks(
                             gr.HTML.update(value=f'<div style="background: #ffe6e6; padding: 10px; border-radius: 5px;">Error: {data}</div>'),
                             gr.ImageSlider.update(value=None),
                             gr.HTML.update(value="", visible=False),
+                            gr.Gallery.update(visible=False),  # chunk_gallery
                             gr.Gallery.update(visible=False),
                             state
                         )
@@ -2026,6 +2278,7 @@ def build_seedvr2_callbacks(
                     gr.HTML.update(value="Processing timed out"),
                     gr.ImageSlider.update(value=None),
                     gr.HTML.update(value="", visible=False),
+                    gr.Gallery.update(visible=False),  # chunk_gallery
                     gr.Gallery.update(visible=False),
                     state
                 )
@@ -2097,6 +2350,17 @@ def build_seedvr2_callbacks(
                 image_slider_update = gr.ImageSlider.update(value=None, visible=False)
 
             state["operation_status"] = "completed" if "✅" in status else "ready"
+            
+            # Prepare final chunk gallery display
+            final_chunk_thumbs = state.get("chunk_thumbnails", [])
+            final_chunk_gallery = gr.Gallery.update(
+                value=final_chunk_thumbs,
+                visible=len(final_chunk_thumbs) > 0,
+                columns=4,
+                rows=2,
+                height=400
+            ) if final_chunk_thumbs else gr.Gallery.update(visible=False)
+            
             yield (
                 status,
                 logs,
@@ -2109,7 +2373,8 @@ def build_seedvr2_callbacks(
                 comparison_html if comparison_html else gr.HTML.update(value="", visible=False),
                 image_slider_update,
                 video_comparison_html_update,
-                gr.Gallery.update(visible=False),  # Hide gallery for single file
+                final_chunk_gallery,  # chunk_gallery - SHOW completed chunk thumbnails!
+                gr.Gallery.update(visible=False),  # batch_gallery - Hide for single file
                 state
             )
 
@@ -2128,6 +2393,7 @@ def build_seedvr2_callbacks(
                 gr.HTML.update(value="Error occurred"),
                 gr.ImageSlider.update(value=None),
                 gr.HTML.update(value="", visible=False),
+                gr.Gallery.update(visible=False),  # chunk_gallery
                 gr.Gallery.update(visible=False),
                 state
             )

@@ -669,6 +669,20 @@ def seedvr2_tab(
             chunk_info = gr.Markdown("Last processed chunk will appear here.")
             resume_status = gr.Markdown("", visible=True)
             chunk_progress = gr.Markdown("", visible=True)
+            
+            # Chunk thumbnail gallery - Shows completed chunks as they finish
+            with gr.Accordion("🎬 Completed Chunks Gallery", open=False):
+                gr.Markdown("*Thumbnails of completed chunks appear here during processing*")
+                chunk_gallery = gr.Gallery(
+                    label="Completed Chunks (updates as processing progresses)",
+                    visible=False,
+                    columns=4,
+                    rows=2,
+                    height="auto",
+                    object_fit="contain",
+                    show_download_button=False,
+                    allow_preview=True
+                )
 
             # Warnings and info
             alpha_warn = gr.Markdown(
@@ -1091,7 +1105,7 @@ def seedvr2_tab(
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
-            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, batch_gallery, shared_state
+            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, batch_gallery, shared_state
         ]
     )
 
@@ -1100,7 +1114,7 @@ def seedvr2_tab(
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
-            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, batch_gallery, shared_state
+            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, batch_gallery, shared_state
         ]
     )
 
