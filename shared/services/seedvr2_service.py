@@ -55,13 +55,13 @@ def _get_default_attention_mode() -> str:
     """
     Get default attention mode with actual runtime testing.
     
-    DEFAULT PRIORITY: flash_attn > sdpa
+    DEFAULT PRIORITY: flash_attn_2 > sdpa
     
-    Attempts to use flash_attn if available and working, otherwise falls back to sdpa.
+    Attempts to use flash_attn_2 if available and working, otherwise falls back to sdpa.
     This is more robust than just checking import - actually tests CUDA compatibility.
     
     Returns:
-        "flash_attn" if available and CUDA compatible
+        "flash_attn_2" if available and CUDA compatible (SeedVR2 v2.5.20+ uses flash_attn_2)
         "sdpa" as fallback (always available in PyTorch 2.0+)
     """
     try:
@@ -88,8 +88,8 @@ def _get_default_attention_mode() -> str:
             # Flash attention works best on Ampere (8.0+) and Ada/Hopper (8.9+, 9.0+)
             # But also functional on Turing (7.5)
             if compute_cap[0] >= 7 and compute_cap[1] >= 5:
-                # GPU supports flash attention
-                return "flash_attn"
+                # GPU supports flash attention - use flash_attn_2 (current SeedVR2 default)
+                return "flash_attn_2"
             else:
                 # Older GPU, use sdpa
                 return "sdpa"
@@ -191,6 +191,9 @@ def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
         "resume_chunking": False,
         "save_metadata": True,  # Per-run metadata toggle (respects global telemetry)
         "fps_override": 0,  # FPS override (0 = use source FPS, >0 = set specific FPS)
+        # ADDED v2.5.22: FFmpeg 10-bit encoding support for reduced banding in gradients
+        "video_backend": "opencv",  # "opencv" (default, 8-bit) or "ffmpeg" (10-bit capable)
+        "use_10bit": False,  # Enable 10-bit color depth (requires video_backend="ffmpeg", x265 codec)
         "_compile_compatible": compile_compatible,  # Store for validation
     }
 
@@ -409,6 +412,9 @@ SEEDVR2_ORDER: List[str] = [
     # Output & shared settings (from Output tab integration)
     "save_metadata",
     "fps_override",
+    # ADDED v2.5.22: FFmpeg 10-bit encoding support
+    "video_backend",  # Video encoding backend ("opencv" or "ffmpeg")
+    "use_10bit",  # Enable 10-bit color depth (x265 yuv420p10le)
 ]
 
 
@@ -504,6 +510,13 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], s
             cfg["cache_dit"] = False
         if cfg.get("cache_vae"):
             cfg["cache_vae"] = False
+    
+    # ADDED v2.5.22: Validate video backend and 10-bit encoding consistency
+    # Auto-disable 10-bit if ffmpeg backend not selected (prevents CLI errors)
+    if cfg.get("use_10bit") and cfg.get("video_backend") != "ffmpeg":
+        error_logger.warning("10-bit encoding requires ffmpeg backend, auto-disabling 10-bit")
+        cfg["use_10bit"] = False
+        cfg["_10bit_disabled_reason"] = "Requires video_backend=ffmpeg"
 
     return cfg
 

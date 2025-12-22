@@ -894,6 +894,17 @@ class Runner:
         # Debug
         if settings.get("debug"):
             cmd.append("--debug")
+        
+        # ADDED v2.5.22: FFmpeg 10-bit encoding support
+        # Video backend selection (opencv or ffmpeg)
+        if settings.get("video_backend"):
+            backend = str(settings["video_backend"]).lower()
+            if backend in ("opencv", "ffmpeg"):
+                cmd.extend(["--video_backend", backend])
+        
+        # 10-bit color depth (requires ffmpeg backend)
+        if settings.get("use_10bit"):
+            cmd.append("--10bit")
 
         # Preview: prefer PNG for quick visualization
         if preview_only and not output_format:

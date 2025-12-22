@@ -19,3 +19,4 @@ Real-ESRGAN/
 open-model-database
 .mp4
 *.mp4
+*__pycache__*

@@ -441,9 +441,9 @@ def seedvr2_tab(
             
             attention_mode = gr.Dropdown(
                 label="Attention Backend",
-                choices=["sdpa", "flash_attn"],
+                choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
                 value=values[34],  # Was 37, now 34
-                info="flash_attn is faster but requires installation. Auto-falls back to sdpa if unavailable. sdpa is more compatible.",
+                info="sdpa (default, most compatible) | flash_attn_2/3 (faster, requires flash-attn install) | sageattn_2/3 (optimized, requires sageattention install). Auto-falls back to sdpa if unavailable.",
                 interactive=cuda_available  # Disable if no CUDA (attention backends need GPU)
             )
             compile_dit = gr.Checkbox(
@@ -536,6 +536,36 @@ def seedvr2_tab(
                 precision=2,
                 info="Override output video FPS. 0 = preserve original FPS, 30 = force 30fps, 60 = force 60fps. Also sourced from Output tab if set."
             )
+            
+            # ADDED v2.5.22: FFmpeg 10-bit encoding for reduced banding
+            gr.Markdown("#### 🎨 Video Encoding (v2.5.22+)")
+            gr.Markdown("""
+            **NEW: 10-bit Color Depth Support**
+            
+            SeedVR2 v2.5.22 adds FFmpeg backend with 10-bit encoding (x265 yuv420p10le).
+            Benefits over default 8-bit OpenCV:
+            - **Reduced banding** in smooth gradients (skies, shadows)
+            - **Better color accuracy** for high-quality sources
+            - **Smaller file size** at same quality (x265 compression)
+            
+            ⚠️ Note: 10-bit requires `ffmpeg` backend (disables OpenCV).
+            """)
+            
+            with gr.Row():
+                video_backend = gr.Dropdown(
+                    label="Video Backend",
+                    choices=["opencv", "ffmpeg"],
+                    value=values[48] if len(values) > 48 else "opencv",
+                    info="opencv: Fast 8-bit encoding (libx264) | ffmpeg: Subprocess-based, enables 10-bit support"
+                )
+                
+                use_10bit = gr.Checkbox(
+                    label="Enable 10-bit Encoding",
+                    value=values[49] if len(values) > 49 else False,
+                    info="Use x265 with yuv420p10le for 10-bit color depth. Requires 'ffmpeg' backend. Reduces banding in gradients."
+                )
+            
+            video_backend_warning = gr.Markdown("", visible=False)
 
             # Input path textbox - MOVED HERE: after all controls, at bottom of left column as requested
             gr.Markdown("---")
@@ -757,7 +787,9 @@ def seedvr2_tab(
         compile_fullgraph, compile_dynamic, compile_dynamo_cache_size_limit,
         compile_dynamo_recompile_limit, cache_dit, cache_vae, debug, resume_chunking,
         # Output & shared settings (integrated from Output tab)
-        save_metadata, fps_override
+        save_metadata, fps_override,
+        # ADDED v2.5.22: FFmpeg 10-bit encoding support
+        video_backend, use_10bit
     ]
     
     # Validate synchronization at tab initialization (development-time check)
@@ -1072,8 +1104,26 @@ def seedvr2_tab(
         ]
     )
 
+    # Cancel button with confirmation requirement
+    def handle_cancel_with_confirmation(confirm_checked, state):
+        """Handle cancel with explicit confirmation check"""
+        if not confirm_checked:
+            return (
+                gr.Markdown.update(value="⚠️ Cancellation not confirmed. Enable 'Confirm cancel' checkbox and click again."),
+                gr.Textbox.update(value="Cancellation requires confirmation. Please enable the checkbox above."),
+                state
+            )
+        
+        # User confirmed - proceed with cancellation
+        cancel_result = service["cancel_action"]()
+        return (
+            gr.Markdown.update(value="⏹️ Cancellation requested. Subprocess will be terminated."),
+            gr.Textbox.update(value="Cancellation signal sent. Process terminating..."),
+            state
+        )
+    
     cancel_btn.click(
-        fn=lambda ok, state: (service["cancel_action"](), state) if ok else (gr.Markdown.update(value="⚠️ Enable 'Confirm cancel' to stop."), "", state),
+        fn=handle_cancel_with_confirmation,
         inputs=[cancel_confirm, shared_state],
         outputs=[status_box, log_box, shared_state]
     )
@@ -1202,6 +1252,33 @@ def seedvr2_tab(
         fn=validate_tile_decode,
         inputs=[vae_decode_tile_size, vae_decode_tile_overlap],
         outputs=tile_decode_warning
+    )
+    
+    # Validate 10-bit encoding requirements
+    def validate_10bit_settings(backend, use_10bit_val):
+        """Validate that 10-bit encoding has required backend"""
+        if use_10bit_val and backend != "ffmpeg":
+            return gr.Markdown.update(
+                value="⚠️ 10-bit encoding requires 'ffmpeg' backend. Please select 'ffmpeg' from Video Backend dropdown or disable 10-bit encoding.",
+                visible=True
+            )
+        elif use_10bit_val and backend == "ffmpeg":
+            return gr.Markdown.update(
+                value="✅ 10-bit encoding enabled: Using x265 codec with yuv420p10le pixel format for reduced banding in gradients.",
+                visible=True
+            )
+        return gr.Markdown.update(value="", visible=False)
+    
+    # Wire up 10-bit validation
+    video_backend.change(
+        fn=validate_10bit_settings,
+        inputs=[video_backend, use_10bit],
+        outputs=video_backend_warning
+    )
+    use_10bit.change(
+        fn=validate_10bit_settings,
+        inputs=[video_backend, use_10bit],
+        outputs=video_backend_warning
     )
     
     # FIXED: Live CUDA device validation with comprehensive checks
