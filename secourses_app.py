@@ -145,23 +145,136 @@ def main():
     except Exception:
         health_text = "Health check failed to initialize. Run Health Check tab for details."
 
-    # Modern theme with enhanced styling
+    # Ultra-modern theme with maximum readability (Gradio 6.2.0)
+    # Using Soft theme + Google Fonts for best readability
     modern_theme = gr.themes.Soft(
         primary_hue="indigo",
-        font=["Inter", "Arial", "sans-serif"],
-        font_mono=["JetBrains Mono", "Consolas", "monospace"]
+        secondary_hue="blue",
+        neutral_hue="slate",
+        font=gr.themes.GoogleFont("Inter"),  # Most readable UI font
+        font_mono=gr.themes.GoogleFont("JetBrains Mono")  # Best code font
+    ).set(
+        # Enhanced readability settings
+        body_text_size="16px",
+        body_text_weight="400",
+        button_large_text_size="18px",
+        button_large_padding="16px 28px",
+        button_primary_text_weight="600",
+        button_border_width="2px",
+        button_shadow="0 2px 8px rgba(0,0,0,0.1)",
+        button_shadow_hover="0 4px 12px rgba(0,0,0,0.15)",
+        input_border_width="2px",
+        input_shadow="0 1px 3px rgba(0,0,0,0.05)",
+        block_label_text_size="16px",
+        block_label_text_weight="600",
+        block_title_text_size="18px",
+        block_title_text_weight="700",
+        # Spacing for better UX
+        spacing_md="12px",
+        spacing_lg="16px",
+        spacing_xl="20px",
+        # Border radius for modern look
+        radius_sm="6px",
+        radius_md="8px",
+        radius_lg="12px",
     )
+    
     css_overrides = """
-    .gr-button { padding: 12px 16px; font-size: 16px; border-radius: 8px; }
-    .gr-button-lg { padding: 16px 24px; font-size: 18px; }
-    .gr-markdown, .gr-textbox label, .gr-number label, .gr-dropdown label { font-size: 16px; }
-    .gr-tab { font-size: 16px; font-weight: 500; }
-    .gr-form { gap: 16px; }
-    .health-banner { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px; border-radius: 8px; margin: 8px 0; }
-    .warning-text { color: #ff6b6b; font-weight: 500; }
-    .success-text { color: #51cf66; font-weight: 500; }
-    .info-text { color: #74c0fc; font-weight: 500; }
-    .model-status { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 12px; margin: 8px 0; font-family: 'Courier New', monospace; font-size: 14px; }
+    /* Enhanced button styling with better visibility */
+    .gr-button { 
+        padding: 14px 20px !important; 
+        font-size: 16px !important; 
+        font-weight: 600 !important;
+        border-radius: 8px !important;
+        transition: all 0.2s ease !important;
+    }
+    .gr-button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+    }
+    .gr-button-lg { 
+        padding: 18px 28px !important; 
+        font-size: 18px !important;
+        font-weight: 700 !important;
+    }
+    
+    /* Enhanced text readability */
+    .gr-markdown, .gr-textbox label, .gr-number label, .gr-dropdown label, .gr-slider label { 
+        font-size: 16px !important;
+        font-weight: 500 !important;
+        line-height: 1.6 !important;
+        letter-spacing: 0.01em !important;
+    }
+    .gr-markdown p {
+        line-height: 1.7 !important;
+        margin-bottom: 0.8em !important;
+    }
+    
+    /* Tab styling for better navigation */
+    .gr-tab { 
+        font-size: 16px !important; 
+        font-weight: 600 !important;
+        padding: 12px 20px !important;
+        border-radius: 8px 8px 0 0 !important;
+    }
+    .gr-tab.selected {
+        font-weight: 700 !important;
+    }
+    
+    /* Form spacing */
+    .gr-form { gap: 18px !important; }
+    .gr-panel { padding: 20px !important; }
+    
+    /* Status banners with gradients */
+    .health-banner { 
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+        color: white; 
+        padding: 16px 20px !important; 
+        border-radius: 10px !important; 
+        margin: 12px 0 !important;
+        font-size: 15px !important;
+        font-weight: 500 !important;
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3) !important;
+    }
+    
+    /* Colored text helpers */
+    .warning-text { color: #fa5252 !important; font-weight: 600 !important; }
+    .success-text { color: #51cf66 !important; font-weight: 600 !important; }
+    .info-text { color: #339af0 !important; font-weight: 600 !important; }
+    
+    /* Model status display */
+    .model-status { 
+        background: #f8f9fa !important; 
+        border: 2px solid #dee2e6 !important; 
+        border-radius: 10px !important; 
+        padding: 14px 18px !important; 
+        margin: 10px 0 !important; 
+        font-family: 'JetBrains Mono', 'Courier New', monospace !important; 
+        font-size: 14px !important;
+        line-height: 1.6 !important;
+    }
+    
+    /* Input field enhancements */
+    .gr-textbox, .gr-number, .gr-dropdown {
+        border-width: 2px !important;
+        border-radius: 8px !important;
+        font-size: 15px !important;
+    }
+    .gr-textbox:focus, .gr-number:focus, .gr-dropdown:focus {
+        border-color: #667eea !important;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1) !important;
+    }
+    
+    /* Accordion improvements */
+    .gr-accordion {
+        border-radius: 10px !important;
+        border-width: 2px !important;
+    }
+    
+    /* Slider improvements */
+    .gr-slider {
+        margin: 20px 0 !important;
+    }
     """
 
     # Auto-apply last-used presets on startup for ALL tabs
