@@ -1,5 +1,6 @@
 """
 RIFE / FPS / Edit Videos Tab - Self-contained modular implementation
+UPDATED: Now uses Universal Preset System
 """
 
 import gradio as gr
@@ -9,6 +10,11 @@ from typing import Dict, Any
 from shared.services.rife_service import (
     build_rife_callbacks, RIFE_ORDER
 )
+from ui.universal_preset_section import (
+    universal_preset_section,
+    wire_universal_preset_events,
+)
+from shared.universal_preset import dict_to_values
 
 
 def rife_tab(
@@ -32,42 +38,30 @@ def rife_tab(
         output_dir, temp_dir, shared_state
     )
 
-    # Get defaults and last used
-    # FIXED: Use startup cache and check ACTUAL current model
+    # Get defaults
     defaults = service["defaults"]
-    default_model = defaults.get("rife_model", "default")
     
-    # Try to load from startup cache first (already loaded in secourses_app.py)
-    rife_cache = shared_state.value.get("seed_controls", {}).get("rife_cache", {})
-    cached_for_model = rife_cache.get(default_model)
+    # UNIVERSAL PRESET: Load from shared_state
+    seed_controls = shared_state.value.get("seed_controls", {})
+    rife_settings = seed_controls.get("rife_settings", {})
+    current_preset_name = seed_controls.get("current_preset_name")
+    models_list = seed_controls.get("available_models", ["default"])
     
-    if cached_for_model:
-        # Use pre-loaded settings from startup
-        merged_defaults = cached_for_model
-        last_used_name = preset_manager.get_last_used_name("rife", default_model)
-        
-        def update_success(state):
-            existing = state["health_banner"]["text"]
-            success_msg = f"✅ RIFE: Restored last-used preset for {default_model}"
-            state["health_banner"]["text"] = existing + "\n" + success_msg if existing else success_msg
-            return state
-        shared_state.value = update_success(shared_state.value)
-    else:
-        # Fallback: Load on-demand if cache missed
-        last_used_name = preset_manager.get_last_used_name("rife", default_model)
-        last_used = preset_manager.load_last_used("rife", default_model)
-        
-        if last_used_name and last_used is None:
-            def update_warning(state):
-                existing = state["health_banner"]["text"]
-                warning = f"⚠️ Last used RIFE preset '{last_used_name}' for model '{default_model}' not found; loaded defaults."
-                state["health_banner"]["text"] = existing + "\n" + warning if existing else warning
-                return state
-            shared_state.value = update_warning(shared_state.value)
-        
-        merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+    # Merge with defaults
+    merged_defaults = defaults.copy()
+    for key, value in rife_settings.items():
+        if value is not None:
+            merged_defaults[key] = value
     
     values = [merged_defaults[k] for k in RIFE_ORDER]
+    
+    if current_preset_name:
+        def update_status(state):
+            existing = state["health_banner"]["text"]
+            msg = f"✅ RIFE: Using universal preset '{current_preset_name}'"
+            state["health_banner"]["text"] = existing + "\n" + msg if existing else msg
+            return state
+        shared_state.value = update_status(shared_state.value)
 
     # GPU availability check (like SeedVR2/GAN tabs)
     import platform
@@ -462,26 +456,25 @@ def rife_tab(
                 open_outputs_btn = gr.Button("📂 Open Outputs Folder")
                 clear_temp_btn = gr.Button("🗑️ Clear Temp Files")
 
-            # Preset management (in right column)
-            with gr.Accordion("💾 Preset Management", open=True):
-                preset_dropdown = gr.Dropdown(
-                    label="RIFE Presets",
-                    choices=preset_manager.list_presets("rife", "default"),
-                    value=last_used_name or "",
-                )
-
-                with gr.Row():
-                    preset_name = gr.Textbox(
-                        label="Preset Name",
-                        placeholder="my_rife_preset"
-                    )
-                    save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
-
-                with gr.Row():
-                    load_preset_btn = gr.Button("📂 Load Preset")
-                    safe_defaults_btn = gr.Button("🔄 Safe Defaults")
-
-                preset_status = gr.Markdown("")
+            # UNIVERSAL PRESET MANAGEMENT
+            (
+                preset_dropdown,
+                preset_name_input,
+                save_preset_btn,
+                load_preset_btn,
+                preset_status,
+                reset_defaults_btn,
+                delete_preset_btn,
+                preset_callbacks,
+            ) = universal_preset_section(
+                preset_manager=preset_manager,
+                shared_state=shared_state,
+                tab_name="rife",
+                inputs_list=[],
+                base_dir=base_dir,
+                models_list=models_list,
+                open_accordion=True,
+            )
 
     # Info section (outside columns, full width)
     with gr.Accordion("ℹ️ About RIFE & FPS", open=False):
@@ -665,20 +658,16 @@ def rife_tab(
         outputs=status_box
     )
 
-    # Preset management
-    save_preset_btn.click(
-        fn=lambda name, *vals: service["save_preset"](name, "default", list(vals)),
-        inputs=[preset_name] + inputs_list,
-        outputs=[preset_dropdown, preset_status]
-    )
-
-    load_preset_btn.click(
-        fn=lambda preset, *vals: service["load_preset"](preset, "default", list(vals)),
-        inputs=[preset_dropdown] + inputs_list,
-        outputs=inputs_list + [preset_status]
-    )
-
-    safe_defaults_btn.click(
-        fn=service["safe_defaults"],
-        outputs=inputs_list
+    # UNIVERSAL PRESET EVENT WIRING
+    wire_universal_preset_events(
+        preset_dropdown=preset_dropdown,
+        preset_name_input=preset_name_input,
+        save_btn=save_preset_btn,
+        load_btn=load_preset_btn,
+        preset_status=preset_status,
+        reset_btn=reset_defaults_btn,
+        delete_btn=delete_preset_btn,
+        callbacks=preset_callbacks,
+        inputs_list=inputs_list,
+        shared_state=shared_state,
     )

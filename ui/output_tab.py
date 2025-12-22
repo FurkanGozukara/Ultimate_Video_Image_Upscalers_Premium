@@ -1,5 +1,6 @@
 """
 Output & Comparison Tab - Self-contained modular implementation
+UPDATED: Now uses Universal Preset System
 """
 
 import gradio as gr
@@ -23,6 +24,11 @@ from shared.video_codec_options import (
     ENCODING_PRESETS,
     AUDIO_CODECS
 )
+from ui.universal_preset_section import (
+    universal_preset_section,
+    wire_universal_preset_events,
+)
+from shared.universal_preset import dict_to_values
 
 
 def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_settings: Dict[str, Any] = None):
@@ -37,7 +43,7 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     flashvsr_models = get_flashvsr_model_names()
     rife_models = get_rife_model_names(base_dir)
     
-    # Combine and deduplicate all models for per-model preset support
+    # Combine and deduplicate all models
     combined_models = sorted(list({
         *seedvr2_models,
         *gan_models,
@@ -48,36 +54,34 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     # Build service callbacks with global_settings for pinned reference persistence
     service = build_output_callbacks(preset_manager, shared_state, combined_models, global_settings)
 
-    # Get defaults and last used
-    current_model = combined_models[0] if combined_models else "default"
+    # Get defaults
     defaults = service["defaults"]
-    last_used_name = preset_manager.get_last_used_name("output", current_model)
-    last_used = preset_manager.load_last_used("output", current_model)
-    if last_used_name and last_used is None:
-        def update_warning(state):
-            existing = state["health_banner"]["text"]
-            warning = f"Last used Output preset '{last_used_name}' not found; loaded defaults."
-            if existing:
-                state["health_banner"]["text"] = existing + "\n" + warning
-            else:
-                state["health_banner"]["text"] = warning
-            return state
-        shared_state.value = update_warning(shared_state.value)
-
-    merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+    
+    # UNIVERSAL PRESET: Load from shared_state
+    seed_controls = shared_state.value.get("seed_controls", {})
+    output_settings = seed_controls.get("output_settings", {})
+    current_preset_name = seed_controls.get("current_preset_name")
+    models_list = seed_controls.get("available_models", combined_models)
+    
+    # Merge with defaults
+    merged_defaults = defaults.copy()
+    for key, value in output_settings.items():
+        if value is not None:
+            merged_defaults[key] = value
+    
     values = [merged_defaults[k] for k in OUTPUT_ORDER]
+    
+    if current_preset_name:
+        def update_status(state):
+            existing = state["health_banner"]["text"]
+            msg = f"✅ Output: Using universal preset '{current_preset_name}'"
+            state["health_banner"]["text"] = existing + "\n" + msg if existing else msg
+            return state
+        shared_state.value = update_status(shared_state.value)
 
     # Layout
     gr.Markdown("### 🎭 Output & Comparison Settings")
     gr.Markdown("*Configure output formats, FPS handling, and comparison display options shared across all upscaler models*")
-
-    # Model selector for presets
-    model_selector = gr.Dropdown(
-        label="Model Context (for presets)",
-        choices=combined_models,
-        value=current_model,
-        info="Settings are saved/loaded per model type"
-    )
 
     with gr.Tabs():
         # Output Format Settings
@@ -327,28 +331,25 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     )
     apply_status = gr.Markdown("")
 
-    # Preset management
-    with gr.Accordion("💾 Preset Management", open=True):
-        gr.Markdown("#### Save/Load Output Settings")
-
-        preset_dropdown = gr.Dropdown(
-            label="Output Presets",
-            choices=preset_manager.list_presets("output", current_model),
-            value=last_used_name or "",
-        )
-
-        with gr.Row():
-            preset_name = gr.Textbox(
-                label="Preset Name",
-                placeholder="my_output_preset"
-            )
-            save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
-
-        with gr.Row():
-            load_preset_btn = gr.Button("📂 Load Preset")
-            safe_defaults_btn = gr.Button("🔄 Safe Defaults")
-
-        preset_status = gr.Markdown("")
+    # UNIVERSAL PRESET MANAGEMENT
+    (
+        preset_dropdown,
+        preset_name_input,
+        save_preset_btn,
+        load_preset_btn,
+        preset_status,
+        reset_defaults_btn,
+        delete_preset_btn,
+        preset_callbacks,
+    ) = universal_preset_section(
+        preset_manager=preset_manager,
+        shared_state=shared_state,
+        tab_name="output",
+        inputs_list=[],
+        base_dir=base_dir,
+        models_list=models_list,
+        open_accordion=True,
+    )
 
     # Cache management buttons
     with gr.Accordion("🔄 Cache Management", open=False):
@@ -374,32 +375,18 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
         save_metadata, metadata_format, telemetry_enabled, log_level
     ]
 
-    # Wire up callbacks
-    def refresh_presets(model):
-        presets = preset_manager.list_presets("output", model)
-        return gr.update(choices=presets, value="")
-
-    model_selector.change(
-        fn=refresh_presets,
-        inputs=model_selector,
-        outputs=preset_dropdown
-    )
-
-    save_preset_btn.click(
-        fn=lambda name, model, *vals: service["save_preset"](name, model, list(vals)),
-        inputs=[preset_name, model_selector] + inputs_list,
-        outputs=[preset_dropdown, preset_status] + inputs_list  # FIXED: Capture reapplied validated values
-    )
-
-    load_preset_btn.click(
-        fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals)),
-        inputs=[preset_dropdown, model_selector] + inputs_list,
-        outputs=inputs_list + [preset_status]  # Include all controls including output_format
-    )
-
-    safe_defaults_btn.click(
-        fn=lambda: service["safe_defaults"](),
-        outputs=inputs_list  # Reset all controls including output_format
+    # UNIVERSAL PRESET EVENT WIRING
+    wire_universal_preset_events(
+        preset_dropdown=preset_dropdown,
+        preset_name_input=preset_name_input,
+        save_btn=save_preset_btn,
+        load_btn=load_preset_btn,
+        preset_status=preset_status,
+        reset_btn=reset_defaults_btn,
+        delete_btn=delete_preset_btn,
+        callbacks=preset_callbacks,
+        inputs_list=inputs_list,
+        shared_state=shared_state,
     )
 
     # Apply to pipeline

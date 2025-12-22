@@ -171,151 +171,97 @@ def main():
         block_title_text_weight="700",
     )
 
-    # Auto-apply last-used presets on startup for ALL tabs
-    # This ensures settings are restored automatically when app starts
-    def load_all_startup_presets():
+    # =========================================================================
+    # UNIVERSAL PRESET SYSTEM - Load last used preset on startup
+    # =========================================================================
+    def load_startup_universal_preset():
         """
-        Load last-used presets for ALL tabs and models into shared state.
+        Load the last-used UNIVERSAL preset on startup.
         
-        COMPLETE IMPLEMENTATION: Now loads SeedVR2, GAN, RIFE, FlashVSR+, Face presets on startup.
+        Universal presets contain ALL settings from ALL tabs in a single file.
+        If no universal preset exists, falls back to defaults.
         
-        Returns tuple: (resolution_settings, resolution_cache, output_settings, output_cache,
-                        seedvr2_cache, gan_cache, rife_cache, flashvsr_cache, face_cache)
+        Returns:
+            Dict with structure matching update_shared_state_from_preset expectations
         """
+        from shared.universal_preset import (
+            get_all_defaults,
+            merge_preset_with_defaults,
+            TAB_CONFIGS,
+        )
         from shared.models import get_seedvr2_model_names, scan_gan_models, get_flashvsr_model_names, get_rife_model_names
-        from shared.services.resolution_service import resolution_defaults
-        from shared.services.output_service import output_defaults
-        from shared.services.seedvr2_service import seedvr2_defaults, _enforce_seedvr2_guardrails
-        from shared.services.gan_service import gan_defaults
-        from shared.services.rife_service import rife_defaults
-        from shared.services.flashvsr_service import flashvsr_defaults
-        from shared.services.face_service import face_defaults
         
-        # Get all models for each pipeline
+        # Get models list for defaults
         seedvr2_models = get_seedvr2_model_names()
         gan_models = scan_gan_models(BASE_DIR)
         flashvsr_models = get_flashvsr_model_names()
         rife_models = get_rife_model_names(BASE_DIR)
         
-        all_models = []
-        all_models.extend(seedvr2_models)
-        all_models.extend(gan_models)
-        all_models.extend(flashvsr_models)
-        all_models.extend(rife_models)
-        
+        all_models = sorted(list({
+            *seedvr2_models,
+            *gan_models,
+            *flashvsr_models,
+            *rife_models,
+        }))
         if not all_models:
             all_models = ["default"]
         
-        # Pick first available model as primary default for each pipeline
-        primary_seedvr2 = seedvr2_models[0] if seedvr2_models else "default"
-        primary_gan = gan_models[0] if gan_models else "default"
-        primary_rife = rife_models[0] if rife_models else "default"
-        primary_flashvsr = flashvsr_models[0] if flashvsr_models else "v10_tiny_4x"
-        primary_face = all_models[0]
+        # Try to load last used universal preset
+        last_preset_name = preset_manager.get_last_used_universal_preset()
+        loaded_preset = None
         
-        # === RESOLUTION TAB ===
-        primary_res_last_used = preset_manager.load_last_used("resolution", all_models[0])
-        res_defaults = resolution_defaults([all_models[0]])
-        primary_res_settings = preset_manager.merge_config(res_defaults, primary_res_last_used) if primary_res_last_used else res_defaults
+        if last_preset_name:
+            loaded_preset = preset_manager.load_universal_preset(last_preset_name)
+            if loaded_preset:
+                print(f"✅ Loaded universal preset '{last_preset_name}' on startup")
+            else:
+                print(f"⚠️ Last used preset '{last_preset_name}' not found, using defaults")
         
-        resolution_cache = {}
-        for model in all_models:
-            model_last_used = preset_manager.load_last_used("resolution", model)
-            model_defaults = resolution_defaults([model])
-            resolution_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
-        
-        # === OUTPUT TAB ===
-        primary_output_last_used = preset_manager.load_last_used("output", all_models[0])
-        out_defaults = output_defaults(all_models)
-        primary_output_settings = preset_manager.merge_config(out_defaults, primary_output_last_used) if primary_output_last_used else out_defaults
-        
-        output_cache = {}
-        for model in all_models:
-            model_output_last_used = preset_manager.load_last_used("output", model)
-            model_out_defaults = output_defaults([model])
-            output_cache[model] = preset_manager.merge_config(model_out_defaults, model_output_last_used) if model_output_last_used else model_out_defaults
-        
-        # === SEEDVR2 TAB ===
-        seedvr2_cache = {}
-        migrations_performed = set()  # Track which presets were migrated
-        
-        for model in seedvr2_models:
-            model_last_used = preset_manager.load_last_used("seedvr2", model)
-            model_defaults = seedvr2_defaults(model)
-            merged = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
-            
-            # Apply migration and guardrails (silent for bulk operations to avoid spam)
-            migrated = _enforce_seedvr2_guardrails(merged, model_defaults, state=None, silent_migration=True)
-            seedvr2_cache[model] = migrated
-            
-            # Auto-save migrated preset if migration occurred (to prevent repeated migration logs)
-            if model_last_used and migrated != model_last_used:
-                last_used_name = preset_manager.get_last_used_name("seedvr2", model)
-                if last_used_name and last_used_name not in migrations_performed:
-                    migrations_performed.add(last_used_name)
-                    try:
-                        preset_manager.save_preset_safe("seedvr2", model, last_used_name, migrated)
-                        print(f"✅ Auto-migrated SeedVR2 preset '{last_used_name}' for model {model}")
-                    except Exception as e:
-                        print(f"⚠️ Could not auto-save migrated preset '{last_used_name}': {e}")
-        
-        # === GAN TAB ===
-        gan_cache = {}
-        for model in gan_models:
-            model_last_used = preset_manager.load_last_used("gan", model)
-            model_defaults = gan_defaults(BASE_DIR)
-            gan_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
-        
-        # === RIFE TAB ===
-        rife_cache = {}
-        for model in rife_models:
-            model_last_used = preset_manager.load_last_used("rife", model)
-            model_defaults = rife_defaults(model)
-            rife_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
-        
-        # === FLASHVSR TAB ===
-        flashvsr_cache = {}
-        for model in flashvsr_models:
-            model_last_used = preset_manager.load_last_used("flashvsr", model)
-            model_defaults = flashvsr_defaults(model)
-            flashvsr_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
-        
-        # === FACE TAB ===
-        face_cache = {}
-        for model in all_models:  # Load face presets for ALL models (no limit)
-            model_last_used = preset_manager.load_last_used("face", model)
-            model_defaults = face_defaults(all_models)
-            face_cache[model] = preset_manager.merge_config(model_defaults, model_last_used) if model_last_used else model_defaults
-        
-        return (primary_res_settings, resolution_cache, primary_output_settings, output_cache,
-                seedvr2_cache, gan_cache, rife_cache, flashvsr_cache, face_cache)
-
-    # Load all startup presets for ALL tabs
-    (startup_res_settings, startup_res_cache, startup_output_settings, startup_output_cache,
-     startup_seedvr2_cache, startup_gan_cache, startup_rife_cache, startup_flashvsr_cache, startup_face_cache) = load_all_startup_presets()
+        if loaded_preset:
+            # Merge with defaults to fill any missing keys
+            merged_preset = merge_preset_with_defaults(loaded_preset, BASE_DIR, all_models)
+            return merged_preset, last_preset_name, all_models
+        else:
+            # Use defaults
+            defaults = get_all_defaults(BASE_DIR, all_models)
+            return defaults, None, all_models
+    
+    # Load universal preset on startup
+    startup_preset, startup_preset_name, all_models = load_startup_universal_preset()
     
     with gr.Blocks(title=APP_TITLE, theme=modern_theme) as demo:
-        # Shared state for cross-tab communication
-        # AUTO-POPULATED with last-used presets for ALL tabs on startup (Resolution, Output, SeedVR2, GAN, RIFE, FlashVSR+, Face)
+        # =========================================================================
+        # SHARED STATE - Populated from UNIVERSAL PRESET on startup
+        # =========================================================================
+        # Extract tab settings from universal preset
+        startup_res_settings = startup_preset.get("resolution", {})
+        startup_output_settings = startup_preset.get("output", {})
+        
         shared_state = gr.State({
             "health_banner": {"text": health_text},
             "seed_controls": {
-                # AUTO-LOADED from Resolution tab last-used presets (primary model UI values)
+                # UNIVERSAL PRESET: Current preset name
+                "current_preset_name": startup_preset_name,
+                "preset_dirty": False,
+                
+                # UNIVERSAL PRESET: Full tab settings (used by all tabs)
+                "seedvr2_settings": startup_preset.get("seedvr2", {}),
+                "gan_settings": startup_preset.get("gan", {}),
+                "rife_settings": startup_preset.get("rife", {}),
+                "flashvsr_settings": startup_preset.get("flashvsr", {}),
+                "face_settings": startup_preset.get("face", {}),
+                "resolution_settings": startup_preset.get("resolution", {}),
+                "output_settings": startup_preset.get("output", {}),
+                
+                # Individual cached values (for backward compatibility with other code)
                 "resolution_val": startup_res_settings.get("target_resolution", 1080),
                 "max_resolution_val": startup_res_settings.get("max_target_resolution", 0),
                 "current_model": None,
                 "last_input_path": "",
                 "last_output_dir": "",
-                "last_output_path": None,  # FIXED: Added for pinned comparison feature
-                # AUTO-LOADED per-model caches for ALL tabs (restored at startup)
-                "resolution_cache": startup_res_cache,
-                "output_cache": startup_output_cache,
-                "seedvr2_cache": startup_seedvr2_cache,  # NEW: SeedVR2 presets per model
-                "gan_cache": startup_gan_cache,  # NEW: GAN presets per model
-                "rife_cache": startup_rife_cache,  # NEW: RIFE presets per model
-                "flashvsr_cache": startup_flashvsr_cache,  # NEW: FlashVSR+ presets per model
-                "face_cache": startup_face_cache,  # NEW: Face presets per model
-                # AUTO-LOADED from Output tab last-used presets (primary model UI values)
+                "last_output_path": None,
+                
+                # Output tab cached values
                 "png_padding_val": startup_output_settings.get("png_padding", 6),
                 "png_keep_basename_val": startup_output_settings.get("png_keep_basename", True),
                 "skip_first_frames_val": startup_output_settings.get("skip_first_frames", 0),
@@ -327,7 +273,8 @@ def main():
                 "fullscreen_val": startup_output_settings.get("fullscreen_enabled", True),
                 "save_metadata_val": startup_output_settings.get("save_metadata", True),
                 "face_strength_val": global_settings.get("face_strength", 0.5),
-                # AUTO-LOADED chunking settings from Resolution tab (primary model)
+                
+                # Resolution tab cached values
                 "chunk_size_sec": startup_res_settings.get("chunk_size", 0),
                 "chunk_overlap_sec": startup_res_settings.get("chunk_overlap", 0.5),
                 "ratio_downscale": startup_res_settings.get("ratio_downscale_then_upscale", False),
@@ -336,8 +283,12 @@ def main():
                 "per_chunk_cleanup": startup_res_settings.get("per_chunk_cleanup", False),
                 "scene_threshold": startup_res_settings.get("scene_threshold", 27.0),
                 "min_scene_len": startup_res_settings.get("min_scene_len", 2.0),
-                # RESTORE pinned reference from global settings (persists across restarts)
+                
+                # Pinned reference (persisted globally)
                 "pinned_reference_path": global_settings.get("pinned_reference_path"),
+                
+                # Available models list (for preset defaults)
+                "available_models": all_models,
             },
             "operation_status": "ready"
         })

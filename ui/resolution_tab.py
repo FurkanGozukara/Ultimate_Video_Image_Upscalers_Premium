@@ -1,5 +1,6 @@
 """
 Resolution & Scene Split Tab - Complete Implementation with Auto-Calculation
+UPDATED: Now uses Universal Preset System
 """
 
 import gradio as gr
@@ -15,6 +16,11 @@ from shared.models import (
     get_flashvsr_model_names,
     get_rife_model_names
 )
+from ui.universal_preset_section import (
+    universal_preset_section,
+    wire_universal_preset_events,
+)
+from shared.universal_preset import dict_to_values
 
 
 def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
@@ -42,25 +48,30 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     # Build service callbacks
     service = build_resolution_callbacks(preset_manager, shared_state, combined_models)
 
-    # Get defaults and last used
-    current_model = combined_models[0] if combined_models else "default"
+    # Get defaults
     defaults = service["defaults"]
-    last_used_name = preset_manager.get_last_used_name("resolution", current_model)
-    last_used = preset_manager.load_last_used("resolution", current_model)
     
-    if last_used_name and last_used is None:
-        def update_warning(state):
-            existing = state["health_banner"]["text"]
-            warning = f"⚠️ Last used Resolution preset '{last_used_name}' not found; loaded defaults."
-            if existing:
-                state["health_banner"]["text"] = existing + "\n" + warning
-            else:
-                state["health_banner"]["text"] = warning
-            return state
-        shared_state.value = update_warning(shared_state.value)
-
-    merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+    # UNIVERSAL PRESET: Load from shared_state
+    seed_controls = shared_state.value.get("seed_controls", {})
+    resolution_settings = seed_controls.get("resolution_settings", {})
+    current_preset_name = seed_controls.get("current_preset_name")
+    models_list = seed_controls.get("available_models", combined_models)
+    
+    # Merge with defaults
+    merged_defaults = defaults.copy()
+    for key, value in resolution_settings.items():
+        if value is not None:
+            merged_defaults[key] = value
+    
     values = [merged_defaults[k] for k in RESOLUTION_ORDER]
+    
+    if current_preset_name:
+        def update_status(state):
+            existing = state["health_banner"]["text"]
+            msg = f"✅ Resolution: Using universal preset '{current_preset_name}'"
+            state["health_banner"]["text"] = existing + "\n" + msg if existing else msg
+            return state
+        shared_state.value = update_status(shared_state.value)
 
     # Header
     gr.Markdown("### 📐 Resolution & Scene Split Settings")
@@ -189,28 +200,25 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                 use_seedvr2_input_btn = gr.Button("📥 Use SeedVR2 Input", size="lg")
                 refresh_calc_btn = gr.Button("🔄 Refresh", size="lg")
 
-    # Preset management
-    with gr.Accordion("💾 Preset Management", open=True):
-        gr.Markdown("#### Save/Load Resolution Presets")
-        
-        preset_dropdown = gr.Dropdown(
-            label="Resolution Presets",
-            choices=preset_manager.list_presets("resolution", current_model),
-            value=last_used_name or "",
-        )
-
-        with gr.Row():
-            preset_name = gr.Textbox(
-                label="Preset Name",
-                placeholder="my_resolution_preset"
-            )
-            save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
-
-        with gr.Row():
-            load_preset_btn = gr.Button("📂 Load Preset")
-            safe_defaults_btn = gr.Button("🔄 Safe Defaults")
-
-        preset_status = gr.Markdown("")
+    # UNIVERSAL PRESET MANAGEMENT
+    (
+        preset_dropdown,
+        preset_name_input,
+        save_preset_btn,
+        load_preset_btn,
+        preset_status,
+        reset_defaults_btn,
+        delete_preset_btn,
+        preset_callbacks,
+    ) = universal_preset_section(
+        preset_manager=preset_manager,
+        shared_state=shared_state,
+        tab_name="resolution",
+        inputs_list=[],
+        base_dir=base_dir,
+        models_list=models_list,
+        open_accordion=True,
+    )
 
     # Apply to pipeline
     gr.Markdown("#### 🔗 Apply to Pipeline")
@@ -228,32 +236,18 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         per_chunk_cleanup, scene_threshold, min_scene_len
     ]
 
-    # Wire up callbacks
-    def refresh_presets(model):
-        presets = preset_manager.list_presets("resolution", model)
-        return gr.update(choices=presets, value="")
-
-    model_selector.change(
-        fn=refresh_presets,
-        inputs=model_selector,
-        outputs=preset_dropdown
-    )
-
-    save_preset_btn.click(
-        fn=lambda name, *vals: service["save_preset"](name, *vals),
-        inputs=[preset_name] + inputs_list,
-        outputs=[preset_dropdown, preset_status] + inputs_list
-    )
-
-    load_preset_btn.click(
-        fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals)),
-        inputs=[preset_dropdown, model_selector] + inputs_list,
-        outputs=inputs_list + [preset_status]  # FIXED: Match service return signature
-    )
-
-    safe_defaults_btn.click(
-        fn=service["safe_defaults"],
-        outputs=inputs_list
+    # UNIVERSAL PRESET EVENT WIRING
+    wire_universal_preset_events(
+        preset_dropdown=preset_dropdown,
+        preset_name_input=preset_name_input,
+        save_btn=save_preset_btn,
+        load_btn=load_preset_btn,
+        preset_status=preset_status,
+        reset_btn=reset_defaults_btn,
+        delete_btn=delete_preset_btn,
+        callbacks=preset_callbacks,
+        inputs_list=inputs_list,
+        shared_state=shared_state,
     )
 
     apply_to_seed_btn.click(

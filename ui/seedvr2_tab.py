@@ -1,19 +1,26 @@
 """
 SeedVR2 Tab - Self-contained modular implementation
 Following SECourses_Musubi_Trainer pattern
+
+UPDATED: Now uses Universal Preset System for all preset operations.
 """
 
 import gradio as gr
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from shared.services.seedvr2_service import (
     seedvr2_defaults, SEEDVR2_ORDER, build_seedvr2_callbacks
 )
 from shared.models.seedvr2_meta import get_seedvr2_model_names
-from ui.shared_components import preset_section
 from shared.video_comparison_slider import create_video_comparison_html
 from shared.ui_validators import validate_batch_size_seedvr2, validate_resolution
+from ui.universal_preset_section import (
+    universal_preset_section,
+    wire_universal_preset_events,
+    get_tab_values_from_state,
+)
+from shared.universal_preset import dict_to_values
 
 
 def seedvr2_tab(
@@ -29,55 +36,48 @@ def seedvr2_tab(
     """
     Self-contained SeedVR2 tab following SECourses modular pattern.
     All logic, callbacks, and state management internal to this function.
+    
+    UPDATED: Uses Universal Preset System - settings loaded from shared_state.
     """
-    # Get defaults and last used preset
-    # FIXED: Use startup cache for current model instead of re-loading
+    # Get defaults
     defaults = seedvr2_defaults()
     default_model = defaults.get("dit_model")
     
     # Import migration and guardrails for preset loading
     from shared.services.seedvr2_service import _enforce_seedvr2_guardrails
     
-    # Try to load from startup cache first (already loaded in secourses_app.py)
-    seedvr2_cache = shared_state.value.get("seed_controls", {}).get("seedvr2_cache", {})
-    cached_for_model = seedvr2_cache.get(default_model)
+    # =========================================================================
+    # UNIVERSAL PRESET: Load values from shared_state (populated on startup)
+    # =========================================================================
+    seed_controls = shared_state.value.get("seed_controls", {})
+    seedvr2_settings = seed_controls.get("seedvr2_settings", {})
+    current_preset_name = seed_controls.get("current_preset_name")
+    models_list = seed_controls.get("available_models", ["default"])
     
-    if cached_for_model:
-        # Use pre-loaded settings from startup, but apply migration and guardrails (silent to avoid duplicate logs)
-        merged_defaults = _enforce_seedvr2_guardrails(cached_for_model, defaults, state=None, silent_migration=True)
-        last_used_name = preset_manager.get_last_used_name("seedvr2", default_model)
-        
-        def update_success(state):
-            existing = state["health_banner"]["text"]
-            preset_info = f" (preset: '{last_used_name}')" if last_used_name else ""
-            success_msg = f"✅ SeedVR2: Loaded settings for {default_model}{preset_info}"
-            state["health_banner"]["text"] = existing + "\n" + success_msg if existing else success_msg
-            return state
-        shared_state.value = update_success(shared_state.value)
-    else:
-        # Fallback: Load on-demand if cache missed
-        last_used_name = preset_manager.get_last_used_name("seedvr2", default_model)
-        last_used = preset_manager.load_last_used("seedvr2", default_model)
-        
-        if last_used_name and last_used is None:
-            def update_warning(state):
-                existing = state["health_banner"]["text"]
-                warning = f"⚠️ Last used SeedVR2 preset '{last_used_name}' not found or corrupted; loaded defaults."
-                state["health_banner"]["text"] = existing + "\n" + warning if existing else warning
-                return state
-            shared_state.value = update_warning(shared_state.value)
-        
-        # Apply migration and guardrails to loaded preset (silent to avoid duplicate logs)
-        merged = preset_manager.merge_config(defaults, last_used or {})
-        merged_defaults = _enforce_seedvr2_guardrails(merged, defaults, state=None, silent_migration=True)
+    # Merge with defaults to ensure all keys exist
+    merged_defaults = defaults.copy()
+    for key, value in seedvr2_settings.items():
+        if value is not None:
+            merged_defaults[key] = value
+    
+    # Apply guardrails
+    merged_defaults = _enforce_seedvr2_guardrails(merged_defaults, defaults, state=None, silent_migration=True)
     
     # Ensure ALL keys from SEEDVR2_ORDER exist with valid values
-    # This handles cases where old presets are missing new parameters
     for key in SEEDVR2_ORDER:
         if key not in merged_defaults or merged_defaults[key] is None:
             merged_defaults[key] = defaults[key]
     
     values = [merged_defaults[k] for k in SEEDVR2_ORDER]
+    
+    # Log preset status
+    if current_preset_name:
+        def update_status(state):
+            existing = state["health_banner"]["text"]
+            msg = f"✅ SeedVR2: Using universal preset '{current_preset_name}'"
+            state["health_banner"]["text"] = existing + "\n" + msg if existing else msg
+            return state
+        shared_state.value = update_status(shared_state.value)
 
     # Build service callbacks
     service = build_seedvr2_callbacks(
@@ -701,14 +701,26 @@ def seedvr2_tab(
                 </div>
                 """)
 
-            # Preset management (presets are shared across all models)
-            preset_dropdown, preset_name, save_preset_btn, load_preset_btn, preset_status, safe_defaults_btn = preset_section(
-                "SeedVR2",
-                preset_manager,
-                values[4],  # dit_model
-                preset_manager.list_presets("seedvr2"),  # All presets for tab (not model-specific)
-                last_used_name or "",
-                safe_defaults_label="🔄 Safe Defaults (SeedVR2)"
+            # =========================================================================
+            # UNIVERSAL PRESET MANAGEMENT - Same UI across ALL tabs
+            # =========================================================================
+            (
+                preset_dropdown,
+                preset_name_input,
+                save_preset_btn,
+                load_preset_btn,
+                preset_status,
+                reset_defaults_btn,
+                delete_preset_btn,
+                preset_callbacks,
+            ) = universal_preset_section(
+                preset_manager=preset_manager,
+                shared_state=shared_state,
+                tab_name="seedvr2",
+                inputs_list=[],  # Will be set after inputs_list is defined
+                base_dir=base_dir,
+                models_list=models_list,
+                open_accordion=True,
             )
 
             # Performance & Compile - MOVED HERE: after Safe Defaults button
@@ -1228,29 +1240,20 @@ def seedvr2_tab(
         outputs=[status_box, shared_state]
     )
 
-    # Preset management - FIXED: Proper argument passing and output alignment
-    save_preset_btn.click(
-        fn=lambda name, model, selected_preset, *vals: service["save_preset"](name, model, selected_preset, *vals[:-1]) + (vals[-1],),
-        inputs=[preset_name, dit_model, preset_dropdown] + inputs_list + [shared_state],
-        outputs=[preset_dropdown, preset_status] + inputs_list + [shared_state]
-    )
-
-    load_preset_btn.click(
-        fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals[:-1])) + (vals[-1],),
-        inputs=[preset_dropdown, dit_model] + inputs_list + [shared_state],
-        outputs=inputs_list + [preset_status, shared_state]  # FIXED: status is now second-to-last
-    )
-    
-    # Auto-load preset when dropdown selection changes
-    preset_dropdown.change(
-        fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals[:-1])) + (vals[-1],) if preset else (vals[:-1] + (gr.update(value=""), vals[-1])),
-        inputs=[preset_dropdown, dit_model] + inputs_list + [shared_state],
-        outputs=inputs_list + [preset_status, shared_state]
-    )
-
-    safe_defaults_btn.click(
-        fn=service["safe_defaults"],
-        outputs=inputs_list
+    # =========================================================================
+    # UNIVERSAL PRESET EVENT WIRING
+    # =========================================================================
+    wire_universal_preset_events(
+        preset_dropdown=preset_dropdown,
+        preset_name_input=preset_name_input,
+        save_btn=save_preset_btn,
+        load_btn=load_preset_btn,
+        preset_status=preset_status,
+        reset_btn=reset_defaults_btn,
+        delete_btn=delete_preset_btn,
+        callbacks=preset_callbacks,
+        inputs_list=inputs_list,
+        shared_state=shared_state,
     )
 
     # Update health display from shared state

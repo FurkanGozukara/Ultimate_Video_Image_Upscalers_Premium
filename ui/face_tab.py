@@ -1,5 +1,6 @@
 """
 Face Restoration Tab - Self-contained modular implementation
+UPDATED: Now uses Universal Preset System
 """
 
 import gradio as gr
@@ -9,6 +10,11 @@ from shared.services.face_service import (
     build_face_callbacks, FACE_ORDER
 )
 from shared.models.seedvr2_meta import get_seedvr2_model_names
+from ui.universal_preset_section import (
+    universal_preset_section,
+    wire_universal_preset_events,
+)
+from shared.universal_preset import dict_to_values
 
 
 def _get_gan_model_names(base_dir) -> list:
@@ -60,24 +66,30 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
     # Build service callbacks
     service = build_face_callbacks(preset_manager, global_settings, combined_models, shared_state)
 
-    # Get defaults and last used
-    current_model = combined_models[0] if combined_models else "default"
+    # Get defaults
     defaults = service["defaults"]
-    last_used_name = preset_manager.get_last_used_name("face", current_model)
-    last_used = preset_manager.load_last_used("face", current_model)
-    if last_used_name and last_used is None:
-        def update_warning(state):
-            existing = state["health_banner"]["text"]
-            warning = f"Last used Face preset '{last_used_name}' not found; loaded defaults."
-            if existing:
-                state["health_banner"]["text"] = existing + "\n" + warning
-            else:
-                state["health_banner"]["text"] = warning
-            return state
-        shared_state.value = update_warning(shared_state.value)
-
-    merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+    
+    # UNIVERSAL PRESET: Load from shared_state
+    seed_controls = shared_state.value.get("seed_controls", {})
+    face_settings = seed_controls.get("face_settings", {})
+    current_preset_name = seed_controls.get("current_preset_name")
+    models_list = seed_controls.get("available_models", combined_models)
+    
+    # Merge with defaults
+    merged_defaults = defaults.copy()
+    for key, value in face_settings.items():
+        if value is not None:
+            merged_defaults[key] = value
+    
     values = [merged_defaults.get(k, defaults.get(k, "")) for k in FACE_ORDER]
+    
+    if current_preset_name:
+        def update_status(state):
+            existing = state["health_banner"]["text"]
+            msg = f"✅ Face: Using universal preset '{current_preset_name}'"
+            state["health_banner"]["text"] = existing + "\n" + msg if existing else msg
+            return state
+        shared_state.value = update_status(shared_state.value)
 
     # Layout
     gr.Markdown("### 👤 Face Restoration Settings")
@@ -112,7 +124,7 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
     model_selector = gr.Dropdown(
         label="Model Context (for presets)",
         choices=combined_models,
-        value=current_model,
+        value=combined_models[0] if combined_models else "default",
         info="Settings are saved/loaded per model type"
     )
 
@@ -312,28 +324,26 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
                     info="Save debug masks showing detected face regions"
                 )
 
-    # Preset management
+    # UNIVERSAL PRESET MANAGEMENT
     with gr.Accordion("💾 Preset Management", open=True):
-        gr.Markdown("#### Save/Load Face Settings")
-
-        preset_dropdown = gr.Dropdown(
-            label="Face Presets",
-            choices=preset_manager.list_presets("face", current_model),
-            value=last_used_name or "",
+        (
+            preset_dropdown,
+            preset_name_input,
+            save_preset_btn,
+            load_preset_btn,
+            preset_status,
+            reset_defaults_btn,
+            delete_preset_btn,
+            preset_callbacks,
+        ) = universal_preset_section(
+            preset_manager=preset_manager,
+            shared_state=shared_state,
+            tab_name="face",
+            inputs_list=[],
+            base_dir=base_dir,
+            models_list=models_list,
+            open_accordion=False,  # Already in accordion
         )
-
-        with gr.Row():
-            preset_name = gr.Textbox(
-                label="Preset Name",
-                placeholder="my_face_preset"
-            )
-            save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
-
-        with gr.Row():
-            load_preset_btn = gr.Button("📂 Load Preset")
-            safe_defaults_btn = gr.Button("🔄 Safe Defaults")
-
-        preset_status = gr.Markdown("")
 
     # Performance info
     with gr.Accordion("📊 Performance Impact", open=False):
@@ -365,16 +375,7 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
     ]
 
     # Wire up callbacks
-    def refresh_presets(model):
-        presets = preset_manager.list_presets("face", model)
-        return gr.update(choices=presets, value="")
-
-    model_selector.change(
-        fn=refresh_presets,
-        inputs=model_selector,
-        outputs=preset_dropdown
-    )
-
+    
     # Global face toggle
     apply_global_btn.click(
         fn=lambda enabled, state: service["set_face_global"](enabled, state),
@@ -382,20 +383,16 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
         outputs=[global_status, shared_state]
     )
 
-    save_preset_btn.click(
-        fn=lambda name, model, *vals: service["save_preset"](name, model, list(vals)),
-        inputs=[preset_name, model_selector] + inputs_list,
-        outputs=[preset_dropdown, preset_status]
-    )
-
-    load_preset_btn.click(
-        fn=lambda preset, model, *vals: service["load_preset"](preset, model, list(vals)),
-        inputs=[preset_dropdown, model_selector] + inputs_list,
-        outputs=inputs_list[1:] + [preset_status]  # Skip model_selector
-    )
-
-    safe_defaults_btn.click(
-        fn=lambda model: service["safe_defaults"](model),
-        inputs=model_selector,
-        outputs=inputs_list[1:]  # Skip model_selector
+    # UNIVERSAL PRESET EVENT WIRING
+    wire_universal_preset_events(
+        preset_dropdown=preset_dropdown,
+        preset_name_input=preset_name_input,
+        save_btn=save_preset_btn,
+        load_btn=load_preset_btn,
+        preset_status=preset_status,
+        reset_btn=reset_defaults_btn,
+        delete_btn=delete_preset_btn,
+        callbacks=preset_callbacks,
+        inputs_list=inputs_list,
+        shared_state=shared_state,
     )

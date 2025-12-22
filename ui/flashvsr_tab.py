@@ -1,6 +1,7 @@
 """
 FlashVSR+ Tab - Self-contained modular implementation
 Real-time diffusion-based streaming video super-resolution
+UPDATED: Now uses Universal Preset System
 """
 
 import gradio as gr
@@ -10,6 +11,11 @@ from typing import Dict, Any
 from shared.services.flashvsr_service import (
     build_flashvsr_callbacks, FLASHVSR_ORDER
 )
+from ui.universal_preset_section import (
+    universal_preset_section,
+    wire_universal_preset_events,
+)
+from shared.universal_preset import dict_to_values
 
 
 def flashvsr_tab(
@@ -31,23 +37,30 @@ def flashvsr_tab(
         base_dir, temp_dir, output_dir
     )
 
-    # Get defaults and last used
+    # Get defaults
     defaults = service["defaults"]
-    # Use current model context for last-used preset (not hardcoded)
-    current_model_context = f"v{defaults['version']}_{defaults['mode']}"
-    last_used_name = preset_manager.get_last_used_name("flashvsr", current_model_context)
-    last_used = preset_manager.load_last_used("flashvsr", current_model_context)
-
-    if last_used_name and last_used is None:
-        def update_warning(state):
-            existing = state["health_banner"]["text"]
-            warning = f"⚠️ Last used FlashVSR+ preset '{last_used_name}' not found; loaded defaults."
-            state["health_banner"]["text"] = existing + "\n" + warning if existing else warning
-            return state
-        shared_state.value = update_warning(shared_state.value)
-
-    merged_defaults = preset_manager.merge_config(defaults, last_used or {})
+    
+    # UNIVERSAL PRESET: Load from shared_state
+    seed_controls = shared_state.value.get("seed_controls", {})
+    flashvsr_settings = seed_controls.get("flashvsr_settings", {})
+    current_preset_name = seed_controls.get("current_preset_name")
+    models_list = seed_controls.get("available_models", ["default"])
+    
+    # Merge with defaults
+    merged_defaults = defaults.copy()
+    for key, value in flashvsr_settings.items():
+        if value is not None:
+            merged_defaults[key] = value
+    
     values = [merged_defaults[k] for k in FLASHVSR_ORDER]
+    
+    if current_preset_name:
+        def update_status(state):
+            existing = state["health_banner"]["text"]
+            msg = f"✅ FlashVSR+: Using universal preset '{current_preset_name}'"
+            state["health_banner"]["text"] = existing + "\n" + msg if existing else msg
+            return state
+        shared_state.value = update_status(shared_state.value)
 
     # GPU detection and warnings
     cuda_available = False
@@ -310,26 +323,25 @@ def flashvsr_tab(
                 open_outputs_btn = gr.Button("📂 Open Outputs")
                 clear_temp_btn = gr.Button("🗑️ Clear Temp")
             
-            # Preset Management
-            with gr.Accordion("💾 Preset Management", open=True):
-                preset_dropdown = gr.Dropdown(
-                    label="FlashVSR+ Presets",
-                    choices=preset_manager.list_presets("flashvsr", "v10_tiny"),
-                    value=last_used_name or ""
-                )
-                
-                with gr.Row():
-                    preset_name = gr.Textbox(
-                        label="Preset Name",
-                        placeholder="my_flashvsr_preset"
-                    )
-                    save_preset_btn = gr.Button("💾 Save", variant="secondary")
-                
-                with gr.Row():
-                    load_preset_btn = gr.Button("📂 Load")
-                    safe_defaults_btn = gr.Button("🔄 Reset to Defaults")
-                
-                preset_status = gr.Markdown("")
+            # UNIVERSAL PRESET MANAGEMENT
+            (
+                preset_dropdown,
+                preset_name_input,
+                save_preset_btn,
+                load_preset_btn,
+                preset_status,
+                reset_defaults_btn,
+                delete_preset_btn,
+                preset_callbacks,
+            ) = universal_preset_section(
+                preset_manager=preset_manager,
+                shared_state=shared_state,
+                tab_name="flashvsr",
+                inputs_list=[],
+                base_dir=base_dir,
+                models_list=models_list,
+                open_accordion=True,
+            )
             
             # Info
             gr.Markdown("""
@@ -400,21 +412,17 @@ def flashvsr_tab(
         outputs=status_box
     )
     
-    # Preset management
-    save_preset_btn.click(
-        fn=lambda name, *vals: service["save_preset"](name, *vals),
-        inputs=[preset_name] + inputs_list,
-        outputs=[preset_dropdown, preset_status] + inputs_list
-    )
-    
-    load_preset_btn.click(
-        fn=lambda preset, ver, mod, *vals: service["load_preset"](preset, ver, mod, list(vals)),
-        inputs=[preset_dropdown, version, mode] + inputs_list,
-        outputs=inputs_list + [preset_status]  # FIXED: Match service return signature
-    )
-    
-    safe_defaults_btn.click(
-        fn=service["safe_defaults"],
-        outputs=inputs_list
+    # UNIVERSAL PRESET EVENT WIRING
+    wire_universal_preset_events(
+        preset_dropdown=preset_dropdown,
+        preset_name_input=preset_name_input,
+        save_btn=save_preset_btn,
+        load_btn=load_preset_btn,
+        preset_status=preset_status,
+        reset_btn=reset_defaults_btn,
+        delete_btn=delete_preset_btn,
+        callbacks=preset_callbacks,
+        inputs_list=inputs_list,
+        shared_state=shared_state,
     )
 

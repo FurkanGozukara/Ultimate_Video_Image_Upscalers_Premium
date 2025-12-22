@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,19 +11,35 @@ def _sanitize_name(name: str) -> str:
     return safe.strip("._") or "default"
 
 
+# File that tracks the last used universal preset
+LAST_USED_PRESET_FILE = ".last_used_preset.txt"
+
+
 class PresetManager:
     """
-    File-based preset manager.
+    File-based preset manager with UNIVERSAL PRESET support.
 
-    Layout:
+    NEW Layout (v2.0 - Universal Presets):
     presets/
-      global.json
-      <tab>/
-        <preset_name>.json
-        .last_used/
-          <model>.txt  (tracks last used preset per model)
+      global.json                    # Global app settings
+      .last_used_preset.txt          # Name of last used universal preset
+      my_preset.json                 # Universal preset (contains ALL tabs)
+      another_preset.json            # Another universal preset
     
-    Each preset file contains the model name as part of its data.
+    Universal preset format:
+    {
+      "_meta": {"version": "2.0", "format": "universal", ...},
+      "seedvr2": {...},              # All SeedVR2 settings
+      "gan": {...},                  # All GAN settings
+      "rife": {...},                 # All RIFE settings
+      "flashvsr": {...},             # All FlashVSR settings
+      "face": {...},                 # All Face settings
+      "resolution": {...},           # All Resolution settings
+      "output": {...}                # All Output settings
+    }
+    
+    OLD Layout (deprecated, auto-migrated):
+    presets/<tab>/<preset_name>.json
     """
 
     def __init__(self, base_dir: Path):
@@ -622,5 +639,165 @@ class PresetManager:
         except Exception as e:
             print(f"⚠️ Preset migration warning: {e}")
             # Non-fatal - continue even if migration fails
+
+    # ------------------------------------------------------------------ #
+    # UNIVERSAL PRESET SYSTEM (v2.0)
+    # All tabs save/load from single preset file
+    # ------------------------------------------------------------------ #
+    
+    def _universal_preset_path(self, preset_name: str) -> Path:
+        """Get path for a universal preset file (stored directly in presets/)"""
+        return self.base_dir / f"{_sanitize_name(preset_name)}.json"
+    
+    def _last_used_preset_path(self) -> Path:
+        """Get path for the last used preset tracker file"""
+        return self.base_dir / LAST_USED_PRESET_FILE
+    
+    def list_universal_presets(self) -> List[str]:
+        """
+        List all universal presets (JSON files directly in presets/ folder).
+        
+        Excludes:
+        - global.json (app settings)
+        - Subfolders (old per-tab structure)
+        - Hidden files
+        """
+        if not self.base_dir.exists():
+            return []
+        
+        presets = []
+        for path in self.base_dir.glob("*.json"):
+            if path.name == "global.json":
+                continue
+            if path.is_file():
+                presets.append(path.stem)
+        
+        return sorted(presets)
+    
+    def save_universal_preset(self, preset_name: str, data: Dict[str, Any]) -> str:
+        """
+        Save a universal preset containing all tab settings.
+        
+        Args:
+            preset_name: Name for the preset
+            data: Universal preset dict with structure:
+                  {"seedvr2": {...}, "gan": {...}, ..., "_meta": {...}}
+        
+        Returns:
+            Sanitized preset name
+        """
+        if not preset_name or not preset_name.strip():
+            raise ValueError("Preset name cannot be empty")
+        
+        safe_name = _sanitize_name(preset_name.strip())
+        preset_path = self._universal_preset_path(safe_name)
+        
+        # Add/update metadata
+        if "_meta" not in data:
+            data["_meta"] = {}
+        data["_meta"]["version"] = "2.0"
+        data["_meta"]["format"] = "universal"
+        data["_meta"]["last_modified"] = datetime.now().isoformat()
+        if "created_at" not in data["_meta"]:
+            data["_meta"]["created_at"] = data["_meta"]["last_modified"]
+        
+        # Atomic write: write to tmp file then rename
+        tmp_path = preset_path.with_suffix(".json.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            tmp_path.replace(preset_path)
+        except Exception as e:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
+        
+        # Update last used
+        self.set_last_used_universal_preset(safe_name)
+        
+        return safe_name
+    
+    def load_universal_preset(self, preset_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Load a universal preset.
+        
+        Args:
+            preset_name: Name of the preset to load
+        
+        Returns:
+            Universal preset dict, or None if not found
+        """
+        if not preset_name:
+            return None
+        
+        preset_path = self._universal_preset_path(preset_name)
+        if not preset_path.exists():
+            return None
+        
+        try:
+            with preset_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data
+        except Exception as e:
+            print(f"Error loading universal preset {preset_name}: {e}")
+            return None
+    
+    def delete_universal_preset(self, preset_name: str) -> bool:
+        """Delete a universal preset."""
+        preset_path = self._universal_preset_path(preset_name)
+        if preset_path.exists():
+            try:
+                preset_path.unlink()
+                return True
+            except Exception:
+                return False
+        return False
+    
+    def set_last_used_universal_preset(self, preset_name: str) -> None:
+        """
+        Save the name of the last used universal preset.
+        
+        This is stored in presets/.last_used_preset.txt
+        """
+        path = self._last_used_preset_path()
+        try:
+            with path.open("w", encoding="utf-8") as f:
+                f.write(_sanitize_name(preset_name))
+        except Exception as e:
+            print(f"⚠️ Could not save last used preset: {e}")
+    
+    def get_last_used_universal_preset(self) -> Optional[str]:
+        """
+        Get the name of the last used universal preset.
+        
+        Returns:
+            Preset name, or None if not set
+        """
+        path = self._last_used_preset_path()
+        if not path.exists():
+            return None
+        
+        try:
+            name = path.read_text(encoding="utf-8").strip()
+            return name if name else None
+        except Exception:
+            return None
+    
+    def load_last_used_universal_preset(self) -> Optional[Dict[str, Any]]:
+        """
+        Load the last used universal preset.
+        
+        Returns:
+            Universal preset dict, or None if not found
+        """
+        preset_name = self.get_last_used_universal_preset()
+        if not preset_name:
+            return None
+        
+        return self.load_universal_preset(preset_name)
+    
+    def universal_preset_exists(self, preset_name: str) -> bool:
+        """Check if a universal preset exists."""
+        return self._universal_preset_path(preset_name).exists()
 
 
