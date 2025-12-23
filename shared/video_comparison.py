@@ -18,31 +18,26 @@ def create_image_comparison(
     input_image: Optional[str],
     output_image: Optional[str],
     label: str = "Before/After Comparison"
-) -> gr.ImageSlider:
+):
     """
-    Create an enhanced image comparison using Gradio's ImageSlider.
+    Create an enhanced image comparison update for Gradio's ImageSlider.
 
     Features:
     - Native slider with smooth transitions
     - Position control for precise comparison
     - Export and fullscreen capabilities
     - Responsive design
+    
+    Returns:
+        gr.update() object for ImageSlider component
     """
     if not input_image or not output_image:
-        # Return empty slider when no images available
-        return gr.ImageSlider(
-            label=label,
-            visible=False
-        )
+        # Return update to hide slider when no images available
+        return gr.update(visible=False)
 
-    return gr.ImageSlider(
+    return gr.update(
         value=(input_image, output_image),
-        label=label,
-        slider_position=50,
-        height=600,
-        max_height=800,
-        visible=True,
-        elem_classes=["enhanced-comparison"]
+        visible=True
     )
 
 
@@ -299,7 +294,7 @@ def create_comparison_selector(
     comparison_mode: str = "slider",
     pinned_reference_path: Optional[str] = None,
     pin_enabled: bool = False
-) -> Tuple[str, Optional[gr.ImageSlider]]:
+) -> Tuple[str, Any]:
     """
     Create the appropriate comparison component based on mode and content type.
     
@@ -311,16 +306,16 @@ def create_comparison_selector(
         pin_enabled: Whether pin reference feature is active
     
     Returns:
-        Tuple of (HTML content, ImageSlider component or None)
+        Tuple of (HTML content, gr.update() for ImageSlider or None)
     """
     if not output_path:
-        return '<div class="no-comparison"><p>No output available for comparison</p></div>', None
+        return '<div class="no-comparison"><p>No output available for comparison</p></div>', gr.update(visible=False)
     
     # Use pinned reference if available and enabled
     effective_input = pinned_reference_path if (pin_enabled and pinned_reference_path) else input_path
     
     if not effective_input:
-        return '<div class="no-comparison"><p>No reference available for comparison</p></div>', None
+        return '<div class="no-comparison"><p>No reference available for comparison</p></div>', gr.update(visible=False)
 
     input_ext = Path(effective_input).suffix.lower()
 
@@ -329,17 +324,17 @@ def create_comparison_selector(
         if comparison_mode == "slider":
             return "", create_image_comparison(effective_input, output_path)
         elif comparison_mode == "side_by_side":
-            return create_side_by_side_comparison(effective_input, output_path), None
+            return create_side_by_side_comparison(effective_input, output_path), gr.update(visible=False)
         else:
-            return create_side_by_side_comparison(effective_input, output_path), None
+            return create_side_by_side_comparison(effective_input, output_path), gr.update(visible=False)
     else:
         # Video comparison
         if comparison_mode == "slider":
-            return create_video_comparison_html(effective_input, output_path), None
+            return create_video_comparison_html(effective_input, output_path), gr.update(visible=False)
         elif comparison_mode == "side_by_side":
-            return create_side_by_side_comparison(effective_input, output_path), None
+            return create_side_by_side_comparison(effective_input, output_path), gr.update(visible=False)
         else:
-            return create_video_comparison_html(effective_input, output_path), None
+            return create_video_comparison_html(effective_input, output_path), gr.update(visible=False)
 
 
 def _pin_js(val: bool) -> str:

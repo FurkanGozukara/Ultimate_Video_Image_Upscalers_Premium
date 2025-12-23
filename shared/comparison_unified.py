@@ -34,7 +34,7 @@ def create_unified_comparison(
     enable_fullscreen: bool = True,
     pin_reference: bool = False,
     pinned_reference_path: Optional[str] = None
-) -> Tuple[Optional[gr.HTML], Optional[gr.ImageSlider]]:
+) -> Tuple[Any, Any]:
     """
     Unified comparison creator that automatically chooses the best method.
     
@@ -53,18 +53,18 @@ def create_unified_comparison(
         pinned_reference_path: Path to pinned reference file
         
     Returns:
-        (html_component, image_slider_component) - One will be populated, other None
+        (html_update, image_slider_update) - gr.update() objects for components
     """
     
     # Validate inputs
     if not input_path or not output_path:
-        return None, None
+        return gr.update(visible=False), gr.update(visible=False)
     
     input_file = Path(input_path)
     output_file = Path(output_path)
     
     if not input_file.exists() or not output_file.exists():
-        return None, None
+        return gr.update(visible=False), gr.update(visible=False)
     
     # Determine input/output types
     is_input_video = input_file.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
@@ -83,21 +83,16 @@ def create_unified_comparison(
             mode = "native"  # Use Gradio's native ImageSlider for images
         else:
             # Mixed types - can't compare
-            return None, None
+            return gr.update(visible=False), gr.update(visible=False)
     
     # Execute comparison based on mode
     if mode == "native" and is_input_image and is_output_image:
-        # Use Gradio's native ImageSlider for images
-        slider = gr.ImageSlider(
+        # Use Gradio's native ImageSlider for images - return update, not component
+        slider_update = gr.update(
             value=(reference_path, output_path),
-            label="🔍 Before/After Comparison",
-            interactive=True,
-            height=height,
-            slider_position=50,
-            max_height=height + 200,
-            buttons=["download", "fullscreen"] if enable_fullscreen else ["download"]
+            visible=True
         )
-        return None, slider
+        return gr.update(visible=False), slider_update
     
     elif mode == "slider" and is_input_video and is_output_video:
         # Use custom HTML slider for videos
@@ -107,7 +102,7 @@ def create_unified_comparison(
             height=height,
             slider_position=50.0
         )
-        return gr.HTML(value=html_content, visible=True), None
+        return gr.update(value=html_content, visible=True), gr.update(visible=False)
     
     elif mode == "side_by_side" and is_input_video and is_output_video:
         # Generate side-by-side comparison video
@@ -134,11 +129,11 @@ def create_unified_comparison(
                 <p style="color: #666; margin-top: 10px;">Saved to: {Path(comp_path).name}</p>
             </div>
             """
-            return gr.HTML(value=html_content, visible=True), None
+            return gr.update(value=html_content, visible=True), gr.update(visible=False)
         else:
             # Fallback to slider if generation failed
             html_content = _slider_html(reference_path, output_path, height)
-            return gr.HTML(value=html_content, visible=True), None
+            return gr.update(value=html_content, visible=True), gr.update(visible=False)
     
     elif mode == "stacked" and is_input_video and is_output_video:
         # Generate vertically stacked comparison video
@@ -165,14 +160,14 @@ def create_unified_comparison(
                 <p style="color: #666; margin-top: 10px;">Saved to: {Path(comp_path).name}</p>
             </div>
             """
-            return gr.HTML(value=html_content, visible=True), None
+            return gr.update(value=html_content, visible=True), gr.update(visible=False)
         else:
             # Fallback to slider
             html_content = _slider_html(reference_path, output_path, height)
-            return gr.HTML(value=html_content, visible=True), None
+            return gr.update(value=html_content, visible=True), gr.update(visible=False)
     
     # Fallback: return nothing if incompatible
-    return None, None
+    return gr.update(visible=False), gr.update(visible=False)
 
 
 def get_comparison_modes_for_type(is_video: bool) -> List[str]:
@@ -229,12 +224,12 @@ def create_video_comparison_slider(
 def create_image_comparison_slider(
     input_image: str,
     output_image: str
-) -> gr.ImageSlider:
-    """Quick helper for image slider component"""
-    _, slider = create_unified_comparison(
+):
+    """Quick helper for image slider update"""
+    _, slider_update = create_unified_comparison(
         input_image,
         output_image,
         mode="native"
     )
-    return slider if slider else gr.ImageSlider(visible=False)
+    return slider_update if slider_update else gr.update(visible=False)
 
