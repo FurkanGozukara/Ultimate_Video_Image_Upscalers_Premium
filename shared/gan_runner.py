@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -20,6 +21,7 @@ from .path_utils import (
     detect_input_type,
 )
 from .face_restore import restore_image, restore_video
+from .command_logger import get_command_logger
 
 
 # GAN Model Metadata System
@@ -263,6 +265,9 @@ def run_gan_upscale(
     Supports both image and video upscaling with automatic downscaling
     for ratio-based target resolutions.
     """
+    start_time = time.time()
+    result = None
+    
     try:
         input_path_obj = Path(normalize_path(input_path))
         if not input_path_obj.exists():
@@ -279,20 +284,58 @@ def run_gan_upscale(
         input_type = detect_input_type(str(input_path_obj))
 
         if input_type == "image":
-            return _run_gan_image(
+            result = _run_gan_image(
                 input_path_obj, model_name, settings, base_dir, temp_dir,
                 output_dir, metadata, on_progress, cancel_event
             )
         elif input_type in ("video", "directory"):
-            return _run_gan_video(
+            result = _run_gan_video(
                 input_path_obj, model_name, settings, base_dir, temp_dir,
                 output_dir, metadata, on_progress, cancel_event
             )
         else:
-            return GanResult(1, None, f"Unsupported input type: {input_type}")
+            result = GanResult(1, None, f"Unsupported input type: {input_type}")
+        
+        return result
 
     except Exception as e:
-        return GanResult(1, None, f"GAN upscale error: {str(e)}")
+        result = GanResult(1, None, f"GAN upscale error: {str(e)}")
+        return result
+    
+    finally:
+        # Log command to executed_commands folder
+        execution_time = time.time() - start_time
+        try:
+            command_logger = get_command_logger(base_dir.parent / "executed_commands")
+            
+            # Build command representation (GAN doesn't use subprocess, but we log the operation)
+            command_repr = [
+                "gan_upscale",
+                "--model", model_name,
+                "--input", str(input_path),
+                "--scale", str(metadata.scale if 'metadata' in locals() else "unknown")
+            ]
+            
+            command_logger.log_command(
+                tab_name="gan",
+                command=command_repr,
+                settings=settings,
+                returncode=result.returncode if result else -1,
+                output_path=result.output_path if result else None,
+                error_logs=[result.log] if result and result.returncode != 0 else None,
+                execution_time=execution_time,
+                additional_info={
+                    "model": model_name,
+                    "scale": metadata.scale if 'metadata' in locals() else "unknown",
+                    "architecture": metadata.architecture if 'metadata' in locals() else "unknown",
+                    "input_type": input_type if 'input_type' in locals() else "unknown"
+                }
+            )
+            if on_progress:
+                on_progress("✅ Command logged to executed_commands folder\n")
+        except Exception as e:
+            if on_progress:
+                on_progress(f"⚠️ Failed to log command: {e}\n")
 
 
 def _run_gan_image(

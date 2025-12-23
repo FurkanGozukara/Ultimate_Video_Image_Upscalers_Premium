@@ -18,8 +18,29 @@ class RunLogger:
         summary_path = target_dir / "run_summary.json"
         payload = payload.copy()
         payload.setdefault("timestamp", time.strftime("%Y-%m-%d %H:%M:%S"))
+        
+        # Load existing entries if file exists
+        existing_entries = []
+        if summary_path.exists():
+            try:
+                with summary_path.open("r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content:
+                        existing_entries = json.loads(content)
+                        # Ensure it's a list
+                        if not isinstance(existing_entries, list):
+                            existing_entries = [existing_entries]
+            except (json.JSONDecodeError, Exception):
+                # If file is corrupted or not valid JSON, start fresh
+                existing_entries = []
+        
+        # Append new entry
+        existing_entries.append(payload)
+        
+        # Write back all entries
         with summary_path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+            json.dump(existing_entries, f, indent=2)
+        
         return summary_path
 
 

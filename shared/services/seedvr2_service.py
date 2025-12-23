@@ -159,16 +159,31 @@ def _get_default_attention_mode() -> str:
         return "sdpa"
 
 
-def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
+def seedvr2_defaults(model_name: Optional[str] = None, base_dir: Optional[Path] = None) -> Dict[str, Any]:
     """
     Get default SeedVR2 settings aligned with CLI defaults.
     Applies model-specific metadata when model_name is provided.
+    
+    Args:
+        model_name: Optional model name to apply metadata from
+        base_dir: Optional base directory (app root) to resolve model_dir path
     """
     try:
         import torch
         cuda_default = "0" if torch.cuda.is_available() else ""
     except Exception:
         cuda_default = ""
+    
+    # Compute correct model directory path
+    # SeedVR2 models are stored in <base_dir>/SeedVR2/models/
+    if base_dir:
+        model_dir_path = str(Path(base_dir) / "SeedVR2" / "models")
+    else:
+        # Fallback: try to compute from this file's location
+        import os
+        service_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+        app_base = service_dir.parent.parent  # shared/services -> shared -> app root
+        model_dir_path = str(app_base / "SeedVR2" / "models")
     
     # Get model metadata if specific model is provided
     model_meta = None
@@ -198,7 +213,7 @@ def seedvr2_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
         "input_path": "",
         "output_override": "",
         "output_format": "auto",
-        "model_dir": "",
+        "model_dir": model_dir_path,
         "dit_model": target_model,
         "batch_enable": False,
         "batch_input_path": "",
@@ -790,6 +805,19 @@ def _process_single_file(
     chunk_progress_msg = ""
     status = "⚠️ Processing exited unexpectedly"
 
+    # CONSOLE LOGGING: Print startup info so users can see what's happening
+    print("\n" + "=" * 70, flush=True)
+    print("📦 SEEDVR2 SERVICE - STARTING PROCESSING", flush=True)
+    print("=" * 70, flush=True)
+    print(f"📁 Input Path: {settings.get('input_path', 'Not set')}", flush=True)
+    print(f"🧠 Model: {settings.get('dit_model', 'Not set')}", flush=True)
+    print(f"📐 Target Resolution: {settings.get('resolution', 'Auto')}p", flush=True)
+    print(f"📊 Batch Size: {settings.get('batch_size', 'Default')}", flush=True)
+    print(f"🖥️ CUDA Device: {settings.get('cuda_device', 'Default (0)')}", flush=True)
+    print(f"👤 Face Restore: {'Yes' if face_apply else 'No'}", flush=True)
+    print(f"👁️ Preview Only: {'Yes' if preview_only else 'No'}", flush=True)
+    print("-" * 70, flush=True)
+
     try:
         # Handle first-frame preview mode
         if preview_only:
@@ -1147,8 +1175,22 @@ def _process_single_file(
                     local_logs.append(f"⚠️ Comparison video failed: {err}")
 
     except Exception as e:
+        import traceback
         error_msg = f"Processing failed: {str(e)}"
+        traceback_str = traceback.format_exc()
+        
+        # CONSOLE LOGGING: Print error details so users can see what went wrong
+        print("\n" + "=" * 70, flush=True)
+        print("❌ SEEDVR2 PROCESSING FAILED", flush=True)
+        print("=" * 70, flush=True)
+        print(f"Error: {error_msg}", flush=True)
+        print("-" * 70, flush=True)
+        print("📋 FULL TRACEBACK:", flush=True)
+        print(traceback_str, flush=True)
+        print("=" * 70, flush=True)
+        
         local_logs.append(f"❌ {error_msg}")
+        local_logs.append(f"Traceback:\n{traceback_str}")
         status = "❌ Processing failed"
         chunk_summary = "Failed"
         chunk_info_msg = f"Error: {error_msg}"
@@ -1539,9 +1581,152 @@ def build_seedvr2_callbacks(
                 computed = min(computed, max_target_res)
             new_res = int((computed // 16) * 16 or computed)
             state["seed_controls"]["resolution_val"] = new_res
-            msg_lines.append(f"Auto-resolution: input {w}x{h} → target {new_res} (max {max_target_res})")
+            
+            # SeedVR2 sizing model (based on actual SeedVR2 code):
+            # - Resizes shortest edge to `resolution` (TVF.resize with int uses int() for the long edge)
+            # - Optionally clamps longest edge to `max_resolution` (second resize with round())
+            # - Pads to divisible by 16 for model input (DivisiblePad((16,16)))
+            # - Trims padding back off and forces even dimensions for output (video codec safety)
+            #
+            # This means intermediate resized dimensions can be odd (e.g., 1011×512) and NOT divisible by 16.
+            # That is OK because padding makes the model input divisible by 16.
+            input_short = min(w, h)
+
+            def _pad_to_factor(v: int, factor: int) -> int:
+                return v + ((factor - (v % factor)) % factor)
+
+            def _floor_to_even(v: int) -> int:
+                return (v // 2) * 2
+
+            def _estimate_seedvr2_dims(in_w: int, in_h: int, short_side_target: int, max_edge: int) -> Tuple[int, int, int, int, int, int]:
+                # Match torchvision int-resize behavior for "shortest edge = size"
+                if in_w <= in_h:
+                    # width is short
+                    resized_w = short_side_target
+                    resized_h = int(short_side_target * in_h / max(1, in_w))
+                else:
+                    # height is short
+                    resized_h = short_side_target
+                    resized_w = int(short_side_target * in_w / max(1, in_h))
+
+                # Apply max edge cap (matches SeedVR2 SideResize max_size second-pass scaling)
+                if max_edge and max_edge > 0 and max(resized_w, resized_h) > max_edge:
+                    scale = max_edge / max(resized_w, resized_h)
+                    resized_w = round(resized_w * scale)
+                    resized_h = round(resized_h * scale)
+
+                # Model processing uses padding to divisible-by-16
+                padded_w = _pad_to_factor(resized_w, 16)
+                padded_h = _pad_to_factor(resized_h, 16)
+
+                # Saved output is trimmed and forced to even dims (SeedVR2 setup_video_transform)
+                out_w = _floor_to_even(resized_w)
+                out_h = _floor_to_even(resized_h)
+
+                return resized_w, resized_h, padded_w, padded_h, out_w, out_h
+
+            resized_w, resized_h, padded_w, padded_h, out_w, out_h = _estimate_seedvr2_dims(
+                w, h, new_res, int(max_target_res or 0)
+            )
+            resized_short = min(resized_w, resized_h)
+
+            # Build list items as separate lines
+            list_items = []
+            list_items.append(f"📐 <strong>Input:</strong> {w}×{h} (short side: {input_short}px)")
+            list_items.append(
+                f"🎯 <strong>Output resize target:</strong> short side {new_res}px"
+                + (f", max edge {max_target_res}px" if max_target_res and max_target_res > 0 else "")
+            )
+            list_items.append(f"🧩 <strong>Resize result:</strong> {resized_w}×{resized_h} (short side: {resized_short}px)")
+            list_items.append(f"🧱 <strong>Padded for model (÷16):</strong> {padded_w}×{padded_h} (padding trimmed after processing)")
+            list_items.append(f"✅ <strong>Final saved output:</strong> {out_w}×{out_h} (trimmed to even numbers)")
+
+            out_short = min(out_w, out_h)
+            if out_short < input_short:
+                list_items.append(
+                    f"📉 <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)"
+                )
+                list_items.append(
+                    f"💡 <strong>Tip:</strong> To upscale instead, set the target short side to a value > {input_short}px (and ensure max edge doesn't clamp it)."
+                )
+            elif out_short > input_short:
+                list_items.append(
+                    f"📈 <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)"
+                )
+            else:
+                list_items.append(
+                    f"➡️ <strong>Mode:</strong> Keep size (output short side matches input short side)"
+                )
+            
+            # Join with line breaks and wrap in div
+            msg_lines.append('<div style="font-size: 1.15em; line-height: 1.8;">')
+            msg_lines.append("<br>".join(list_items))
+            msg_lines.append('</div>')
         else:
-            msg_lines.append("Auto-resolution disabled; no change.")
+            if dims:
+                w, h = dims
+                input_short = min(w, h)
+
+                # Reuse the same estimation logic as above (mirrors SeedVR2 resize + pad)
+                def _pad_to_factor(v: int, factor: int) -> int:
+                    return v + ((factor - (v % factor)) % factor)
+
+                def _floor_to_even(v: int) -> int:
+                    return (v // 2) * 2
+
+                def _estimate_seedvr2_dims(in_w: int, in_h: int, short_side_target: int, max_edge: int) -> Tuple[int, int, int, int, int, int]:
+                    if in_w <= in_h:
+                        resized_w = short_side_target
+                        resized_h = int(short_side_target * in_h / max(1, in_w))
+                    else:
+                        resized_h = short_side_target
+                        resized_w = int(short_side_target * in_w / max(1, in_h))
+
+                    if max_edge and max_edge > 0 and max(resized_w, resized_h) > max_edge:
+                        scale = max_edge / max(resized_w, resized_h)
+                        resized_w = round(resized_w * scale)
+                        resized_h = round(resized_h * scale)
+
+                    padded_w = _pad_to_factor(resized_w, 16)
+                    padded_h = _pad_to_factor(resized_h, 16)
+                    out_w = _floor_to_even(resized_w)
+                    out_h = _floor_to_even(resized_h)
+                    return resized_w, resized_h, padded_w, padded_h, out_w, out_h
+
+                # Use current sliders as the target setting (manual mode)
+                short_target = int(target_res or defaults["resolution"])
+                max_edge = int(max_target_res or 0)
+                resized_w, resized_h, padded_w, padded_h, out_w, out_h = _estimate_seedvr2_dims(w, h, short_target, max_edge)
+                resized_short = min(resized_w, resized_h)
+
+                list_items = []
+                list_items.append(f"📐 <strong>Input:</strong> {w}×{h} (short side: {input_short}px)")
+                list_items.append(
+                    f"🎯 <strong>Output resize target:</strong> short side {short_target}px"
+                    + (f", max edge {max_edge}px" if max_edge > 0 else "")
+                )
+                list_items.append(f"🧩 <strong>Resize result:</strong> {resized_w}×{resized_h} (short side: {resized_short}px)")
+                list_items.append(f"🧱 <strong>Padded for model (÷16):</strong> {padded_w}×{padded_h} (padding trimmed after processing)")
+                list_items.append(f"✅ <strong>Final saved output:</strong> {out_w}×{out_h} (trimmed to even numbers)")
+
+                out_short = min(out_w, out_h)
+                if out_short < input_short:
+                    list_items.append(
+                        f"📉 <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)"
+                    )
+                elif out_short > input_short:
+                    list_items.append(
+                        f"📈 <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)"
+                    )
+                else:
+                    list_items.append(
+                        f"➡️ <strong>Mode:</strong> Keep size (output short side matches input short side)"
+                    )
+
+                msg_lines.append('<div style="font-size: 1.15em; line-height: 1.8;">')
+                msg_lines.append("<br>".join(list_items))
+                msg_lines.append('</div>')
+            msg_lines.append("⚠️ Auto-resolution disabled; using manual settings.")
 
         # Chunk estimate
         est_msg = ""
@@ -1559,7 +1744,7 @@ def build_seedvr2_callbacks(
         return (
             gr.update(value=new_res),
             gr.update(value=max_target_res),
-            gr.update(value="\n".join(msg_lines)),
+            gr.update(value="\n".join(msg_lines), visible=True),
             state
         )
 

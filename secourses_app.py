@@ -1,6 +1,18 @@
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
+
+# Fix Unicode encoding on Windows console to support emojis and special characters
+if sys.platform == 'win32':
+    # Force UTF-8 encoding for console output
+    import io
+    if sys.stdout.encoding != 'utf-8':
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        except Exception:
+            pass  # Silently ignore if we can't change encoding
 
 import gradio as gr
 

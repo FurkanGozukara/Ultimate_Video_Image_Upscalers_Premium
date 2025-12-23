@@ -418,8 +418,9 @@ def generate_output_path(
     else:
         base_dir = input_path_obj.parent
 
-    # Keep the CLI-style suffix for single runs even when an output_dir override is used.
-    add_suffix = not from_directory
+    # FIXED: Match CLI behavior - no suffix when output_dir is provided OR in batch mode
+    # CLI logic: add_suffix = False when output_dir is set OR from_directory is True
+    add_suffix = not output_dir and not from_directory
     file_suffix = "_upscaled" if add_suffix else ""
     if png_keep_basename and output_format == "png":
         file_suffix = ""
@@ -493,14 +494,38 @@ def resolve_output_location(
 
 def emit_metadata(path: Path, payload: dict):
     """
-    Write metadata JSON adjacent to output (file or directory).
+    Append metadata JSON to run_metadata.json (maintains history of all runs).
+    Each run is stored as an entry in a JSON array, allowing users to find
+    generated file names and track processing history.
     """
     target_dir = path if path.is_dir() else path.parent
     ensure_dir(target_dir)
     meta_path = target_dir / "run_metadata.json"
+    
+    import json
+    
+    # Load existing entries if file exists
+    existing_entries = []
+    if meta_path.exists():
+        try:
+            with meta_path.open("r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    existing_entries = json.loads(content)
+                    # Ensure it's a list
+                    if not isinstance(existing_entries, list):
+                        existing_entries = [existing_entries]
+        except (json.JSONDecodeError, Exception):
+            # If file is corrupted or not valid JSON, start fresh
+            existing_entries = []
+    
+    # Append new entry
+    existing_entries.append(payload)
+    
+    # Write back all entries
     with meta_path.open("w", encoding="utf-8") as f:
-        import json
-        json.dump(payload, f, indent=2)
+        json.dump(existing_entries, f, indent=2)
+    
     return meta_path
 
 

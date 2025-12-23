@@ -22,6 +22,7 @@ from .path_utils import (
     detect_input_type,
 )
 from .model_manager import get_model_manager, ModelType
+from .command_logger import get_command_logger
 
 try:
     import torch  # type: ignore
@@ -55,6 +56,10 @@ class Runner:
         self._telemetry_enabled = telemetry_enabled
         self._last_model_id: Optional[str] = None
         self._model_manager = get_model_manager()
+        
+        # Initialize command logger
+        executed_commands_dir = self.base_dir.parent / "executed_commands"
+        self._command_logger = get_command_logger(executed_commands_dir)
 
     # ------------------------------------------------------------------ #
     # Mode management
@@ -285,18 +290,38 @@ class Runner:
     def _run_seedvr2_subprocess(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
         """
         Execute SeedVR2 CLI as a subprocess with proper error handling and logging.
+        
+        ENHANCED: Now prints all subprocess output to console (CMD) for user visibility,
+        in addition to sending it to the on_progress callback for UI updates.
         """
+        # Helper function to log to both console AND callback
+        def log_output(message: str, force_console: bool = True):
+            """Log message to console (always) and callback (if provided)."""
+            if force_console:
+                print(message, end='', flush=True)  # Print to CMD for user visibility
+            if on_progress:
+                on_progress(message)
+        
+        # Visual separator for user visibility in CMD
+        print("\n[SeedVR2] Starting upscaling process...", flush=True)
+        
+        # Show key settings for user visibility
+        input_path = settings.get("input_path", "Unknown")
+        model_name = settings.get("dit_model", "Unknown")
+        resolution = settings.get("resolution", "Unknown")
+        print(f"[SeedVR2] Input: {input_path}", flush=True)
+        print(f"[SeedVR2] Model: {model_name}", flush=True)
+        print(f"[SeedVR2] Resolution: {resolution}p", flush=True)
+        
         # Log the command being executed for debugging
         cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
-        if on_progress:
-            on_progress(f"Executing command: {cmd_str}\n")
+        log_output(f"[SeedVR2] Executing command:\n{cmd_str}\n")
 
         # FIXED: Pass on_progress to _maybe_wrap_with_vcvars for transparent warning surfacing
         # vcvars wrapper now handles compile detection and warning display
         cmd = self._maybe_wrap_with_vcvars(cmd, settings, on_progress)
 
-        if on_progress:
-            on_progress("Starting SeedVR2 subprocess (CLI will handle model loading)...\n")
+        log_output("[SeedVR2] Starting subprocess (CLI will handle model loading)...\n")
 
         env = os.environ.copy()
         env["TEMP"] = str(self.temp_dir)
@@ -317,10 +342,10 @@ class Runner:
         proc: Optional[subprocess.Popen] = None
         log_lines: List[str] = []
         returncode = -1
+        start_time = time.time()  # Track execution time
 
         try:
-            if on_progress:
-                on_progress("Starting subprocess...\n")
+            log_output("[SeedVR2] Launching CLI process...\n")
 
             proc = subprocess.Popen(
                 cmd,
@@ -337,8 +362,7 @@ class Runner:
                 self._active_process = proc
                 self._canceled = False
 
-            if on_progress:
-                on_progress("Subprocess started, monitoring output...\n")
+            log_output("[SeedVR2] Process started, monitoring output...\n")
 
             assert proc.stdout is not None
 
@@ -347,8 +371,7 @@ class Runner:
                 # Check if process is still running and not canceled
                 with self._lock:
                     if self._active_process is None:
-                        if on_progress:
-                            on_progress("Process canceled by user\n")
+                        log_output("[SeedVR2] Process canceled by user\n")
                         break
 
                 try:
@@ -372,27 +395,50 @@ class Runner:
                     line = line.rstrip()
                     if line:  # Only add non-empty lines
                         log_lines.append(line)
+                        # Print to console for user visibility AND send to callback
+                        print(line, flush=True)  # Always print to CMD
                         if on_progress:
                             on_progress(line + "\n")
 
                 except Exception as e:
-                    if on_progress:
-                        on_progress(f"Error reading subprocess output: {e}\n")
+                    log_output(f"[SeedVR2] Error reading subprocess output: {e}\n")
                     break
 
             # Wait for process to complete
             returncode = proc.wait()
 
-            if on_progress:
-                on_progress(f"Subprocess completed with return code: {returncode}\n")
+            # Log completion status with clear visual indicator
+            if returncode == 0:
+                print("[SeedVR2] Process completed successfully", flush=True)
+                log_output(f"[SeedVR2] Process completed successfully (code: {returncode})\n")
+            else:
+                print(f"[SeedVR2] Process exited with error code: {returncode}", flush=True)
+                log_output(f"[SeedVR2] Process exited with error code: {returncode}\n")
+                
+                # Show last few log lines as error context
+                if log_lines:
+                    print("\n[SeedVR2] Last 15 lines of output:", flush=True)
+                    for line in log_lines[-15:]:
+                        print(f"  {line}", flush=True)
+                    log_output("[SeedVR2] Last 15 lines of output:\n")
+                    for line in log_lines[-15]:
+                        log_output(f"  {line}\n")
+                else:
+                    print("\n[SeedVR2] No output captured from subprocess!", flush=True)
+                    print("Possible causes:", flush=True)
+                    print("  1. Python/CUDA initialization failed", flush=True)
+                    print("  2. Missing dependencies or models", flush=True)
+                    print("  3. Invalid input file format", flush=True)
+                    print("  4. Insufficient VRAM or memory", flush=True)
+                    log_output("[SeedVR2] No output captured from subprocess - check CMD for details\n")
             
             # Clear CUDA cache after subprocess completes
             # This ensures VRAM is freed even if the subprocess didn't clean up properly
             try:
                 from .gpu_utils import clear_cuda_cache
                 clear_cuda_cache()
-                if on_progress and returncode == 0:
-                    on_progress("✅ CUDA cache cleared\n")
+                if returncode == 0:
+                    log_output("[SeedVR2] CUDA cache cleared\n")
             except Exception:
                 # Silently ignore if CUDA not available or clear fails
                 pass
@@ -400,14 +446,24 @@ class Runner:
         except FileNotFoundError as e:
             error_msg = f"CLI script not found: {e}"
             log_lines.append(error_msg)
-            if on_progress:
-                on_progress(f"❌ {error_msg}\n")
+            print(f"[SeedVR2] ERROR: FILE NOT FOUND", flush=True)
+            print(f"[SeedVR2] CLI Path: {cli_path}", flush=True)
+            print(f"[SeedVR2] Error: {e}", flush=True)
+            log_output(f"[SeedVR2] {error_msg}\n")
             returncode = 1
         except Exception as e:
             error_msg = f"Failed to execute subprocess: {e}"
             log_lines.append(error_msg)
-            if on_progress:
-                on_progress(f"❌ {error_msg}\n")
+            print(f"[SeedVR2] ERROR: SUBPROCESS EXECUTION FAILED", flush=True)
+            print(f"[SeedVR2] Error Type: {type(e).__name__}", flush=True)
+            print(f"[SeedVR2] Error Message: {e}", flush=True)
+            log_output(f"[SeedVR2] {error_msg}\n")
+            # Print full traceback to CMD for debugging
+            import traceback
+            traceback_str = traceback.format_exc()
+            print("\n[SeedVR2] FULL TRACEBACK:", flush=True)
+            print(traceback_str, flush=True)
+            log_lines.append(traceback_str)
             returncode = 1
         finally:
             with self._lock:
@@ -424,11 +480,9 @@ class Runner:
         output_path = None
         if predicted_output and Path(predicted_output).exists():
             output_path = str(predicted_output)
-            if on_progress:
-                on_progress(f"Output file created: {output_path}\n")
+            log_output(f"[SeedVR2] Output file created: {output_path}\n")
         elif predicted_output:
-            if on_progress:
-                on_progress(f"Expected output not found: {predicted_output}\n")
+            log_output(f"[SeedVR2] ⚠️ Expected output not found: {predicted_output}\n")
 
         # Handle cancellation case
         if self._canceled and predicted_output and Path(predicted_output).exists():
@@ -466,6 +520,29 @@ class Runner:
                     on_progress(f"Warning: Failed to emit metadata: {e}\n")
 
         self._last_model_id = settings.get("dit_model", self._last_model_id)
+
+        # Calculate execution time
+        execution_time = time.time() - start_time
+        
+        # Log command to executed_commands folder
+        try:
+            self._command_logger.log_command(
+                tab_name="seedvr2",
+                command=cmd,
+                settings=settings,
+                returncode=returncode,
+                output_path=output_path,
+                error_logs=log_lines[-50:] if returncode != 0 else None,  # Last 50 lines on error
+                execution_time=execution_time,
+                additional_info={
+                    "mode": "subprocess",
+                    "cancelled": self._canceled,
+                    "predicted_output": str(predicted_output) if predicted_output else None
+                }
+            )
+            log_output(f"[SeedVR2] ✅ Command logged to executed_commands folder\n")
+        except Exception as e:
+            log_output(f"[SeedVR2] ⚠️ Failed to log command: {e}\n")
 
         # Combine all log lines
         full_log = "\n".join(log_lines)
@@ -969,8 +1046,17 @@ class Runner:
                     self._vcvars_warning_shown = True
                 return cmd
         
-        # vcvars found - wrap command with it (whether compile is requested or not)
-        # This ensures C++ toolchain is available for any CUDA operations that might need it
+        # FIXED: Only wrap with vcvars if compile is actually requested
+        # Wrapping with cmd /c can cause subprocess output capture issues
+        if not compile_requested:
+            # No compile requested - don't wrap with vcvars (avoid output capture issues)
+            if on_progress:
+                on_progress("ℹ️ VS Build Tools available but torch.compile not enabled\n")
+            return cmd
+        
+        # Compile requested and vcvars found - wrap command to enable C++ toolchain
+        if on_progress:
+            on_progress(f"✅ Using VS Build Tools for torch.compile: {vcvars_path}\n")
         quoted_cmd = " ".join(f'"{c}"' if " " in c else c for c in cmd)
         wrapped = ["cmd", "/c", f'call "{vcvars_path}" x64 >nul 2>&1 && {quoted_cmd}']
         return wrapped
@@ -1113,6 +1199,7 @@ class Runner:
 
         proc: Optional[subprocess.Popen] = None
         log_lines: List[str] = []
+        start_time = time.time()  # Track execution time
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -1146,6 +1233,8 @@ class Runner:
             output_path = str(adjusted)
 
         returncode_val = proc.returncode if proc else -1
+        execution_time = time.time() - start_time
+        
         meta_payload = {
             "returncode": returncode_val,
             "output": output_path,
@@ -1170,6 +1259,29 @@ class Runner:
                     emit_metadata(metadata_target, meta_payload)
             except Exception:
                 pass  # Don't fail run if metadata fails
+        
+        # Log command to executed_commands folder
+        try:
+            self._command_logger.log_command(
+                tab_name="rife",
+                command=cmd,
+                settings=settings,
+                returncode=returncode_val,
+                output_path=output_path,
+                error_logs=log_lines[-50:] if returncode_val != 0 else None,
+                execution_time=execution_time,
+                additional_info={
+                    "mode": "subprocess",
+                    "cancelled": self._canceled,
+                    "png_output": png_output,
+                    "trimmed_input": str(trimmed_video) if trimmed_video else None
+                }
+            )
+            if on_progress:
+                on_progress("✅ Command logged to executed_commands folder\n")
+        except Exception as e:
+            if on_progress:
+                on_progress(f"⚠️ Failed to log command: {e}\n")
         
         # FIXED: Clean up trimmed temp file if we created one
         if trimmed_video and trimmed_video.exists():

@@ -11,6 +11,7 @@ Provides subprocess wrapper for FlashVSR+ CLI (run.py) with:
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from .path_utils import (
     get_media_fps,
     resolve_output_location
 )
+from .command_logger import get_command_logger
 
 
 @dataclass
@@ -226,7 +228,7 @@ def run_flashvsr(
             output_path = str(output_files[-1])  # Latest file
             log(f"✅ Output saved: {output_path}")
             
-            return FlashVSRResult(
+            result = FlashVSRResult(
                 returncode=proc.returncode,
                 output_path=output_path,
                 log="\n".join(log_lines),
@@ -235,7 +237,7 @@ def run_flashvsr(
             )
         else:
             log("❌ No output file generated")
-            return FlashVSRResult(
+            result = FlashVSRResult(
                 returncode=1,
                 output_path=None,
                 log="\n".join(log_lines)
@@ -244,11 +246,37 @@ def run_flashvsr(
     except Exception as e:
         error_msg = f"FlashVSR+ error: {str(e)}"
         log_lines.append(error_msg)
-        return FlashVSRResult(
+        result = FlashVSRResult(
             returncode=1,
             output_path=None,
             log="\n".join(log_lines)
         )
+    
+    finally:
+        # Log command to executed_commands folder
+        execution_time = time.time() - start_time
+        try:
+            command_logger = get_command_logger(base_dir.parent / "executed_commands")
+            
+            command_logger.log_command(
+                tab_name="flashvsr",
+                command=cmd if cmd else ["flashvsr_run.py", "--input", settings.get("input_path", "unknown")],
+                settings=settings,
+                returncode=result.returncode if result else -1,
+                output_path=result.output_path if result else None,
+                error_logs=log_lines[-50:] if result and result.returncode != 0 else None,
+                execution_time=execution_time,
+                additional_info={
+                    "scale": settings.get("scale", "unknown"),
+                    "version": settings.get("version", "unknown"),
+                    "mode": settings.get("mode", "unknown")
+                }
+            )
+            log("✅ Command logged to executed_commands folder")
+        except Exception as e:
+            log(f"⚠️ Failed to log command: {e}")
+    
+    return result
 
 
 def discover_flashvsr_models(base_dir: Path) -> List[str]:
