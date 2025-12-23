@@ -144,11 +144,19 @@ def seedvr2_tab(
                 gr.Markdown("#### 📁 Enhanced Input: Video Files & Frame Folders")
                 gr.Markdown("*Auto-detects whether your input is a single video file or a folder containing frame sequences*")
 
-                input_file = gr.File(
-                    label="Upload video or image (optional)",
-                    type="filepath",
-                    file_types=["video", "image"]
-                )
+                with gr.Row():
+                    input_file = gr.File(
+                        label="Upload video or image (optional)",
+                        type="filepath",
+                        file_types=["video", "image"]
+                    )
+                    input_preview = gr.Image(
+                        label="📸 Input Preview",
+                        type="filepath",
+                        interactive=False,
+                        height=250,
+                        visible=True
+                    )
                 
                 # Auto-detection results
                 input_detection_result = gr.Markdown("", visible=False)
@@ -1184,9 +1192,20 @@ def seedvr2_tab(
         outputs=resume_status
     )
 
+    # Wrapper functions for generator support in Gradio 6.2.0
+    def run_upscale_wrapper(*args, progress=gr.Progress()):
+        """Wrapper to properly handle generator function for Gradio 6.2.0"""
+        # Call the generator function and yield from it
+        yield from service["run_action"](*args[:-1], preview_only=False, state=args[-1], progress=progress)
+    
+    def run_preview_wrapper(*args, progress=gr.Progress()):
+        """Wrapper to properly handle generator function for Gradio 6.2.0"""
+        # Call the generator function and yield from it
+        yield from service["run_action"](*args[:-1], preview_only=True, state=args[-1], progress=progress)
+    
     # Main action buttons with gr.Progress
     upscale_btn.click(
-        fn=lambda *args, progress=gr.Progress(): service["run_action"](*args[:-1], preview_only=False, state=args[-1], progress=progress),
+        fn=run_upscale_wrapper,
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
@@ -1195,7 +1214,7 @@ def seedvr2_tab(
     )
 
     preview_btn.click(
-        fn=lambda *args, progress=gr.Progress(): service["run_action"](*args[:-1], preview_only=True, state=args[-1], progress=progress),
+        fn=run_preview_wrapper,
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
@@ -1265,6 +1284,30 @@ def seedvr2_tab(
         fn=update_health_display,
         inputs=shared_state,
         outputs=health_display
+    )
+    
+    # Update input preview when file is uploaded
+    def update_input_preview(file_path):
+        """Display preview of uploaded file if it's an image"""
+        if not file_path:
+            return gr.update(value=None, visible=False)
+        
+        try:
+            from pathlib import Path
+            file_ext = Path(file_path).suffix.lower()
+            # Check if it's an image file
+            if file_ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.tif']:
+                return gr.update(value=file_path, visible=True)
+            else:
+                # Video file - show placeholder or hide
+                return gr.update(value=None, visible=False)
+        except Exception:
+            return gr.update(value=None, visible=False)
+    
+    input_file.change(
+        fn=update_input_preview,
+        inputs=[input_file],
+        outputs=[input_preview]
     )
 
     # Output format change handler for alpha warnings

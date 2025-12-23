@@ -1165,8 +1165,8 @@ def comparison_html_slider():
     The actual video comparison slider is created dynamically during processing
     using create_video_comparison_html from shared.video_comparison_slider.
     """
-    return gr.HTML.update(
-        value="""
+    return {
+        'value': """
         <div style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
             <p style="color: #495057; font-size: 14px; margin: 0;">
                 📊 <strong>Comparison View:</strong> Process a video or image to see before/after comparison.<br>
@@ -1174,7 +1174,7 @@ def comparison_html_slider():
             </p>
         </div>
         """
-    )
+    }
 
 
 # Core run/cancel/preset callbacks --------------------------------------------
@@ -1557,8 +1557,8 @@ def build_seedvr2_callbacks(
             msg_lines.append(est_msg)
 
         return (
-            gr.Slider.update(value=new_res),
-            gr.Slider.update(value=max_target_res),
+            {'value': new_res},
+            {'value': max_target_res},
             gr.update(value="\n".join(msg_lines)),
             state
         )
@@ -1596,12 +1596,12 @@ def build_seedvr2_callbacks(
                     "No chunks",
                     "",
                     "",
-                    gr.HTML.update(value="No comparison"),
-                    gr.ImageSlider.update(value=None),
-                    gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),  # chunk_gallery
-                    gr.Gallery.update(visible=False),  # chunk_gallery
-                    gr.Gallery.update(visible=False),  # batch_gallery
+                    "No comparison",  # comparison_note (HTML)
+                    None,  # image_slider
+                    {"value": "", "visible": False},  # video_comparison_html (HTML)
+                    {"visible": False},  # chunk_gallery
+                    {"visible": False},  # chunk_gallery (duplicate?)
+                    {"visible": False},  # batch_gallery
                     state
                 )
                 return
@@ -1623,11 +1623,11 @@ def build_seedvr2_callbacks(
                     "No chunks",
                     "",
                     "",
-                    gr.HTML.update(value="No comparison"),
-                    gr.ImageSlider.update(value=None),
-                    gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),  # chunk_gallery
-                    gr.Gallery.update(visible=False),
+                    "No comparison",  # comparison_note (HTML)
+                    None,  # image_slider
+                    {"value": "", "visible": False},  # video_comparison_html (HTML)
+                    {"visible": False},  # chunk_gallery
+                    {"visible": False},  # batch_gallery
                     state
                 )
                 return
@@ -1643,11 +1643,11 @@ def build_seedvr2_callbacks(
                     "No chunks",
                     "",
                     "",
-                    gr.HTML.update(value="No comparison"),
-                    gr.ImageSlider.update(value=None),
-                    gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),  # chunk_gallery
-                    gr.Gallery.update(visible=False),
+                    "No comparison",  # comparison_note (HTML)
+                    None,  # image_slider
+                    {"value": "", "visible": False},  # video_comparison_html (HTML)
+                    {"visible": False},  # chunk_gallery
+                    {"visible": False},  # batch_gallery
                     state
                 )
                 return
@@ -1665,11 +1665,11 @@ def build_seedvr2_callbacks(
                     "No chunks",
                     "",
                     "",
-                    gr.HTML.update(value="No comparison"),
-                    gr.ImageSlider.update(value=None),
-                    gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),  # chunk_gallery
-                    gr.Gallery.update(visible=False),
+                    "No comparison",  # comparison_note (HTML)
+                    None,  # image_slider
+                    {"value": "", "visible": False},  # video_comparison_html (HTML)
+                    {"visible": False},  # chunk_gallery
+                    {"visible": False},  # batch_gallery
                     state
                 )
                 return
@@ -1684,11 +1684,11 @@ def build_seedvr2_callbacks(
                     "Disk space warning",
                     "",
                     "",
-                    gr.HTML.update(value=""),
-                    gr.ImageSlider.update(value=None),
-                    gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),  # chunk_gallery
-                    gr.Gallery.update(visible=False),
+                    "",  # comparison_note (HTML)
+                    None,  # image_slider
+                    {"value": "", "visible": False},  # video_comparison_html (HTML)
+                    {"visible": False},  # chunk_gallery
+                    {"visible": False},  # batch_gallery
                     state
                 )
 
@@ -1784,11 +1784,11 @@ def build_seedvr2_callbacks(
                         "No chunks",
                         "",
                         "",
-                        gr.HTML.update(value="No comparison"),
-                        gr.ImageSlider.update(value=None),
-                        gr.HTML.update(value="", visible=False),
-                        gr.Gallery.update(visible=False),  # chunk_gallery
-                        gr.Gallery.update(visible=False),
+                        "No comparison",
+                        None,
+                        {"value": "", "visible": False},
+                        {'visible': False},  # chunk_gallery
+                        {'visible': False},
                         state
                     )
                     return
@@ -1817,11 +1817,11 @@ def build_seedvr2_callbacks(
                         "No chunks",
                         "",
                         "",
-                        gr.HTML.update(value="No comparison"),
-                        gr.ImageSlider.update(value=None),
-                        gr.HTML.update(value="", visible=False),
-                        gr.Gallery.update(visible=False),  # chunk_gallery
-                        gr.Gallery.update(visible=False),
+                        "No comparison",
+                        None,
+                        {"value": "", "visible": False},
+                        {'visible': False},  # chunk_gallery
+                        {'visible': False},
                         state
                     )
                     return
@@ -1866,11 +1866,11 @@ def build_seedvr2_callbacks(
                             f"Batch aborted: {len(batch_files)} files (insufficient disk space)",
                             "",
                             "",
-                            gr.HTML.update(value="Insufficient disk space"),
-                            gr.ImageSlider.update(value=None),
-                            gr.HTML.update(value="", visible=False),
-                            gr.Gallery.update(visible=False),  # chunk_gallery
-                            gr.Gallery.update(visible=False),
+                            "Insufficient disk space",
+                            None,
+                            {"value": "", "visible": False},
+                            {'visible': False},  # chunk_gallery
+                            {'visible': False},
                             state
                         )
                         return
@@ -1886,11 +1886,11 @@ def build_seedvr2_callbacks(
                             f"Batch: {len(batch_files)} files queued",
                             "",
                             "",
-                            gr.HTML.update(value="Disk space warnings"),
-                            gr.ImageSlider.update(value=None),
-                            gr.HTML.update(value="", visible=False),
-                            gr.Gallery.update(visible=False),  # chunk_gallery
-                            gr.Gallery.update(visible=False),
+                            "Disk space warnings",
+                            None,
+                            {"value": "", "visible": False},
+                            {'visible': False},  # chunk_gallery
+                            {'visible': False},
                             state
                         )
                 except Exception as e:
@@ -1908,11 +1908,11 @@ def build_seedvr2_callbacks(
                         "No chunks",
                         "",
                         "",
-                        gr.HTML.update(value="No comparison"),
-                        gr.ImageSlider.update(value=None),
-                        gr.HTML.update(value="", visible=False),
-                        gr.Gallery.update(visible=False),  # chunk_gallery
-                        gr.Gallery.update(visible=False),
+                        "No comparison",
+                        None,
+                        {"value": "", "visible": False},
+                        {'visible': False},  # chunk_gallery
+                        {'visible': False},
                         state
                     )
                     return
@@ -1970,11 +1970,11 @@ def build_seedvr2_callbacks(
                         f"Batch: {completed_files}/{len(jobs)} completed",
                         "",
                         "",
-                        gr.HTML.update(value="Batch processing in progress..."),
-                        gr.ImageSlider.update(value=None),
-                        gr.HTML.update(value="", visible=False),
-                        gr.Gallery.update(visible=False),  # chunk_gallery
-                        gr.Gallery.update(visible=False),
+                        "Batch processing in progress...",
+                        None,
+                        {"value": "", "visible": False},
+                        {'visible': False},  # chunk_gallery
+                        {'visible': False},
                         state
                     )
 
@@ -2130,11 +2130,11 @@ def build_seedvr2_callbacks(
                     f"Batch: {completed} completed, {failed} failed",
                     "",
                     "",
-                    gr.HTML.update(value=f"Batch processing complete. {len(batch_outputs)} files saved."),
-                    gr.ImageSlider.update(value=None),
-                    gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),  # chunk_gallery
-                    gr.Gallery.update(value=batch_outputs[:50], visible=True) if batch_outputs else gr.Gallery.update(visible=False),  # Show first 50
+                    f"Batch processing complete. {len(batch_outputs)} files saved.",
+                    None,
+                    {"value": "", "visible": False},
+                    {'visible': False},  # chunk_gallery
+                    {'value': batch_outputs[:50], 'visible': True} if batch_outputs else {'visible': False},  # Show first 50
                     state
                 )
                 return
@@ -2159,11 +2159,11 @@ def build_seedvr2_callbacks(
                         chunk_info or "Processing...",
                         "",
                         "",
-                        gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{message}</div>'),
-                        gr.ImageSlider.update(value=None),
-                        gr.HTML.update(value="", visible=False),
-                        gr.Gallery.update(visible=False),  # chunk_gallery
-                        gr.Gallery.update(visible=False),
+                        f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{message}</div>',
+                        None,
+                        {"value": "", "visible": False},
+                        {'visible': False},  # chunk_gallery
+                        {'visible': False},
                         state
                     )
 
@@ -2177,11 +2177,11 @@ def build_seedvr2_callbacks(
                 "Initializing...",
                 "",
                 "",
-                gr.HTML.update(value="Starting processing..."),
-                gr.ImageSlider.update(value=None),
-                gr.HTML.update(value="", visible=False),
-                gr.Gallery.update(visible=False),  # chunk_gallery
-                gr.Gallery.update(visible=False),
+                "Starting processing...",
+                None,
+                {"value": "", "visible": False},  # video_comparison_html (HTML)
+                {"visible": False},  # chunk_gallery
+                {"visible": False},  # batch_gallery
                 state
             )
 
@@ -2294,11 +2294,11 @@ def build_seedvr2_callbacks(
                             
                             # Get current chunk thumbnails from state (updated by chunk_progress_callback)
                             current_chunk_thumbs = state.get("chunk_thumbnails", [])
-                            chunk_gallery_update = gr.Gallery.update(
-                                value=current_chunk_thumbs,
-                                visible=len(current_chunk_thumbs) > 0,
-                                columns=4
-                            ) if current_chunk_thumbs else gr.Gallery.update(visible=False)
+                            chunk_gallery_update = {
+                                'value': current_chunk_thumbs,
+                                'visible': len(current_chunk_thumbs) > 0,
+                                'columns': 4
+                            } if current_chunk_thumbs else {'visible': False}
                             
                             yield (
                                 f"⚙️ Processing... ({len(current_chunk_thumbs)} chunks completed)",
@@ -2309,11 +2309,11 @@ def build_seedvr2_callbacks(
                                 chunk_info or "Processing...",
                                 "",
                                 "",
-                                gr.HTML.update(value=f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px; white-space: pre-wrap;">{display_text}</div>'),
-                                gr.ImageSlider.update(value=None),
-                                gr.HTML.update(value="", visible=False),
+                                f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px; white-space: pre-wrap;">{display_text}</div>',
+                                None,
+                                {"value": "", "visible": False},  # video_comparison_html (HTML)
                                 chunk_gallery_update,  # chunk_gallery - LIVE UPDATE with thumbnails!
-                                gr.Gallery.update(visible=False),  # batch_gallery
+                                {'visible': False},  # batch_gallery
                                 state
                             )
                             last_ui_update_time = current_time
@@ -2339,11 +2339,11 @@ def build_seedvr2_callbacks(
                             "Error occurred",
                             "",
                             "",
-                            gr.HTML.update(value=f'<div style="background: #ffe6e6; padding: 10px; border-radius: 5px;">Error: {data}</div>'),
-                            gr.ImageSlider.update(value=None),
-                            gr.HTML.update(value="", visible=False),
-                            gr.Gallery.update(visible=False),  # chunk_gallery
-                            gr.Gallery.update(visible=False),
+                            f'<div style="background: #ffe6e6; padding: 10px; border-radius: 5px;">Error: {data}</div>',
+                            None,
+                            {"value": "", "visible": False},
+                            {'visible': False},  # chunk_gallery
+                            {'visible': False},
                             state
                         )
                         return
@@ -2360,11 +2360,11 @@ def build_seedvr2_callbacks(
                     "Timeout",
                     "",
                     "",
-                    gr.HTML.update(value="Processing timed out"),
-                    gr.ImageSlider.update(value=None),
-                    gr.HTML.update(value="", visible=False),
-                    gr.Gallery.update(visible=False),  # chunk_gallery
-                    gr.Gallery.update(visible=False),
+                    "Processing timed out",
+                    None,
+                    {"value": "", "visible": False},
+                    {'visible': False},  # chunk_gallery
+                    {'visible': False},
                     state
                 )
                 return
@@ -2380,10 +2380,10 @@ def build_seedvr2_callbacks(
                     pinned_ref = seed_controls.get("pinned_reference_path")
                     pin_enabled = seed_controls.get("pin_reference_val", False)
                     
-                    image_slider_update = gr.ImageSlider.update(
-                        value=(pinned_ref if (pin_enabled and pinned_ref) else settings.get("input_path"), output_image),
-                        visible=True
-                    )
+                    image_slider_update = {
+                        'value': (pinned_ref if (pin_enabled and pinned_ref) else settings.get("input_path"), output_image),
+                        'visible': True
+                    }
                 else:
                     # Check for pinned reference
                     pinned_ref = seed_controls.get("pinned_reference_path")
@@ -2410,7 +2410,7 @@ def build_seedvr2_callbacks(
                 )
 
             # Build video comparison HTML for videos
-            video_comparison_html_update = gr.HTML.update(value="", visible=False)
+            video_comparison_html_update = {"value": "", "visible": False}
             if output_video and Path(output_video).exists():
                 original_path = settings.get("input_path", "")
                 if original_path and Path(original_path).exists():
@@ -2423,28 +2423,28 @@ def build_seedvr2_callbacks(
                         height=600,
                         slider_position=50.0
                     )
-                    video_comparison_html_update = gr.HTML.update(value=video_comp_html, visible=True)
+                    video_comparison_html_update = {'value': video_comp_html, 'visible': True}
             
             # If no HTML comparison, use ImageSlider for images
             if not comparison_html and output_image and not output_video:
-                image_slider_update = gr.ImageSlider.update(
-                    value=(settings.get("input_path"), output_image),
-                    visible=True,
-                )
+                image_slider_update = {
+                    'value': (settings.get("input_path"), output_image),
+                    'visible': True,
+                }
             elif not image_slider_update:
-                image_slider_update = gr.ImageSlider.update(value=None, visible=False)
+                image_slider_update = {'value': None, 'visible': False}
 
             state["operation_status"] = "completed" if "✅" in status else "ready"
             
             # Prepare final chunk gallery display
             final_chunk_thumbs = state.get("chunk_thumbnails", [])
-            final_chunk_gallery = gr.Gallery.update(
-                value=final_chunk_thumbs,
-                visible=len(final_chunk_thumbs) > 0,
-                columns=4,
-                rows=2,
-                height=400
-            ) if final_chunk_thumbs else gr.Gallery.update(visible=False)
+            final_chunk_gallery = {
+                'value': final_chunk_thumbs,
+                'visible': len(final_chunk_thumbs) > 0,
+                'columns': 4,
+                'rows': 2,
+                'height': 400
+            } if final_chunk_thumbs else {'visible': False}
             
             yield (
                 status,
@@ -2455,11 +2455,11 @@ def build_seedvr2_callbacks(
                 chunk_info,
                 "",  # resume_status
                 chunk_progress,  # NOW POPULATED with actual chunk progress
-                comparison_html if comparison_html else gr.HTML.update(value="", visible=False),
+                comparison_html if comparison_html else {"value": "", "visible": False},
                 image_slider_update,
                 video_comparison_html_update,
                 final_chunk_gallery,  # chunk_gallery - SHOW completed chunk thumbnails!
-                gr.Gallery.update(visible=False),  # batch_gallery - Hide for single file
+                {'visible': False},  # batch_gallery - Hide for single file
                 state
             )
 
@@ -2475,11 +2475,11 @@ def build_seedvr2_callbacks(
                 "Error",
                 "",
                 "",
-                gr.HTML.update(value="Error occurred"),
-                gr.ImageSlider.update(value=None),
-                gr.HTML.update(value="", visible=False),
-                gr.Gallery.update(visible=False),  # chunk_gallery
-                gr.Gallery.update(visible=False),
+                "Error occurred",
+                None,
+                {"value": "", "visible": False},  # video_comparison_html (HTML)
+                {"visible": False},  # chunk_gallery
+                {"visible": False},  # batch_gallery
                 state
             )
 
