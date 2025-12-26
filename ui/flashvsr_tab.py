@@ -11,11 +11,14 @@ from typing import Dict, Any
 from shared.services.flashvsr_service import (
     build_flashvsr_callbacks, FLASHVSR_ORDER
 )
+from shared.path_utils import get_media_dimensions, normalize_path
+from shared.resolution_calculator import estimate_fixed_scale_upscale_plan_from_dims
 from ui.universal_preset_section import (
     universal_preset_section,
     wire_universal_preset_events,
 )
 from shared.universal_preset import dict_to_values
+from ui.media_preview import preview_updates
 
 
 def flashvsr_tab(
@@ -99,18 +102,35 @@ def flashvsr_tab(
         # Left Column: Input & Settings
         with gr.Column(scale=3):
             gr.Markdown("#### 📁 Input")
-            
-            input_file = gr.File(
-                label="Upload Video or Image Folder",
-                type="filepath",
-                file_types=["video"]
-            )
+
+            with gr.Row():
+                input_file = gr.File(
+                    label="Upload Video or Image Folder",
+                    type="filepath",
+                    file_types=["video", "image"]
+                )
+                with gr.Column():
+                    input_image_preview = gr.Image(
+                        label="📸 Input Preview (Image)",
+                        type="filepath",
+                        interactive=False,
+                        height=250,
+                        visible=False
+                    )
+                    input_video_preview = gr.Video(
+                        label="🎬 Input Preview (Video)",
+                        interactive=False,
+                        height=250,
+                        visible=False
+                    )
             input_path = gr.Textbox(
                 label="Input Path",
                 value=values[0],
                 placeholder="C:/path/to/video.mp4 or C:/path/to/frames/",
                 info="Video file or image sequence folder"
             )
+            sizing_info = gr.Markdown("", visible=False, elem_classes=["resolution-info"])
+            input_detection_result = gr.Markdown("", visible=False)
             
             # Model Configuration
             gr.Markdown("#### 🤖 Model Configuration")
@@ -134,6 +154,34 @@ def flashvsr_tab(
                     value=values[4],
                     info="tiny = fastest (4-6GB VRAM), tiny-long = balanced (5-7GB), full = best quality (8-12GB)"
                 )
+
+            # vNext sizing controls (any x + max edge + pre-downscale)
+            with gr.Group():
+                use_resolution_tab = gr.Checkbox(
+                    label="🔗 Use Resolution & Scene Split Tab Settings",
+                    value=values[20] if len(values) > 20 else True,
+                    info="Apply Upscale-x, Max Resolution, and Pre-downscale settings from Resolution tab. Recommended ON."
+                )
+
+                upscale_factor = gr.Number(
+                    label="Upscale x (any factor)",
+                    value=values[21] if len(values) > 21 else float(values[2]),
+                    precision=2,
+                    info="Desired effective upscale. For FlashVSR fixed 2x/4x models, input is pre-downscaled to hit the target without exceeding Max Resolution."
+                )
+
+                with gr.Row():
+                    max_target_resolution = gr.Slider(
+                        label="Max Resolution (max edge, 0 = no cap)",
+                        minimum=0, maximum=8192, step=16,
+                        value=values[22] if len(values) > 22 else 0,
+                        info="Caps the LONG side (max(width,height)) of the target."
+                    )
+                    pre_downscale_then_upscale = gr.Checkbox(
+                        label="⬇️➡️⬆️ Pre-downscale then upscale (auto when needed)",
+                        value=values[23] if len(values) > 23 else False,
+                        info="For fixed-scale FlashVSR models this is applied automatically when needed to satisfy Upscale-x / Max Resolution without post-resize."
+                    )
             
             # Model info display with metadata
             model_info_display = gr.Markdown("")
@@ -382,17 +430,157 @@ def flashvsr_tab(
         tiled_vae, tiled_dit, tile_size, overlap, unload_dit,
         color_fix, seed, dtype, device, fps_flashvsr,
         quality, attention, batch_enable, batch_input, batch_output
+        , use_resolution_tab, upscale_factor, max_target_resolution, pre_downscale_then_upscale
     ]
+
+    # Development validation: inputs_list must stay aligned with FLASHVSR_ORDER
+    if len(inputs_list) != len(FLASHVSR_ORDER):
+        import logging
+        logging.getLogger("FlashVSRTab").error(
+            f"❌ inputs_list ({len(inputs_list)}) != FLASHVSR_ORDER ({len(FLASHVSR_ORDER)})"
+        )
     
     # Wire up events
     def cache_input(val, state):
+        state["seed_controls"]["last_input_path"] = val if val else ""
         return val or "", gr.update(value="✅ Input cached", visible=True), state
+
+    def _build_input_detection_md(path_val: str) -> gr.update:
+        from shared.input_detector import detect_input
+        if not path_val or not str(path_val).strip():
+            # Hide when empty (clearing input should clear this panel).
+            return gr.update(value="", visible=False)
+        try:
+            info = detect_input(path_val)
+            if not info.is_valid:
+                return gr.update(value=f"❌ **Invalid Input**\n\n{info.error_message}", visible=True)
+            parts = [f"✅ **Input Detected: {info.input_type.upper()}**"]
+            if info.input_type == "frame_sequence":
+                parts.append(f"&nbsp;&nbsp;📁 Pattern: `{info.frame_pattern}`")
+                parts.append(f"&nbsp;&nbsp;🎞️ Frames: {info.frame_start}-{info.frame_end}")
+                if info.missing_frames:
+                    parts.append(f"&nbsp;&nbsp;⚠️ Missing: {len(info.missing_frames)}")
+            elif info.input_type == "directory":
+                parts.append(f"&nbsp;&nbsp;📂 Files: {info.total_files}")
+            elif info.input_type in ["video", "image"]:
+                parts.append(f"&nbsp;&nbsp;📄 Format: **{info.format.upper()}**")
+            return gr.update(value=" ".join(parts), visible=True)
+        except Exception as e:
+            return gr.update(value=f"❌ **Detection Error**\n\n{str(e)}", visible=True)
+
+    def _build_sizing_info(path_val, model_scale_val, use_global, local_scale_x, local_max_edge, local_pre_down, state):
+        if not path_val or not str(path_val).strip():
+            return gr.update(visible=False)
+        seed_controls = (state or {}).get("seed_controls", {})
+        enable_max = bool(seed_controls.get("enable_max_target", True)) if use_global else True
+        scale_x = float(seed_controls.get("upscale_factor_val", 4.0) or 4.0) if use_global else float(local_scale_x or 4.0)
+        max_edge = int(seed_controls.get("max_resolution_val", 0) or 0) if use_global else int(local_max_edge or 0)
+        pre_down = bool(seed_controls.get("ratio_downscale", False)) if use_global else bool(local_pre_down)
+        if not enable_max:
+            max_edge = 0
+
+        # Dimensions (file only; directory sizing preview is best-effort)
+        p = Path(normalize_path(path_val))
+        rep = None
+        if p.exists() and p.is_dir():
+            # pick first media file
+            exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".mp4", ".mov", ".mkv", ".avi", ".webm")
+            items = [x for x in sorted(p.iterdir()) if x.is_file() and x.suffix.lower() in exts]
+            rep = str(items[0]) if items else None
+        else:
+            rep = str(p)
+        dims = get_media_dimensions(rep) if rep else None
+        if not dims:
+            return gr.update(value="⚠️ Could not determine input dimensions for sizing preview.", visible=True)
+        w, h = dims
+
+        ms = int(model_scale_val or 4)
+        plan = estimate_fixed_scale_upscale_plan_from_dims(
+            int(w), int(h),
+            requested_scale=float(scale_x),
+            model_scale=ms,
+            max_edge=int(max_edge or 0),
+            force_pre_downscale=True,
+        )
+
+        out_w = plan.final_saved_width or plan.resize_width
+        out_h = plan.final_saved_height or plan.resize_height
+        input_short = min(plan.input_width, plan.input_height)
+        out_short = min(int(out_w), int(out_h))
+
+        items = []
+        items.append(f"📐 <strong>Input:</strong> {plan.input_width}×{plan.input_height} (short side: {input_short}px)")
+        t = f"🎯 <strong>Target setting:</strong> upscale {scale_x:g}x"
+        if max_edge and max_edge > 0:
+            t += f", max edge {max_edge}px (effective {plan.effective_scale:.2f}x)"
+        items.append(t)
+        # For fixed-scale models, pre-downscale is mandatory when the effective scale < model_scale.
+        if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
+            items.append(f"🧩 <strong>Preprocess:</strong> {plan.input_width}×{plan.input_height} → {plan.preprocess_width}×{plan.preprocess_height} (×{plan.preprocess_scale:.3f})")
+        items.append(f"🧱 <strong>Model pass:</strong> fixed {ms}x FlashVSR")
+        items.append(f"✅ <strong>Final saved output:</strong> {int(out_w)}×{int(out_h)}")
+        if out_short < input_short:
+            items.append(f"📉 <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)")
+        elif out_short > input_short:
+            items.append(f"📈 <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)")
+        else:
+            items.append("➡️ <strong>Mode:</strong> Keep size (output short side matches input short side)")
+        if plan.notes:
+            for n in plan.notes:
+                items.append(f"ℹ️ {n}")
+        html = '<div style="font-size: 1.15em; line-height: 1.8;">' + "<br>".join(items) + "</div>"
+        return gr.update(value=html, visible=True)
     
     input_file.upload(
         fn=cache_input,
         inputs=[input_file, shared_state],
         outputs=[input_path, preset_status, shared_state]
     )
+
+    # Preview + sizing + detection refresh on input changes
+    def refresh_panels(path_val, scale_val, use_global, scale_x, max_edge, pre_down, state):
+        img_prev, vid_prev = preview_updates(path_val)
+        det = _build_input_detection_md(path_val or "")
+        info = _build_sizing_info(path_val, int(scale_val), bool(use_global), scale_x, max_edge, pre_down, state)
+        return img_prev, vid_prev, det, info, state
+
+    input_file.change(
+        fn=lambda p, state: (*preview_updates(p), _build_input_detection_md(p or ""), gr.update(visible=False), state),
+        inputs=[input_file, shared_state],
+        outputs=[input_image_preview, input_video_preview, input_detection_result, sizing_info, shared_state]
+    )
+
+    # When upload is cleared, also clear the textbox path so sizing/detection panels disappear.
+    def clear_input_path_on_upload_clear(file_path, state):
+        if file_path:
+            return gr.update(), state
+        try:
+            state = state or {}
+            state.setdefault("seed_controls", {})
+            state["seed_controls"]["last_input_path"] = ""
+        except Exception:
+            pass
+        return "", state
+
+    input_file.change(
+        fn=clear_input_path_on_upload_clear,
+        inputs=[input_file, shared_state],
+        outputs=[input_path, shared_state],
+    )
+
+    input_path.change(
+        fn=refresh_panels,
+        inputs=[input_path, scale, use_resolution_tab, upscale_factor, max_target_resolution, pre_downscale_then_upscale, shared_state],
+        outputs=[input_image_preview, input_video_preview, input_detection_result, sizing_info, shared_state],
+    )
+
+    for comp in [scale, use_resolution_tab, upscale_factor, max_target_resolution, pre_downscale_then_upscale]:
+        comp.change(
+            fn=lambda p, s, ug, sx, me, pd, st: (_build_sizing_info(p, int(s), bool(ug), sx, me, pd, st), st),
+            inputs=[input_path, scale, use_resolution_tab, upscale_factor, max_target_resolution, pre_downscale_then_upscale, shared_state],
+            outputs=[sizing_info, shared_state],
+            trigger_mode="always_last",
+        )
     
     # Main processing
     upscale_btn.click(
@@ -424,5 +612,6 @@ def flashvsr_tab(
         callbacks=preset_callbacks,
         inputs_list=inputs_list,
         shared_state=shared_state,
+        tab_name="flashvsr",
     )
 

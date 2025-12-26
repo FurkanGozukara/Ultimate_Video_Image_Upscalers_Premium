@@ -621,30 +621,34 @@ def build_rife_callbacks(
                 yield ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 return
 
-            # Apply cached values from Resolution & Scene Split tab
-            if seed_controls.get("resolution_val") is not None:
-                # For RIFE, resolution affects downscaling before processing
-                target_resolution = int(seed_controls["resolution_val"])
-                max_resolution = int(seed_controls.get("max_resolution_val", 0) or 0)
-                
-                # Calculate scale factor needed to reach target resolution
+            # Apply cached values from Resolution & Scene Split tab (vNext Upscale-x)
+            scale_x = seed_controls.get("upscale_factor_val")
+            max_edge = int(seed_controls.get("max_resolution_val", 0) or 0)
+            enable_max = seed_controls.get("enable_max_target", True)
+            if not enable_max:
+                max_edge = 0
+
+            if scale_x is not None:
+                try:
+                    scale_x = float(scale_x)
+                except Exception:
+                    scale_x = None
+
+            if scale_x is not None:
                 input_dims = get_media_dimensions(input_path)
                 if input_dims:
                     input_w, input_h = input_dims
-                    short_side = min(input_w, input_h)
-                    
-                    # Apply max resolution cap if enabled
-                    effective_target = target_resolution
-                    enable_max = seed_controls.get("enable_max_target", True)
-                    if enable_max and max_resolution > 0:
-                        effective_target = min(target_resolution, max_resolution)
-                    
-                    # Calculate scale needed to reach target
-                    if short_side > 0 and effective_target > 0:
-                        calculated_scale = effective_target / short_side
-                        # Clamp to reasonable range for RIFE (0.5x to 4.0x)
-                        calculated_scale = max(0.5, min(4.0, calculated_scale))
-                        settings["scale"] = calculated_scale
+                    long_side = max(input_w, input_h)
+
+                    # Apply max-edge cap (LONG side) to compute effective scale
+                    effective_scale = float(scale_x)
+                    if max_edge > 0 and long_side > 0:
+                        capped = max_edge / long_side
+                        effective_scale = min(effective_scale, capped)
+
+                    # Clamp to RIFE's reasonable range
+                    effective_scale = max(0.5, min(4.0, effective_scale))
+                    settings["scale"] = effective_scale
 
             # Apply output format from Comparison tab if set
             cached_fmt = seed_controls.get("output_format_val")

@@ -421,7 +421,7 @@ class Runner:
                     for line in log_lines[-15:]:
                         print(f"  {line}", flush=True)
                     log_output("[SeedVR2] Last 15 lines of output:\n")
-                    for line in log_lines[-15]:
+                    for line in log_lines[-15:]:
                         log_output(f"  {line}\n")
                 else:
                     print("\n[SeedVR2] No output captured from subprocess!", flush=True)

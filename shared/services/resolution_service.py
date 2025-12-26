@@ -3,9 +3,12 @@ import gradio as gr
 
 from shared.preset_manager import PresetManager
 from shared.path_utils import normalize_path, get_media_duration_seconds
+from shared.path_utils import get_media_dimensions
 from shared.resolution_calculator import (
     calculate_resolution, calculate_chunk_count, calculate_disk_space_required,
-    get_available_disk_space, ResolutionConfig, ResolutionResult
+    get_available_disk_space, ResolutionConfig, ResolutionResult,
+    estimate_seedvr2_upscale_plan_from_dims,
+    estimate_fixed_scale_upscale_plan_from_dims,
 )
 from shared.input_detector import detect_input, validate_batch_directory
 
@@ -15,8 +18,11 @@ def resolution_defaults(models: List[str]) -> Dict[str, Any]:
         "model": models[0] if models else "",
         "auto_resolution": True,
         "enable_max_target": True,
-        "target_resolution": 1080,
-        "max_target_resolution": 0,  # 0 = unlimited
+        # NEW (vNext): Target sizing expressed as an upscale factor (relative to input)
+        # Default 4x as requested.
+        "upscale_factor": 4.0,
+        # Max edge cap (LONG side). 0 = unlimited.
+        "max_target_resolution": 0,
         "chunk_size": 0,
         "chunk_overlap": 0.5,
         "ratio_downscale_then_upscale": False,
@@ -30,7 +36,7 @@ RESOLUTION_ORDER: List[str] = [
     "model",
     "auto_resolution",
     "enable_max_target",
-    "target_resolution",
+    "upscale_factor",
     "max_target_resolution",
     "chunk_size",
     "chunk_overlap",
@@ -167,11 +173,18 @@ def build_resolution_callbacks(
     def safe_defaults():
         return [defaults[k] for k in RESOLUTION_ORDER]
 
-    def calculate_auto_resolution(input_path: str, target_res: int, max_res: int, 
-                                  enable_max: bool, auto_mode: bool, ratio_aware: bool,
-                                  model_scale: Optional[int], state: Dict) -> Tuple[str, Dict]:
+    def calculate_auto_resolution(
+        input_path: str,
+        upscale_factor: float,
+        max_res: int,
+        enable_max: bool,
+        _auto_mode_unused: bool,
+        pre_downscale_then_upscale: bool,
+        model_scale: Optional[int],
+        state: Dict,
+    ) -> Tuple[str, Dict]:
         """
-        Auto-calculate optimal resolution based on input and settings.
+        Auto-calculate target sizing plan based on input and the new Upscale-x rules.
         
         Returns:
             (info_message, updated_state)
@@ -185,44 +198,59 @@ def build_resolution_callbacks(
             if not input_info.is_valid:
                 return f"⚠️ {input_info.error_message}", state
             
-            # Create resolution config
-            config = ResolutionConfig(
-                input_width=0,  # Will be detected
-                input_height=0,
-                target_resolution=target_res,
-                max_resolution=max_res if enable_max else 0,
-                model_scale=model_scale,
-                enable_max_target=enable_max,
-                auto_resolution=auto_mode,
-                ratio_aware=ratio_aware,
-                allow_downscale=True
-            )
-            
-            # Calculate resolution
-            result = calculate_resolution(input_path, config)
-            
-            # Update state with calculated values
+            # Get dimensions
+            from shared.path_utils import get_media_dimensions
+            dims = get_media_dimensions(input_path)
+            if not dims:
+                return "⚠️ Could not determine input dimensions", state
+            w, h = dims
+
+            # Build sizing plan
+            max_edge = int(max_res if enable_max else 0)
+            if model_scale and model_scale > 1:
+                plan = estimate_fixed_scale_upscale_plan_from_dims(
+                    w,
+                    h,
+                    requested_scale=float(upscale_factor),
+                    model_scale=int(model_scale),
+                    max_edge=max_edge,
+                    force_pre_downscale=True,
+                )
+            else:
+                plan = estimate_seedvr2_upscale_plan_from_dims(
+                    w,
+                    h,
+                    upscale_factor=float(upscale_factor),
+                    max_edge=max_edge,
+                    pre_downscale_then_upscale=bool(pre_downscale_then_upscale),
+                )
+
+            # Update state with calculated values (for other tabs to consume if desired)
             seed_controls = state.get("seed_controls", {})
-            seed_controls["calculated_output_width"] = result.output_width
-            seed_controls["calculated_output_height"] = result.output_height
-            seed_controls["needs_downscale_first"] = result.needs_downscale_first
-            seed_controls["input_resize_width"] = result.input_resize_width
-            seed_controls["input_resize_height"] = result.input_resize_height
+            seed_controls["calculated_output_width"] = plan.final_saved_width or plan.resize_width
+            seed_controls["calculated_output_height"] = plan.final_saved_height or plan.resize_height
+            seed_controls["needs_downscale_first"] = bool(plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999)
+            seed_controls["input_resize_width"] = plan.preprocess_width if plan.pre_downscale_then_upscale else None
+            seed_controls["input_resize_height"] = plan.preprocess_height if plan.pre_downscale_then_upscale else None
             state["seed_controls"] = seed_controls
             
             # Build info message
             info = f"### Auto-Resolution Result\n\n"
-            info += f"{result.info_message}\n\n"
-            
-            if result.needs_downscale_first:
-                info += f"**Note:** Input will be downscaled first to match model scale factor.\n\n"
-            
-            if result.clamped_by_max:
-                info += f"⚠️ **Resolution was clamped by max target setting.**\n\n"
-            
-            # Add aspect ratio info
-            ar_w, ar_h = _get_aspect_ratio_str(result.aspect_ratio)
-            info += f"**Aspect Ratio:** {ar_w}:{ar_h} ({result.aspect_ratio:.3f})\n"
+            info += f"📐 Input: {plan.input_width}×{plan.input_height}\n\n"
+            info += f"🎯 Target: {plan.requested_scale:.2f}x"
+            if max_edge and max_edge > 0:
+                info += f", max edge {max_edge}px\n\n"
+            else:
+                info += " (no max edge cap)\n\n"
+
+            if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
+                info += f"🧩 Preprocess: downscale to {plan.preprocess_width}×{plan.preprocess_height} (×{plan.preprocess_scale:.3f})\n\n"
+
+            info += f"✅ Expected output: {plan.final_saved_width or plan.resize_width}×{plan.final_saved_height or plan.resize_height}\n"
+            info += f"(Effective: {plan.effective_scale:.2f}x)\n"
+
+            if plan.notes:
+                info += "\n" + "\n".join([f"ℹ️ {n}" for n in plan.notes])
             
             return info, state
             
@@ -249,19 +277,31 @@ def build_resolution_callbacks(
             if chunk_count == 0:
                 return info, state
             
-            # Add disk space estimate (rough)
-            config = ResolutionConfig(
-                input_width=0,
-                input_height=0,
-                target_resolution=state.get("seed_controls", {}).get("resolution_val", 1080),
-                max_resolution=0
-            )
-            
+            # Add disk space estimate (rough) based on Upscale-x plan
             try:
-                result = calculate_resolution(input_path, config)
-                space_required, space_str = calculate_disk_space_required(
-                    input_path, result, "mp4", duration
+                dims = get_media_dimensions(input_path)
+                if dims:
+                    w, h = dims
+                else:
+                    w, h = 0, 0
+
+                seed_controls = state.get("seed_controls", {})
+                scale_x = float(seed_controls.get("upscale_factor_val", 4.0) or 4.0)
+                max_edge = int(seed_controls.get("max_resolution_val", 0) or 0)
+                enable_max = bool(seed_controls.get("enable_max_target", True))
+                if not enable_max:
+                    max_edge = 0
+
+                plan = estimate_seedvr2_upscale_plan_from_dims(
+                    w, h, upscale_factor=scale_x, max_edge=max_edge, pre_downscale_then_upscale=bool(seed_controls.get("ratio_downscale", False))
+                ) if w and h else None
+
+                result = ResolutionResult(
+                    output_width=int(plan.final_saved_width or plan.resize_width) if plan else 0,
+                    output_height=int(plan.final_saved_height or plan.resize_height) if plan else 0,
                 )
+
+                space_required, space_str = calculate_disk_space_required(input_path, result, "mp4", duration)
                 
                 # Get available space
                 output_dir = state.get("seed_controls", {}).get("last_output_dir", ".")
@@ -300,12 +340,13 @@ def build_resolution_callbacks(
         seed_controls = state.get("seed_controls", {})
         
         # Cache resolution values for all upscalers to use (GLOBAL level)
-        seed_controls["resolution_val"] = settings_dict.get("target_resolution", 1080)
-        seed_controls["max_resolution_val"] = settings_dict.get("max_target_resolution", 0)
+        seed_controls["upscale_factor_val"] = float(settings_dict.get("upscale_factor", 4.0) or 4.0)
+        seed_controls["max_resolution_val"] = int(settings_dict.get("max_target_resolution", 0) or 0)
         seed_controls["enable_max_target"] = settings_dict.get("enable_max_target", True)
-        seed_controls["auto_resolution"] = settings_dict.get("auto_resolution", True)
+        seed_controls["auto_resolution"] = settings_dict.get("auto_resolution", True)  # kept for backward compat
         seed_controls["chunk_size_sec"] = settings_dict.get("chunk_size", 0)
         seed_controls["chunk_overlap_sec"] = settings_dict.get("chunk_overlap", 0)
+        # Repurposed: now controls "pre-downscale then upscale when clamped"
         seed_controls["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", False)
         seed_controls["per_chunk_cleanup"] = settings_dict.get("per_chunk_cleanup", False)
         seed_controls["scene_threshold"] = settings_dict.get("scene_threshold", 27.0)
@@ -316,8 +357,8 @@ def build_resolution_callbacks(
         model_name = settings_dict.get("model", "")
         if model_name:
             model_cache = _ensure_model_cache(model_name, state)
-            model_cache["resolution_val"] = settings_dict.get("target_resolution", 1080)
-            model_cache["max_resolution_val"] = settings_dict.get("max_target_resolution", 0)
+            model_cache["upscale_factor_val"] = float(settings_dict.get("upscale_factor", 4.0) or 4.0)
+            model_cache["max_resolution_val"] = int(settings_dict.get("max_target_resolution", 0) or 0)
             model_cache["enable_max_target"] = settings_dict.get("enable_max_target", True)
             model_cache["auto_resolution"] = settings_dict.get("auto_resolution", True)
             model_cache["chunk_size_sec"] = float(settings_dict.get("chunk_size", 0) or 0)
@@ -330,7 +371,7 @@ def build_resolution_callbacks(
         state["seed_controls"] = seed_controls
         
         status_msg = f"✅ Applied resolution settings to ALL upscalers:\n"
-        status_msg += f"- Target Resolution: {seed_controls['resolution_val']}px\n"
+        status_msg += f"- Upscale Factor: {seed_controls['upscale_factor_val']}x\n"
         status_msg += f"- Max Resolution: {seed_controls['max_resolution_val']}px\n"
         status_msg += f"- Auto-Resolution: {seed_controls['auto_resolution']}\n"
         if seed_controls['chunk_size_sec'] > 0:
@@ -358,10 +399,10 @@ def build_resolution_callbacks(
         est = math.ceil(dur / max(0.001, size - ov))
         return gr.update(value=f"Duration ~{dur:.1f}s → est. {est} chunks (size {size}s, overlap {ov}s)."), state
 
-    def cache_resolution(t_res, m_res, model, state):
+    def cache_resolution(scale_x, m_res, model, state):
         model_cache = _ensure_model_cache(model, state)
-        model_cache["resolution_val"] = t_res
-        model_cache["max_resolution_val"] = m_res
+        model_cache["upscale_factor_val"] = float(scale_x or 4.0)
+        model_cache["max_resolution_val"] = int(m_res or 0)
         return gr.update(value=f"Resolution cached for {model}."), state
 
     def cache_resolution_flags(auto_res, enable_max, chunk_sz, chunk_ov, ratio_down, per_cleanup, scene_thresh, min_scene, model, state):

@@ -68,6 +68,7 @@ def run_flashvsr(
     Returns:
         FlashVSRResult with processing outcome
     """
+    start_time = time.time()
     log_lines = []
     
     def log(msg: str):
@@ -76,28 +77,33 @@ def run_flashvsr(
             on_progress(msg + "\n")
     
     try:
-        # Validate input
-        input_path = normalize_path(settings.get("input_path", ""))
-        if not input_path or not Path(input_path).exists():
+        # Validate input (support preprocessed effective input path)
+        original_input_path = normalize_path(settings.get("input_path", ""))
+        effective_input_path = normalize_path(settings.get("_effective_input_path") or original_input_path)
+        if not effective_input_path or not Path(effective_input_path).exists():
             return FlashVSRResult(returncode=1, output_path=None, log="Invalid input path")
         
-        # Determine output path
+        # Determine output path (naming should follow ORIGINAL input)
         output_override = settings.get("output_override", "")
         if output_override:
             output_folder = normalize_path(output_override)
         else:
             # Use default output naming
             output_folder = resolve_output_location(
-                input_path=input_path,
+                input_path=original_input_path,
                 output_format="mp4",
                 global_output_dir=settings.get("global_output_dir", str(base_dir / "outputs")),
-                batch_mode=False
+                batch_mode=False,
+                original_filename=settings.get("_original_filename"),
             )
             # FlashVSR expects a folder, not a file
             if Path(output_folder).suffix:
                 output_folder = str(Path(output_folder).parent)
         
-        Path(output_folder).mkdir(parents=True, exist_ok=True)
+        output_folder_path = Path(output_folder)
+        output_folder_path.mkdir(parents=True, exist_ok=True)
+        # Track pre-existing outputs so we can reliably locate the output from THIS run.
+        pre_existing_mp4 = {p.resolve() for p in output_folder_path.glob("*.mp4")}
         
         # Get settings with defaults
         scale = int(settings.get("scale", 4))
@@ -109,6 +115,13 @@ def run_flashvsr(
         quality = int(settings.get("quality", 6))
         attention = settings.get("attention", "sage")
         seed = int(settings.get("seed", 0))
+
+        # FlashVSR+ naming (mirrors FlashVSR_plus/run.py):
+        #   FlashVSR_{mode}_{name.split('.')[0]}_{seed}.mp4
+        import os
+        base_name = os.path.basename(original_input_path.rstrip("/\\"))
+        base_no_ext = base_name.split(".")[0] if base_name else "FlashVSR"
+        expected_output_path = output_folder_path / f"FlashVSR_{mode}_{base_no_ext}_{seed}.mp4"
         
         # Tile settings
         tiled_vae = bool(settings.get("tiled_vae", False))
@@ -130,7 +143,7 @@ def run_flashvsr(
         cmd = [
             sys.executable,
             str(flashvsr_script),
-            "-i", input_path,
+            "-i", effective_input_path,
             "-s", str(scale),
             "-v", version,
             "-m", mode,
@@ -157,6 +170,8 @@ def run_flashvsr(
             cmd.append("--color-fix")
         
         log(f"Running FlashVSR+ with scale={scale}, mode={mode}, version={version}")
+        if original_input_path != effective_input_path:
+            log(f"Preprocessed input: {effective_input_path} (original: {original_input_path})")
         log(f"Command: {' '.join(cmd)}")
         
         # Run subprocess with cancellation support
@@ -222,17 +237,28 @@ def run_flashvsr(
         if remaining:
             output_lines.append(remaining)
         
-        # Find output file
-        output_files = sorted(Path(output_folder).glob("*.mp4"))
-        if output_files:
-            output_path = str(output_files[-1])  # Latest file
+        # Find output file reliably (avoid lexicographic "last file" bugs).
+        output_path: Optional[str] = None
+        if expected_output_path.exists():
+            output_path = str(expected_output_path)
+        else:
+            post_mp4 = {p.resolve() for p in output_folder_path.glob("*.mp4")}
+            new_files = list(post_mp4 - pre_existing_mp4)
+            if new_files:
+                newest = max(new_files, key=lambda p: p.stat().st_mtime)
+                output_path = str(newest)
+            elif post_mp4:
+                newest = max(post_mp4, key=lambda p: p.stat().st_mtime)
+                output_path = str(newest)
+
+        if output_path:
             log(f"✅ Output saved: {output_path}")
             
             result = FlashVSRResult(
                 returncode=proc.returncode,
                 output_path=output_path,
                 log="\n".join(log_lines),
-                input_fps=get_media_fps(input_path) or 30.0,
+                input_fps=get_media_fps(original_input_path) or 30.0,
                 output_fps=fps
             )
         else:

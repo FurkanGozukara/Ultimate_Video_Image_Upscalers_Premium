@@ -51,7 +51,9 @@ def restore_image(
     image_path: str,
     strength: float = 0.5,
     backend: str = "auto",
-    on_progress: Optional[Callable[[str], None]] = None
+    on_progress: Optional[Callable[[str], None]] = None,
+    use_gpu: Optional[bool] = None,
+    output_path: Optional[str] = None,
 ) -> Optional[str]:
     """
     Restore faces in an image using GFPGAN or CodeFormer.
@@ -82,9 +84,9 @@ def restore_image(
             return image_path  # Return original if no backend available
     
     if backend == "gfpgan":
-        return _restore_with_gfpgan(image_path, strength, on_progress)
+        return _restore_with_gfpgan(image_path, strength, on_progress, use_gpu=use_gpu, output_path=output_path)
     elif backend == "codeformer":
-        return _restore_with_codeformer(image_path, strength, on_progress)
+        return _restore_with_codeformer(image_path, strength, on_progress, output_path=output_path)
     else:
         if on_progress:
             on_progress(f"⚠️ Unknown backend: {backend}\n")
@@ -95,7 +97,10 @@ def restore_video(
     video_path: str,
     strength: float = 0.5,
     backend: str = "auto",
-    on_progress: Optional[Callable[[str], None]] = None
+    on_progress: Optional[Callable[[str], None]] = None,
+    use_gpu: Optional[bool] = None,
+    output_path: Optional[str] = None,
+    preserve_audio: bool = True,
 ) -> Optional[str]:
     """
     Restore faces in a video frame-by-frame.
@@ -169,7 +174,9 @@ def restore_video(
                 str(frame_path),
                 strength=strength,
                 backend=backend,
-                on_progress=None  # Don't spam progress for each frame
+                on_progress=None,  # Don't spam progress for each frame
+                use_gpu=use_gpu,
+                output_path=None,
             )
             
             if restored_frame and restored_frame != str(frame_path):
@@ -203,29 +210,78 @@ def restore_video(
         else:
             fps = float(fps_str) if fps_str else 30.0
         
-        # Create output path
-        output_path = Path(video_path).with_stem(f"{Path(video_path).stem}_face_restored")
-        
-        # Encode video
-        encode_cmd = [
+        # Create output path (allow override)
+        if output_path:
+            outp = Path(output_path)
+            # If a directory is provided, generate a file name inside it.
+            if outp.suffix == "":
+                outp.mkdir(parents=True, exist_ok=True)
+                outp = outp / f"{Path(video_path).stem}_face_restored{Path(video_path).suffix}"
+        else:
+            outp = Path(video_path).with_stem(f"{Path(video_path).stem}_face_restored")
+
+        outp.parent.mkdir(parents=True, exist_ok=True)
+
+        # Encode video (preserve audio when possible)
+        frames_pattern = str(restored_dir / "frame_%05d.png")
+
+        base_cmd = [
             "ffmpeg", "-y",
             "-framerate", str(fps),
-            "-i", str(restored_dir / "frame_%05d.png"),
+            "-i", frames_pattern,
+        ]
+
+        if preserve_audio:
+            base_cmd += [
+                "-i", video_path,
+                "-map", "0:v:0",
+                "-map", "1:a?",
+                "-c:a", "copy",
+                "-shortest",
+            ]
+        else:
+            base_cmd += ["-an"]
+
+        encode_cmd = base_cmd + [
             "-c:v", "libx264",
             "-crf", "18",
             "-pix_fmt", "yuv420p",
-            str(output_path)
+            str(outp),
         ]
-        
-        subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        try:
+            subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        except Exception:
+            # If audio copy fails, fall back to AAC (still optional)
+            if preserve_audio:
+                encode_cmd_fallback = base_cmd.copy()
+                # Replace "-c:a copy" with AAC
+                try:
+                    idx = encode_cmd_fallback.index("-c:a")
+                    if idx + 1 < len(encode_cmd_fallback):
+                        encode_cmd_fallback[idx + 1] = "aac"
+                    encode_cmd_fallback += ["-b:a", "192k"]
+                except Exception:
+                    # If structure changes, just append audio settings
+                    encode_cmd_fallback += ["-c:a", "aac", "-b:a", "192k"]
+
+                encode_cmd_fallback += [
+                    "-c:v", "libx264",
+                    "-crf", "18",
+                    "-pix_fmt", "yuv420p",
+                    str(outp),
+                ]
+                subprocess.run(encode_cmd_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            else:
+                raise
         
         # Cleanup
         shutil.rmtree(work_dir, ignore_errors=True)
         
         if on_progress:
-            on_progress(f"✅ Face restoration complete: {output_path}\n")
-        
-        return str(output_path)
+            on_progress(f"✅ Face restoration complete: {outp}\n")
+
+        return str(outp)
         
     except Exception as e:
         if on_progress:
@@ -237,7 +293,9 @@ def restore_video(
 def _restore_with_gfpgan(
     image_path: str,
     strength: float,
-    on_progress: Optional[Callable[[str], None]] = None
+    on_progress: Optional[Callable[[str], None]] = None,
+    use_gpu: Optional[bool] = None,
+    output_path: Optional[str] = None,
 ) -> Optional[str]:
     """Restore image using GFPGAN"""
     try:
@@ -248,7 +306,12 @@ def _restore_with_gfpgan(
             on_progress("Loading GFPGAN model...\n")
         
         # Determine device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if use_gpu is False:
+            device = torch.device("cpu")
+        elif use_gpu is True:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Initialize GFPGAN
         model_path = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth"
@@ -277,11 +340,19 @@ def _restore_with_gfpgan(
             weight=strength
         )
         
-        # Save restored image
-        output_path = Path(image_path).with_stem(f"{Path(image_path).stem}_gfpgan")
-        cv2.imwrite(str(output_path), restored_img)
-        
-        return str(output_path)
+        # Save restored image (allow override)
+        if output_path:
+            outp = Path(output_path)
+            if outp.suffix == "":
+                outp.mkdir(parents=True, exist_ok=True)
+                outp = outp / f"{Path(image_path).stem}_gfpgan{Path(image_path).suffix}"
+        else:
+            outp = Path(image_path).with_stem(f"{Path(image_path).stem}_gfpgan")
+
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(outp), restored_img)
+
+        return str(outp)
         
     except ImportError:
         if on_progress:
@@ -296,7 +367,8 @@ def _restore_with_gfpgan(
 def _restore_with_codeformer(
     image_path: str,
     strength: float,
-    on_progress: Optional[Callable[[str], None]] = None
+    on_progress: Optional[Callable[[str], None]] = None,
+    output_path: Optional[str] = None,
 ) -> Optional[str]:
     """Restore image using CodeFormer"""
     try:
@@ -304,6 +376,7 @@ def _restore_with_codeformer(
         # This is a placeholder - actual implementation requires CodeFormer installation
         if on_progress:
             on_progress("⚠️ CodeFormer integration not yet implemented\n")
+        # For now, return original (no-op). If output_path specified, still no-op.
         return image_path
         
     except ImportError:

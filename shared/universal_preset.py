@@ -114,6 +114,10 @@ def get_all_defaults(base_dir: Path = None, models_list: List[str] = None) -> Di
             "output_quality": 95,
             "save_metadata": True,
             "create_subfolders": False,
+            # vNext sizing
+            "upscale_factor": 4.0,
+            "max_resolution": 0,
+            "pre_downscale_then_upscale": False,
         })
     
     # RIFE
@@ -331,8 +335,9 @@ def update_shared_state_from_preset(
     
     # Also update individual cached values that other parts of the app use
     res_settings = preset.get("resolution", {})
-    seed_controls["resolution_val"] = res_settings.get("target_resolution", 1080)
-    seed_controls["max_resolution_val"] = res_settings.get("max_target_resolution", 0)
+    # NEW (vNext): unified Upscale-x sizing cache (applies to SeedVR2/GAN/FlashVSR)
+    seed_controls["upscale_factor_val"] = float(res_settings.get("upscale_factor", 4.0) or 4.0)
+    seed_controls["max_resolution_val"] = int(res_settings.get("max_target_resolution", 0) or 0)
     seed_controls["chunk_size_sec"] = res_settings.get("chunk_size", 0)
     seed_controls["chunk_overlap_sec"] = res_settings.get("chunk_overlap", 0.5)
     seed_controls["ratio_downscale"] = res_settings.get("ratio_downscale_then_upscale", False)

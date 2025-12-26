@@ -266,7 +266,7 @@ def main():
                 "output_settings": startup_preset.get("output", {}),
                 
                 # Individual cached values (for backward compatibility with other code)
-                "resolution_val": startup_res_settings.get("target_resolution", 1080),
+                "upscale_factor_val": startup_res_settings.get("upscale_factor", 4.0),
                 "max_resolution_val": startup_res_settings.get("max_target_resolution", 0),
                 "current_model": None,
                 "last_input_path": "",

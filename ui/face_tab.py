@@ -10,6 +10,7 @@ from shared.services.face_service import (
     build_face_callbacks, FACE_ORDER
 )
 from shared.models.seedvr2_meta import get_seedvr2_model_names
+from ui.media_preview import preview_updates
 from ui.universal_preset_section import (
     universal_preset_section,
     wire_universal_preset_events,
@@ -129,6 +130,133 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
     )
 
     with gr.Tabs():
+        # Standalone processing (image/video + batch)
+        with gr.TabItem("🧪 Standalone Processing"):
+            gr.Markdown("#### Restore faces on an image/video directly (no upscaling)")
+            gr.Markdown("*Uses the same face restoration backend used by the other pipelines.*")
+
+            with gr.Row():
+                # Left: input
+                with gr.Column(scale=3):
+                    with gr.Row():
+                        input_file = gr.File(
+                            label="Upload Image or Video",
+                            type="filepath",
+                            file_types=["image", "video"],
+                        )
+                        with gr.Column():
+                            input_image_preview = gr.Image(
+                                label="📸 Input Preview (Image)",
+                                type="filepath",
+                                interactive=False,
+                                height=250,
+                                visible=False,
+                            )
+                            input_video_preview = gr.Video(
+                                label="🎬 Input Preview (Video)",
+                                interactive=False,
+                                height=250,
+                                visible=False,
+                            )
+
+                    standalone_input_path = gr.Textbox(
+                        label="Input Path (alternative to upload)",
+                        value=values[18] if len(values) > 18 else "",
+                        placeholder="C:/path/to/image.png or C:/path/to/video.mp4",
+                        info="Upload wins if both are set. For batch, enable Batch Processing below.",
+                    )
+
+                    standalone_output_override = gr.Textbox(
+                        label="Output Override (optional)",
+                        value=values[19] if len(values) > 19 else "",
+                        placeholder="Leave empty for auto output in Outputs folder",
+                        info="Can be a file path (recommended) or a directory path (suffixless).",
+                    )
+
+                    input_cache_msg = gr.Markdown("", visible=False)
+
+                    with gr.Accordion("📦 Batch Processing (multiple files)", open=False):
+                        standalone_batch_enable = gr.Checkbox(
+                            label="Enable Batch Processing",
+                            value=values[20] if len(values) > 20 else False,
+                            info="Process all supported media in a directory (recursive).",
+                        )
+                        standalone_batch_input = gr.Textbox(
+                            label="Batch Input Path",
+                            value=values[21] if len(values) > 21 else "",
+                            placeholder="Folder containing images/videos (or a single media file)",
+                        )
+                        standalone_batch_output = gr.Textbox(
+                            label="Batch Output Folder Override (optional)",
+                            value=values[22] if len(values) > 22 else "",
+                            placeholder="Leave empty for default outputs folder",
+                        )
+
+                    process_btn = gr.Button("✨ Restore Faces", variant="primary", size="lg")
+
+                # Right: output
+                with gr.Column(scale=2):
+                    process_status = gr.Markdown(value="Ready.")
+                    process_log = gr.Textbox(
+                        label="📋 Log",
+                        value="",
+                        lines=10,
+                        buttons=["copy"],
+                    )
+                    restored_image = gr.Image(
+                        label="🖼️ Restored Image",
+                        interactive=False,
+                        buttons=["download"],
+                        visible=False,
+                    )
+                    restored_video = gr.Video(
+                        label="🎬 Restored Video",
+                        interactive=False,
+                        buttons=["download"],
+                        visible=False,
+                    )
+                    batch_outputs = gr.File(
+                        label="📦 Batch Outputs",
+                        file_count="multiple",
+                        type="filepath",
+                        interactive=False,
+                    )
+
+            # Input caching + previews
+            def _cache_upload(val, state):
+                state = state or {}
+                try:
+                    state.setdefault("seed_controls", {})
+                    state["seed_controls"]["last_input_path"] = val or ""
+                except Exception:
+                    pass
+                img_prev, vid_prev = preview_updates(val)
+                return (
+                    val or "",
+                    img_prev,
+                    vid_prev,
+                    gr.update(value="✅ Input cached for face restoration.", visible=True),
+                    state,
+                )
+
+            input_file.upload(
+                fn=_cache_upload,
+                inputs=[input_file, shared_state],
+                outputs=[standalone_input_path, input_image_preview, input_video_preview, input_cache_msg, shared_state],
+            )
+
+            input_file.change(
+                fn=lambda p: preview_updates(p),
+                inputs=[input_file],
+                outputs=[input_image_preview, input_video_preview],
+            )
+
+            standalone_input_path.change(
+                fn=lambda p: preview_updates(p),
+                inputs=[standalone_input_path],
+                outputs=[input_image_preview, input_video_preview],
+            )
+
         # Model Selection
         with gr.TabItem("🤖 Model Selection"):
             gr.Markdown("#### Face Restoration Model")
@@ -372,6 +500,7 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
         restoration_model, face_strength, restore_blindly, upscale_faces,
         face_padding, face_landmarks, color_correction, gpu_acceleration, batch_face_processing,
         output_quality, preserve_original, artifact_reduction, save_face_masks
+        , standalone_input_path, standalone_output_override, standalone_batch_enable, standalone_batch_input, standalone_batch_output
     ]
 
     # Wire up callbacks
@@ -381,6 +510,13 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
         fn=lambda enabled, state: service["set_face_global"](enabled, state),
         inputs=[global_face_enabled, shared_state],
         outputs=[global_status, shared_state]
+    )
+
+    # Standalone processing
+    process_btn.click(
+        fn=lambda upload, *args: service["run_action"](upload, *args[:-1], state=args[-1]),
+        inputs=[input_file] + inputs_list + [shared_state],
+        outputs=[process_status, process_log, restored_image, restored_video, batch_outputs, shared_state],
     )
 
     # UNIVERSAL PRESET EVENT WIRING
@@ -395,4 +531,5 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
         callbacks=preset_callbacks,
         inputs_list=inputs_list,
         shared_state=shared_state,
+        tab_name="face",
     )

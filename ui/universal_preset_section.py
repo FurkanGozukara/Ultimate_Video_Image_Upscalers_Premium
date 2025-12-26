@@ -302,6 +302,8 @@ def wire_universal_preset_events(
     callbacks: Dict[str, Callable],
     inputs_list: List[gr.components.Component],
     shared_state: gr.State,
+    tab_name: Optional[str] = None,
+    enable_auto_sync: bool = True,
 ) -> None:
     """
     Wire up event handlers for universal preset UI.
@@ -374,6 +376,53 @@ def wire_universal_preset_events(
         inputs=[preset_dropdown],
         outputs=[preset_dropdown, preset_status],
     )
+
+    # ------------------------------------------------------------------ #
+    # Auto-sync current tab values into shared_state on ANY change.
+    #
+    # Why: Universal presets save ALL tabs from shared_state. Without auto-sync,
+    # changes made in other tabs may not be reflected when saving from a different tab.
+    #
+    # Uses Gradio 6.x `gr.on()` to avoid wiring dozens of separate change handlers.
+    # ------------------------------------------------------------------ #
+    if enable_auto_sync and tab_name:
+        def _sync_wrapper(*args):
+            # args = (value1, value2, ..., valueN, shared_state)
+            tab_values = list(args[:-1])
+            state = args[-1]
+            return sync_tab_to_shared_state(tab_name, tab_values, state)
+
+        triggers = []
+        for comp in inputs_list:
+            # Most components support .change; sliders also support .release.
+            if hasattr(comp, "change"):
+                triggers.append(comp.change)
+            if hasattr(comp, "release"):
+                triggers.append(comp.release)
+
+        # Prefer gr.on() for a single endpoint; fall back to per-component wiring if needed.
+        if hasattr(gr, "on"):
+            gr.on(
+                triggers=triggers,
+                fn=_sync_wrapper,
+                inputs=inputs_list + [shared_state],
+                outputs=[shared_state],
+                queue=False,
+                show_progress="hidden",
+                trigger_mode="always_last",
+            )
+        else:
+            # Fallback: register one event per component (heavier, but compatible).
+            for comp in inputs_list:
+                if hasattr(comp, "change"):
+                    comp.change(
+                        fn=_sync_wrapper,
+                        inputs=inputs_list + [shared_state],
+                        outputs=[shared_state],
+                        queue=False,
+                        show_progress="hidden",
+                        trigger_mode="always_last",
+                    )
 
 
 def sync_tab_to_shared_state(

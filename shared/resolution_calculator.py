@@ -10,9 +10,9 @@ Handles intelligent resolution calculation for upscaling with:
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from .path_utils import get_media_dimensions, detect_input_type
 
 
@@ -43,6 +43,286 @@ class ResolutionResult:
     clamped_by_max: bool = False
     aspect_ratio: float = 1.0
     info_message: str = ""
+
+
+@dataclass
+class UpscalePlan:
+    """
+    A unified sizing plan for the new "Upscale x" feature.
+
+    This is used by UI info panels and by pipelines to decide whether to
+    pre-downscale inputs and what output size to expect.
+    """
+
+    # Input
+    input_width: int
+    input_height: int
+
+    # User intent
+    requested_scale: float
+    max_edge: int  # 0 = no cap (cap applies to LONG side / max(width,height))
+    pre_downscale_then_upscale: bool
+
+    # Computed scaling
+    cap_ratio: float  # 1.0 if no cap or not exceeded
+    effective_scale: float  # requested_scale * cap_ratio
+
+    # What is actually fed to the model (after optional pre-downscale)
+    preprocess_width: int
+    preprocess_height: int
+    preprocess_scale: float  # relative to original input (1.0 means unchanged)
+
+    # "Resize result" (output size before padding/even-trim)
+    resize_width: int
+    resize_height: int
+
+    # Optional model alignment (SeedVR2 pads ÷16, then trims)
+    padded_width: Optional[int] = None
+    padded_height: Optional[int] = None
+    final_saved_width: Optional[int] = None
+    final_saved_height: Optional[int] = None
+
+    # Model hints (fixed-scale models)
+    model_scale: Optional[int] = None
+
+    # SeedVR2 CLI parameters (when applicable)
+    seedvr2_resolution: Optional[int] = None
+    seedvr2_max_resolution: Optional[int] = None
+
+    notes: List[str] = field(default_factory=list)
+
+
+def _pad_to_factor(v: int, factor: int) -> int:
+    return int(v + ((factor - (v % factor)) % factor))
+
+
+def _floor_to_even(v: int) -> int:
+    return int((v // 2) * 2)
+
+
+def _round_down_to_multiple(v: int, multiple: int) -> int:
+    if multiple <= 1:
+        return int(v)
+    return int((int(v) // multiple) * multiple)
+
+
+def _cap_ratio_for_scale(in_w: int, in_h: int, scale: float, max_edge: int) -> float:
+    """
+    Compute the clamp ratio for max-edge capping after applying `scale`.
+
+    Ratio is in (0, 1], where 1 means no clamping.
+    """
+    if max_edge and max_edge > 0:
+        long_after = max(in_w * scale, in_h * scale)
+        if long_after > 0 and long_after > max_edge:
+            return float(max_edge) / float(long_after)
+    return 1.0
+
+
+def estimate_seedvr2_upscale_plan_from_dims(
+    in_w: int,
+    in_h: int,
+    upscale_factor: float,
+    max_edge: int = 0,
+    pre_downscale_then_upscale: bool = False,
+    resolution_multiple: int = 16,
+) -> UpscalePlan:
+    """
+    Estimate SeedVR2's resize/pad/even-trim behavior for the new Upscale-x feature.
+
+    Notes:
+    - SeedVR2 CLI takes `--resolution` as the target SHORT side.
+    - `--max_resolution` caps the LONG side (max edge).
+    - SeedVR2 does:
+      1) Resize shortest edge to `resolution` (long edge uses int())
+      2) If long edge > max_resolution, scale down using round()
+      3) Pad to divisible-by-16 for model input
+      4) Trim padding and force even output dims
+    """
+    notes: List[str] = []
+    in_w_i = int(in_w or 0)
+    in_h_i = int(in_h or 0)
+    if in_w_i <= 0 or in_h_i <= 0:
+        raise ValueError("Invalid input dimensions")
+
+    try:
+        requested_scale = float(upscale_factor)
+    except Exception:
+        requested_scale = 1.0
+    if requested_scale <= 0:
+        requested_scale = 1.0
+        notes.append("Requested scale was invalid; defaulted to 1.0x")
+
+    cap_ratio = _cap_ratio_for_scale(in_w_i, in_h_i, requested_scale, int(max_edge or 0))
+    effective_scale = requested_scale * cap_ratio
+
+    # If enabled AND a cap is active, downscale input first by the cap ratio.
+    # This makes the subsequent upscale operate at the full requested scale
+    # (relative to the preprocessed input), reaching the same capped output.
+    do_pre = bool(pre_downscale_then_upscale) and cap_ratio < 0.999999
+    preprocess_scale = cap_ratio if do_pre else 1.0
+    pre_w = max(1, int(round(in_w_i * preprocess_scale)))
+    pre_h = max(1, int(round(in_h_i * preprocess_scale)))
+
+    # SeedVR2 prefers even values; also safer for video codecs if input is a video.
+    # Do not force huge rounding; just even-align.
+    pre_w = max(16, _floor_to_even(pre_w))
+    pre_h = max(16, _floor_to_even(pre_h))
+
+    base_short = min(pre_w, pre_h) if do_pre else min(in_w_i, in_h_i)
+    # Resolution parameter is based on the (possibly downscaled) model input.
+    seedvr2_resolution = _round_down_to_multiple(int(round(base_short * requested_scale)), resolution_multiple)
+    seedvr2_resolution = max(resolution_multiple, seedvr2_resolution)
+
+    max_edge_i = int(max_edge or 0)
+
+    # SeedVR2 resize estimate (mirror the CLI transform logic).
+    if pre_w <= pre_h:
+        resized_w = seedvr2_resolution
+        resized_h = int(seedvr2_resolution * pre_h / max(1, pre_w))
+    else:
+        resized_h = seedvr2_resolution
+        resized_w = int(seedvr2_resolution * pre_w / max(1, pre_h))
+
+    if max_edge_i > 0 and max(resized_w, resized_h) > max_edge_i:
+        s = float(max_edge_i) / float(max(resized_w, resized_h))
+        resized_w = int(round(resized_w * s))
+        resized_h = int(round(resized_h * s))
+
+    padded_w = _pad_to_factor(resized_w, 16)
+    padded_h = _pad_to_factor(resized_h, 16)
+    out_w = _floor_to_even(resized_w)
+    out_h = _floor_to_even(resized_h)
+
+    # Effective scale relative to ORIGINAL input (use short-side ratio for messaging)
+    input_short = min(in_w_i, in_h_i)
+    eff_scale_short = (min(out_w, out_h) / input_short) if input_short > 0 else 1.0
+
+    # Keep the computed effective_scale for max-edge logic, but note rounding.
+    if abs(eff_scale_short - effective_scale) > 0.02:
+        notes.append("Final scale differs slightly due to rounding/alignment (expected).")
+
+    return UpscalePlan(
+        input_width=in_w_i,
+        input_height=in_h_i,
+        requested_scale=requested_scale,
+        max_edge=max_edge_i,
+        pre_downscale_then_upscale=do_pre,
+        cap_ratio=cap_ratio,
+        effective_scale=effective_scale,
+        preprocess_width=pre_w if do_pre else in_w_i,
+        preprocess_height=pre_h if do_pre else in_h_i,
+        preprocess_scale=preprocess_scale,
+        resize_width=resized_w,
+        resize_height=resized_h,
+        padded_width=padded_w,
+        padded_height=padded_h,
+        final_saved_width=out_w,
+        final_saved_height=out_h,
+        seedvr2_resolution=seedvr2_resolution,
+        seedvr2_max_resolution=max_edge_i,
+        notes=notes,
+    )
+
+
+def estimate_fixed_scale_upscale_plan_from_dims(
+    in_w: int,
+    in_h: int,
+    requested_scale: float,
+    model_scale: int,
+    max_edge: int = 0,
+    force_pre_downscale: bool = True,
+    min_side: int = 64,
+) -> UpscalePlan:
+    """
+    Plan for fixed-scale models (GAN 2x/4x, FlashVSR 2x/4x).
+
+    We compute the capped effective scale, then (by default) PRE-DOWNSCALE input so
+    that model_scale-upscaling lands at the capped target.
+
+    If force_pre_downscale is False, the plan still reports the pre-downscale path
+    (because it's the only way to hit arbitrary effective scales without post-resize),
+    but callers may decide to post-downscale instead.
+    """
+    notes: List[str] = []
+    in_w_i = int(in_w or 0)
+    in_h_i = int(in_h or 0)
+    if in_w_i <= 0 or in_h_i <= 0:
+        raise ValueError("Invalid input dimensions")
+
+    try:
+        req = float(requested_scale)
+    except Exception:
+        req = 1.0
+    if req <= 0:
+        req = 1.0
+        notes.append("Requested scale was invalid; defaulted to 1.0x")
+
+    ms = int(model_scale or 0)
+    if ms <= 1:
+        raise ValueError("model_scale must be > 1 for fixed-scale planning")
+
+    # We cannot exceed the model's single-pass scale without upscaling input (not recommended).
+    if req > ms:
+        notes.append(f"Requested {req:.2f}x exceeds model scale {ms}x; clamped to {ms}x.")
+        req = float(ms)
+
+    cap_ratio = _cap_ratio_for_scale(in_w_i, in_h_i, req, int(max_edge or 0))
+    effective_scale = req * cap_ratio
+
+    # Compute the required input scaling so that output lands at effective_scale.
+    # output = (input * pre_scale) * model_scale  =>  overall = pre_scale * model_scale
+    pre_scale = effective_scale / float(ms)
+
+    do_pre = bool(force_pre_downscale) and pre_scale < 0.999999
+    if not do_pre and pre_scale < 0.999999:
+        notes.append("Pre-downscale is required to avoid post-resize for fixed-scale models.")
+        do_pre = True
+
+    pre_w = in_w_i
+    pre_h = in_h_i
+    if do_pre:
+        pre_w = max(1, int(round(in_w_i * pre_scale)))
+        pre_h = max(1, int(round(in_h_i * pre_scale)))
+
+    # Align to even numbers (safer for videos and many SR pipelines).
+    pre_w = max(min_side, _floor_to_even(pre_w))
+    pre_h = max(min_side, _floor_to_even(pre_h))
+
+    out_w = _floor_to_even(pre_w * ms)
+    out_h = _floor_to_even(pre_h * ms)
+
+    max_edge_i = int(max_edge or 0)
+    if max_edge_i > 0 and max(out_w, out_h) > max_edge_i:
+        # Due to rounding/alignment we may exceed slightly; clamp defensively.
+        s = float(max_edge_i) / float(max(out_w, out_h))
+        out_w = _floor_to_even(int(round(out_w * s)))
+        out_h = _floor_to_even(int(round(out_h * s)))
+        notes.append("Rounded output exceeded max edge; clamped slightly for safety.")
+
+    padded_w = _pad_to_factor(out_w, 16)
+    padded_h = _pad_to_factor(out_h, 16)
+
+    return UpscalePlan(
+        input_width=in_w_i,
+        input_height=in_h_i,
+        requested_scale=req,
+        max_edge=max_edge_i,
+        pre_downscale_then_upscale=do_pre,
+        cap_ratio=cap_ratio,
+        effective_scale=effective_scale,
+        preprocess_width=pre_w if do_pre else in_w_i,
+        preprocess_height=pre_h if do_pre else in_h_i,
+        preprocess_scale=pre_scale if do_pre else 1.0,
+        resize_width=out_w,
+        resize_height=out_h,
+        padded_width=padded_w,
+        padded_height=padded_h,
+        final_saved_width=out_w,
+        final_saved_height=out_h,
+        model_scale=ms,
+        notes=notes,
+    )
 
 
 def calculate_resolution(

@@ -5,6 +5,7 @@ Handles all SeedVR2 processing logic, presets, and callbacks
 
 import shutil
 import queue
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -22,11 +23,14 @@ from shared.preset_auto_serializer import (
 from shared.runner import Runner, RunResult
 from shared.path_utils import (
     normalize_path,
+    collision_safe_path,
+    collision_safe_dir,
     ffmpeg_set_fps,
     get_media_dimensions,
     get_media_duration_seconds,
     detect_input_type,
 )
+from shared.resolution_calculator import estimate_seedvr2_upscale_plan_from_dims
 from shared.chunking import chunk_and_process, check_resume_available
 from shared.face_restore import restore_image, restore_video
 from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
@@ -223,6 +227,12 @@ def seedvr2_defaults(model_name: Optional[str] = None, base_dir: Optional[Path] 
         "chunk_size": 0,  # SeedVR2 native chunking (frames per chunk, 0=disabled)
         "resolution": 1080,
         "max_resolution": max_res_cap,  # Apply model-specific cap
+        # NEW (vNext): replace manual short-side target with an Upscale factor (default 4x).
+        # The actual SeedVR2 CLI `resolution` is computed at runtime from the input dimensions.
+        "upscale_factor": 4.0,
+        # NEW (vNext): when max edge would clamp the requested upscale, optionally downscale the input first,
+        # then upscale with the full factor to reach the capped target (useful for fixed-scale models).
+        "pre_downscale_then_upscale": False,
         "batch_size": default_batch_size,  # Apply model-specific default
         "uniform_batch_size": False,
         "seed": 42,
@@ -485,6 +495,10 @@ SEEDVR2_ORDER: List[str] = [
     # ADDED v2.5.22: FFmpeg 10-bit encoding support
     "video_backend",  # Video encoding backend ("opencv" or "ffmpeg")
     "use_10bit",  # Enable 10-bit color depth (x265 yuv420p10le)
+
+    # vNext sizing (app-level; does not directly map 1:1 to CLI flags)
+    "upscale_factor",
+    "pre_downscale_then_upscale",
 ]
 
 
@@ -605,11 +619,20 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], s
     if state:
         seed_controls = state.get("seed_controls", {})
         
-        # Only apply if values are set in resolution tab
-        if "resolution_val" in seed_controls and seed_controls["resolution_val"]:
-            cfg["resolution"] = int(seed_controls["resolution_val"])
-        if "max_resolution_val" in seed_controls and seed_controls["max_resolution_val"]:
-            cfg["max_resolution"] = int(seed_controls["max_resolution_val"])
+        # Apply shared sizing values (Resolution tab / global cache)
+        if seed_controls.get("upscale_factor_val") is not None:
+            try:
+                cfg["upscale_factor"] = float(seed_controls["upscale_factor_val"])
+            except Exception:
+                pass
+        if seed_controls.get("max_resolution_val") is not None:
+            try:
+                cfg["max_resolution"] = int(seed_controls["max_resolution_val"] or 0)
+            except Exception:
+                pass
+        # Repurposed global flag: "pre-downscale then upscale when capped"
+        if "ratio_downscale" in seed_controls:
+            cfg["pre_downscale_then_upscale"] = bool(seed_controls.get("ratio_downscale", False))
         # PySceneDetect chunking now ONLY controlled by Resolution tab
         # No more chunk_enable - chunking triggers automatically when chunk_size_sec > 0
         if "chunk_overlap_sec" in seed_controls:
@@ -781,6 +804,40 @@ def _apply_preset_to_values(
 
 
 # Core processing functions -----------------------------------------------------
+def _save_preprocessed_artifact(pre_path: Path, output_path_str: str) -> Optional[str]:
+    """
+    Save the preprocessed (downscaled) input next to outputs for inspection.
+
+    Requirement:
+    - Save into a `pre_processed/` folder inside the output folder
+    - Use the SAME base name as the final output
+    """
+    try:
+        if not pre_path or not pre_path.exists():
+            return None
+
+        outp = Path(output_path_str)
+        parent = outp.parent if outp.suffix else outp.parent
+        pre_dir = parent / "pre_processed"
+        pre_dir.mkdir(parents=True, exist_ok=True)
+
+        if outp.suffix:
+            base = outp.stem
+        else:
+            base = outp.name
+
+        if pre_path.is_dir():
+            dest_dir = collision_safe_dir(pre_dir / base)
+            shutil.copytree(pre_path, dest_dir, dirs_exist_ok=False)
+            return str(dest_dir)
+
+        dest_file = collision_safe_path(pre_dir / f"{base}{pre_path.suffix}")
+        shutil.copy2(pre_path, dest_file)
+        return str(dest_file)
+    except Exception:
+        return None
+
+
 def _process_single_file(
     runner: Runner,
     settings: Dict[str, Any],
@@ -871,6 +928,106 @@ def _process_single_file(
                 # For images, just process normally with load_cap=1
                 settings["load_cap"] = 1
                 settings["output_format"] = "png"
+
+        # -----------------------------------------------------------------
+        # ✅ Upscale-x sizing (compute SeedVR2 CLI params + optional pre-downscale)
+        # -----------------------------------------------------------------
+        try:
+            enable_max_target = bool(seed_controls.get("enable_max_target", True))
+            max_edge = int(settings.get("max_resolution", 0) or 0)
+            # vNext UX: non-zero max_resolution means the cap is enabled.
+            # Do NOT let the legacy enable_max_target flag silently disable a user-provided max_resolution.
+            if max_edge > 0:
+                enable_max_target = True
+            if not enable_max_target:
+                max_edge = 0
+
+            scale_x = float(settings.get("upscale_factor") or seed_controls.get("upscale_factor_val") or 4.0)
+            pre_down = bool(settings.get("pre_downscale_then_upscale") or seed_controls.get("ratio_downscale", False))
+
+            dims = get_media_dimensions(settings["input_path"])
+            if dims:
+                w, h = dims
+                plan = estimate_seedvr2_upscale_plan_from_dims(
+                    w,
+                    h,
+                    upscale_factor=scale_x,
+                    max_edge=max_edge,
+                    pre_downscale_then_upscale=pre_down,
+                )
+
+                # Apply computed CLI parameters
+                if plan.seedvr2_resolution is not None:
+                    settings["resolution"] = int(plan.seedvr2_resolution)
+                settings["max_resolution"] = int(max_edge or 0)
+
+                # If enabled and capped, pre-downscale the input media so the model runs at full scale_x
+                if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
+                    in_path = settings["input_path"]
+                    in_type = detect_input_type(in_path)
+                    temp_root = Path(global_settings.get("temp_dir") or str(Path.cwd() / "temp"))
+                    temp_root.mkdir(parents=True, exist_ok=True)
+
+                    if progress_cb:
+                        progress_cb(
+                            f"🧩 Preprocessing input: {w}×{h} → {plan.preprocess_width}×{plan.preprocess_height} (×{plan.preprocess_scale:.3f})\n"
+                        )
+
+                    pre_out: Optional[Path] = None
+                    if in_type == "video":
+                        pre_out = collision_safe_path(
+                            temp_root / f"{Path(in_path).stem}_pre{plan.preprocess_width}x{plan.preprocess_height}.mp4"
+                        )
+                        cmd = [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(in_path),
+                            "-vf",
+                            f"scale={plan.preprocess_width}:{plan.preprocess_height}:flags=lanczos",
+                            "-c:v",
+                            "libx264",
+                            "-preset",
+                            "veryfast",
+                            "-crf",
+                            "0",
+                            "-c:a",
+                            "copy",
+                            str(pre_out),
+                        ]
+                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        if not pre_out.exists():
+                            pre_out = None
+                    elif in_type == "image":
+                        try:
+                            import cv2  # type: ignore
+
+                            img = cv2.imread(str(in_path), cv2.IMREAD_UNCHANGED)
+                            if img is not None:
+                                resized = cv2.resize(
+                                    img,
+                                    (int(plan.preprocess_width), int(plan.preprocess_height)),
+                                    interpolation=cv2.INTER_LANCZOS4,
+                                )
+                                pre_out = collision_safe_path(
+                                    temp_root / f"{Path(in_path).stem}_pre{plan.preprocess_width}x{plan.preprocess_height}{Path(in_path).suffix}"
+                                )
+                                cv2.imwrite(str(pre_out), resized)
+                                if not pre_out.exists():
+                                    pre_out = None
+                        except Exception:
+                            pre_out = None
+
+                    # Directories (batch folders / frame folders) are handled per-item in batch mode.
+                    if pre_out:
+                        settings["_original_input_path_before_preprocess"] = settings["input_path"]
+                        settings["_preprocessed_input_path"] = str(pre_out)
+                        settings["input_path"] = str(pre_out)
+                        if progress_cb:
+                            progress_cb(f"✅ Preprocess complete: {pre_out.name}\n")
+        except Exception as e:
+            if progress_cb:
+                progress_cb(f"⚠️ Preprocess sizing skipped: {str(e)[:120]}\n")
 
         # Model loading check
         model_manager = get_model_manager()
@@ -981,14 +1138,14 @@ def _process_single_file(
                                         )
                                         if success:
                                             chunk_thumbnail_list.append((thumb_path, f"Chunk {completed_chunks}"))
-                                            state["chunk_thumbnails"] = list(chunk_thumbnail_list)
+                                            seed_controls["chunk_thumbnails"] = list(chunk_thumbnail_list)
                                     else:
                                         # Image: resize with PIL
                                         img = PIL.Image.open(target)
                                         img.thumbnail((320, 320), PIL.Image.Resampling.LANCZOS)
                                         img.convert('RGB').save(thumb_out, "JPEG", quality=85)
                                         chunk_thumbnail_list.append((str(thumb_out), f"Chunk {completed_chunks}"))
-                                        state["chunk_thumbnails"] = list(chunk_thumbnail_list)
+                                        seed_controls["chunk_thumbnails"] = list(chunk_thumbnail_list)
                         except Exception:
                             pass  # Silent fail
                     else:
@@ -1064,7 +1221,7 @@ def _process_single_file(
                             
                             # Store in state for UI display
                             if chunk_thumbnail_list:
-                                state["chunk_thumbnails"] = chunk_thumbnail_list
+                                seed_controls["chunk_thumbnails"] = chunk_thumbnail_list
                                 if progress_cb:
                                     progress_cb(f"✅ Generated {len(chunk_thumbnail_list)} chunk thumbnails\n")
                 except Exception as e:
@@ -1102,6 +1259,13 @@ def _process_single_file(
             output_video = result.output_path if result.output_path.lower().endswith(".mp4") else None
             output_image = result.output_path if not result.output_path.lower().endswith(".mp4") else None
 
+            # Save preprocessed input (if we created one) alongside outputs
+            pre_in = settings.get("_preprocessed_input_path")
+            if pre_in:
+                saved_pre = _save_preprocessed_artifact(Path(pre_in), result.output_path)
+                if saved_pre:
+                    local_logs.append(f"🧩 Preprocessed input saved: {saved_pre}")
+
             # Update state - track both directory AND file path for pinned comparison
             try:
                 outp = Path(result.output_path)
@@ -1115,7 +1279,7 @@ def _process_single_file(
             run_logger.write_summary(
                 Path(result.output_path) if result.output_path else live_output_dir,
                 {
-                    "input": settings["input_path"],
+                    "input": settings.get("_original_input_path_before_preprocess") or settings["input_path"],
                     "output": result.output_path,
                     "returncode": result.returncode,
                     "args": settings,
@@ -1156,7 +1320,7 @@ def _process_single_file(
         if comparison_mode in ["side_by_side", "stacked"] and output_video and Path(output_video).exists():
             from shared.video_comparison_advanced import create_side_by_side_video, create_stacked_video
             
-            input_video = settings["input_path"]
+            input_video = settings.get("_original_input_path_before_preprocess") or settings["input_path"]
             if Path(input_video).exists() and Path(input_video).suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']:
                 comparison_path = Path(output_video).parent / f"{Path(output_video).stem}_comparison.mp4"
                 
@@ -1536,217 +1700,110 @@ def build_seedvr2_callbacks(
             return f"Error getting model status: {str(e)}"
 
     def _auto_res_from_input(input_path: str, state: Dict[str, Any]):
-        """Auto-calculate resolution and chunk estimates."""
+        """Compute dynamic sizing info for the new Upscale-x feature."""
         seed_controls = state.get("seed_controls", {})
         model_name = seed_controls.get("current_model") or defaults.get("dit_model")
         model_cache = seed_controls.get("resolution_cache", {}).get(model_name, {})
 
         if not input_path:
-            return (
-                gr.update(),  # Keep resolution slider unchanged
-                gr.update(),  # Keep max_resolution slider unchanged
-                gr.update(value="Provide an input to auto-calc resolution/chunks."),
-                state
-            )
+            return gr.update(value="Provide an input to calculate sizing."), state
 
         p = Path(normalize_path(input_path))
         if not p.exists():
-            return (
-                gr.update(),  # Keep resolution slider unchanged
-                gr.update(),  # Keep max_resolution slider unchanged
-                gr.update(value="Input path not found; keeping current resolution."),
-                state
-            )
-
-        auto_res = model_cache.get("auto_resolution", seed_controls.get("auto_resolution", True))
-        enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
-        ratio_down = model_cache.get("ratio_downscale", seed_controls.get("ratio_downscale", False))
-        chunk_size = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
-        chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
-
-        target_res = int(model_cache.get("resolution_val") or seed_controls.get("resolution_val") or defaults["resolution"])
-        max_target_res = int(model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val") or defaults["max_resolution"])
+            return gr.update(value="Input path not found."), state
 
         dims = get_media_dimensions(str(p))
-        msg_lines = []
-        new_res = target_res
+        if not dims:
+            return gr.update(value="⚠️ Could not determine input dimensions."), state
 
-        if auto_res and dims:
-            w, h = dims
-            short_side = min(w, h)
-            computed = min(short_side, target_res or short_side)
-            if ratio_down:
-                computed = min(computed, target_res or computed)
-            if enable_max and max_target_res and max_target_res > 0:
-                computed = min(computed, max_target_res)
-            new_res = int((computed // 16) * 16 or computed)
-            state["seed_controls"]["resolution_val"] = new_res
-            
-            # SeedVR2 sizing model (based on actual SeedVR2 code):
-            # - Resizes shortest edge to `resolution` (TVF.resize with int uses int() for the long edge)
-            # - Optionally clamps longest edge to `max_resolution` (second resize with round())
-            # - Pads to divisible by 16 for model input (DivisiblePad((16,16)))
-            # - Trims padding back off and forces even dimensions for output (video codec safety)
-            #
-            # This means intermediate resized dimensions can be odd (e.g., 1011×512) and NOT divisible by 16.
-            # That is OK because padding makes the model input divisible by 16.
-            input_short = min(w, h)
+        w, h = dims
+        input_short = min(w, h)
+        input_long = max(w, h)
 
-            def _pad_to_factor(v: int, factor: int) -> int:
-                return v + ((factor - (v % factor)) % factor)
+        # Pull settings from shared cache (Resolution tab or SeedVR2 tab)
+        enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
+        max_edge = int(model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val") or 0)
+        # vNext UX: non-zero max_edge means the cap is enabled.
+        # Do NOT let the legacy enable_max_target flag silently disable a user-provided max_edge.
+        if max_edge > 0:
+            enable_max = True
+        if not enable_max:
+            max_edge = 0
 
-            def _floor_to_even(v: int) -> int:
-                return (v // 2) * 2
+        scale_x = float(model_cache.get("upscale_factor_val") or seed_controls.get("upscale_factor_val") or defaults.get("upscale_factor", 4.0) or 4.0)
+        pre_down = bool(model_cache.get("ratio_downscale") or seed_controls.get("ratio_downscale", False))
 
-            def _estimate_seedvr2_dims(in_w: int, in_h: int, short_side_target: int, max_edge: int) -> Tuple[int, int, int, int, int, int]:
-                # Match torchvision int-resize behavior for "shortest edge = size"
-                if in_w <= in_h:
-                    # width is short
-                    resized_w = short_side_target
-                    resized_h = int(short_side_target * in_h / max(1, in_w))
-                else:
-                    # height is short
-                    resized_h = short_side_target
-                    resized_w = int(short_side_target * in_w / max(1, in_h))
+        plan = estimate_seedvr2_upscale_plan_from_dims(
+            w,
+            h,
+            upscale_factor=scale_x,
+            max_edge=max_edge,
+            pre_downscale_then_upscale=pre_down,
+        )
 
-                # Apply max edge cap (matches SeedVR2 SideResize max_size second-pass scaling)
-                if max_edge and max_edge > 0 and max(resized_w, resized_h) > max_edge:
-                    scale = max_edge / max(resized_w, resized_h)
-                    resized_w = round(resized_w * scale)
-                    resized_h = round(resized_h * scale)
+        out_w = plan.final_saved_width or plan.resize_width
+        out_h = plan.final_saved_height or plan.resize_height
+        out_short = min(out_w, out_h)
+        out_long = max(out_w, out_h)
 
-                # Model processing uses padding to divisible-by-16
-                padded_w = _pad_to_factor(resized_w, 16)
-                padded_h = _pad_to_factor(resized_h, 16)
+        list_items: List[str] = []
+        list_items.append(f"📐 <strong>Input:</strong> {w}×{h} (short side: {input_short}px)")
 
-                # Saved output is trimmed and forced to even dims (SeedVR2 setup_video_transform)
-                out_w = _floor_to_even(resized_w)
-                out_h = _floor_to_even(resized_h)
+        target_line = f"🎯 <strong>Target setting:</strong> upscale {scale_x:g}x"
+        if max_edge and max_edge > 0:
+            target_line += f", max edge {max_edge}px"
+        if max_edge and max_edge > 0 and plan.cap_ratio < 0.999999:
+            target_line += f" (effective {plan.effective_scale:.2f}x)"
+        list_items.append(target_line)
 
-                return resized_w, resized_h, padded_w, padded_h, out_w, out_h
-
-            resized_w, resized_h, padded_w, padded_h, out_w, out_h = _estimate_seedvr2_dims(
-                w, h, new_res, int(max_target_res or 0)
-            )
-            resized_short = min(resized_w, resized_h)
-
-            # Build list items as separate lines
-            list_items = []
-            list_items.append(f"📐 <strong>Input:</strong> {w}×{h} (short side: {input_short}px)")
+        if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
             list_items.append(
-                f"🎯 <strong>Output resize target:</strong> short side {new_res}px"
-                + (f", max edge {max_target_res}px" if max_target_res and max_target_res > 0 else "")
+                f"🧩 <strong>Preprocess:</strong> {w}×{h} → {plan.preprocess_width}×{plan.preprocess_height} (×{plan.preprocess_scale:.3f})"
             )
-            list_items.append(f"🧩 <strong>Resize result:</strong> {resized_w}×{resized_h} (short side: {resized_short}px)")
-            list_items.append(f"🧱 <strong>Padded for model (÷16):</strong> {padded_w}×{padded_h} (padding trimmed after processing)")
-            list_items.append(f"✅ <strong>Final saved output:</strong> {out_w}×{out_h} (trimmed to even numbers)")
 
-            out_short = min(out_w, out_h)
-            if out_short < input_short:
-                list_items.append(
-                    f"📉 <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)"
-                )
-                list_items.append(
-                    f"💡 <strong>Tip:</strong> To upscale instead, set the target short side to a value > {input_short}px (and ensure max edge doesn't clamp it)."
-                )
-            elif out_short > input_short:
-                list_items.append(
-                    f"📈 <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)"
-                )
-            else:
-                list_items.append(
-                    f"➡️ <strong>Mode:</strong> Keep size (output short side matches input short side)"
-                )
-            
-            # Join with line breaks and wrap in div
-            msg_lines.append('<div style="font-size: 1.15em; line-height: 1.8;">')
-            msg_lines.append("<br>".join(list_items))
-            msg_lines.append('</div>')
+        resized_short = min(plan.resize_width, plan.resize_height)
+        list_items.append(f"🧩 <strong>Resize result:</strong> {plan.resize_width}×{plan.resize_height} (short side: {resized_short}px)")
+
+        if plan.padded_width and plan.padded_height:
+            list_items.append(f"🧱 <strong>Padded for model (÷16):</strong> {plan.padded_width}×{plan.padded_height} (padding trimmed after processing)")
+
+        list_items.append(f"✅ <strong>Final saved output:</strong> {out_w}×{out_h} (trimmed to even numbers)")
+
+        if out_short < input_short:
+            list_items.append(f"📉 <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)")
+            list_items.append("💡 <strong>Tip:</strong> Set Upscale x ≥ 1.0 and/or increase Max Resolution to avoid downscaling.")
+        elif out_short > input_short:
+            list_items.append(f"📈 <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)")
         else:
-            if dims:
-                w, h = dims
-                input_short = min(w, h)
+            list_items.append("➡️ <strong>Mode:</strong> Keep size (output short side matches input short side)")
 
-                # Reuse the same estimation logic as above (mirrors SeedVR2 resize + pad)
-                def _pad_to_factor(v: int, factor: int) -> int:
-                    return v + ((factor - (v % factor)) % factor)
+        if max_edge and max_edge > 0 and plan.cap_ratio < 0.999999:
+            requested_long = int(round(input_long * scale_x))
+            list_items.append(f"⚠️ <strong>Max edge clamp:</strong> requested long side ~{requested_long}px → capped to ~{out_long}px (ratio {plan.cap_ratio:.3f})")
 
-                def _floor_to_even(v: int) -> int:
-                    return (v // 2) * 2
+        if plan.seedvr2_resolution is not None:
+            list_items.append(f"🔧 <strong>SeedVR2 CLI:</strong> --resolution {plan.seedvr2_resolution} --max_resolution {max_edge if max_edge > 0 else 0}")
 
-                def _estimate_seedvr2_dims(in_w: int, in_h: int, short_side_target: int, max_edge: int) -> Tuple[int, int, int, int, int, int]:
-                    if in_w <= in_h:
-                        resized_w = short_side_target
-                        resized_h = int(short_side_target * in_h / max(1, in_w))
-                    else:
-                        resized_h = short_side_target
-                        resized_w = int(short_side_target * in_w / max(1, in_h))
+        if plan.notes:
+            for n in plan.notes:
+                list_items.append(f"ℹ️ {n}")
 
-                    if max_edge and max_edge > 0 and max(resized_w, resized_h) > max_edge:
-                        scale = max_edge / max(resized_w, resized_h)
-                        resized_w = round(resized_w * scale)
-                        resized_h = round(resized_h * scale)
+        msg_lines: List[str] = []
+        msg_lines.append('<div style="font-size: 1.15em; line-height: 1.8;">')
+        msg_lines.append("<br>".join(list_items))
+        msg_lines.append("</div>")
 
-                    padded_w = _pad_to_factor(resized_w, 16)
-                    padded_h = _pad_to_factor(resized_h, 16)
-                    out_w = _floor_to_even(resized_w)
-                    out_h = _floor_to_even(resized_h)
-                    return resized_w, resized_h, padded_w, padded_h, out_w, out_h
-
-                # Use current sliders as the target setting (manual mode)
-                short_target = int(target_res or defaults["resolution"])
-                max_edge = int(max_target_res or 0)
-                resized_w, resized_h, padded_w, padded_h, out_w, out_h = _estimate_seedvr2_dims(w, h, short_target, max_edge)
-                resized_short = min(resized_w, resized_h)
-
-                list_items = []
-                list_items.append(f"📐 <strong>Input:</strong> {w}×{h} (short side: {input_short}px)")
-                list_items.append(
-                    f"🎯 <strong>Output resize target:</strong> short side {short_target}px"
-                    + (f", max edge {max_edge}px" if max_edge > 0 else "")
-                )
-                list_items.append(f"🧩 <strong>Resize result:</strong> {resized_w}×{resized_h} (short side: {resized_short}px)")
-                list_items.append(f"🧱 <strong>Padded for model (÷16):</strong> {padded_w}×{padded_h} (padding trimmed after processing)")
-                list_items.append(f"✅ <strong>Final saved output:</strong> {out_w}×{out_h} (trimmed to even numbers)")
-
-                out_short = min(out_w, out_h)
-                if out_short < input_short:
-                    list_items.append(
-                        f"📉 <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)"
-                    )
-                elif out_short > input_short:
-                    list_items.append(
-                        f"📈 <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)"
-                    )
-                else:
-                    list_items.append(
-                        f"➡️ <strong>Mode:</strong> Keep size (output short side matches input short side)"
-                    )
-
-                msg_lines.append('<div style="font-size: 1.15em; line-height: 1.8;">')
-                msg_lines.append("<br>".join(list_items))
-                msg_lines.append('</div>')
-            msg_lines.append("⚠️ Auto-resolution disabled; using manual settings.")
-
-        # Chunk estimate
-        est_msg = ""
-        if chunk_size > 0 and chunk_overlap < chunk_size:
-            dur = get_media_duration_seconds(str(p)) if detect_input_type(str(p)) == "video" else None
+        # Chunk estimate (PySceneDetect)
+        chunk_size = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
+        chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
+        if chunk_size > 0 and chunk_overlap < chunk_size and detect_input_type(str(p)) == "video":
+            dur = get_media_duration_seconds(str(p))
             if dur:
                 import math
                 est_chunks = math.ceil(dur / max(0.001, chunk_size - chunk_overlap))
-                est_msg = f"Chunk estimate: ~{est_chunks} chunks for {dur:.1f}s (size {chunk_size}s, overlap {chunk_overlap}s)."
-            else:
-                est_msg = f"Chunking: size {chunk_size}s, overlap {chunk_overlap}s (duration unknown)."
-        if est_msg:
-            msg_lines.append(est_msg)
+                msg_lines.append(f"Chunk estimate: ~{est_chunks} chunks for {dur:.1f}s (size {chunk_size}s, overlap {chunk_overlap}s).")
 
-        return (
-            gr.update(value=new_res),
-            gr.update(value=max_target_res),
-            gr.update(value="\n".join(msg_lines), visible=True),
-            state
-        )
+        return gr.update(value="\n".join(msg_lines), visible=True), state
 
     def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False, state: Dict[str, Any] = None, progress=None):
         """Main processing action with streaming support and gr.Progress integration."""
@@ -1880,37 +1937,31 @@ def build_seedvr2_callbacks(
             face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))
             face_strength = float(global_settings.get("face_strength", 0.5))
 
-            # Apply cached values from Resolution & Scene Split tab
-            if seed_controls.get("resolution_val") is not None:
-                settings["resolution"] = seed_controls["resolution_val"]
+            # Apply shared sizing values from Resolution & Scene Split tab (global cache)
+            if seed_controls.get("upscale_factor_val") is not None:
+                try:
+                    settings["upscale_factor"] = float(seed_controls["upscale_factor_val"])
+                except Exception:
+                    pass
             if seed_controls.get("max_resolution_val") is not None:
-                settings["max_resolution"] = seed_controls["max_resolution_val"]
+                try:
+                    settings["max_resolution"] = int(seed_controls["max_resolution_val"] or 0)
+                except Exception:
+                    pass
+            if "ratio_downscale" in seed_controls:
+                settings["pre_downscale_then_upscale"] = bool(seed_controls.get("ratio_downscale", False))
 
-            auto_res = seed_controls.get("auto_resolution", True)
             enable_max_target = seed_controls.get("enable_max_target", True)
             chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
             chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0) or 0)
-            ratio_downscale = seed_controls.get("ratio_downscale", False)
             per_chunk_cleanup = seed_controls.get("per_chunk_cleanup", False)
 
             settings["chunk_size_sec"] = chunk_size_sec
             settings["chunk_overlap_sec"] = chunk_overlap_sec
             settings["per_chunk_cleanup"] = per_chunk_cleanup
 
-            # Auto-resolution calculation
-            media_dims = get_media_dimensions(settings["input_path"])
-            if media_dims and auto_res:
-                w, h = media_dims
-                short_side = min(w, h)
-                target_res = settings["resolution"]
-                max_target_res = settings["max_resolution"]
-
-                computed_res = min(short_side, target_res or short_side)
-                if ratio_downscale:
-                    computed_res = min(computed_res, target_res or computed_res)
-                if enable_max_target and max_target_res and max_target_res > 0:
-                    computed_res = min(computed_res, max_target_res)
-                settings["resolution"] = int(computed_res // 16 * 16 or computed_res)
+            # NOTE: SeedVR2 CLI `--resolution` is now computed per-input from Upscale-x rules.
+            # This happens inside _process_single_file() so it also applies to batch items.
 
             # Apply output format from Comparison tab if set
             if seed_controls.get("output_format_val"):
@@ -2555,6 +2606,7 @@ def build_seedvr2_callbacks(
 
             # Create comparison based on mode from Output tab
             comparison_mode = seed_controls.get("comparison_mode_val", "native")
+            original_path_for_compare = settings.get("_original_input_path_before_preprocess") or settings.get("input_path")
             
             if comparison_mode == "native":
                 # Use gradio's native ImageSlider for images
@@ -2565,7 +2617,7 @@ def build_seedvr2_callbacks(
                     pin_enabled = seed_controls.get("pin_reference_val", False)
                     
                     image_slider_update = gr.update(
-                        value=(pinned_ref if (pin_enabled and pinned_ref) else settings.get("input_path"), output_image),
+                        value=(pinned_ref if (pin_enabled and pinned_ref) else original_path_for_compare, output_image),
                         visible=True
                     )
                 else:
@@ -2574,7 +2626,7 @@ def build_seedvr2_callbacks(
                     pin_enabled = seed_controls.get("pin_reference_val", False)
                     
                     comparison_html, image_slider_update = create_comparison_selector(
-                        input_path=settings.get("input_path"),
+                        input_path=original_path_for_compare,
                         output_path=output_video or output_image,
                         comparison_mode="slider",
                         pinned_reference_path=pinned_ref,
@@ -2586,7 +2638,7 @@ def build_seedvr2_callbacks(
                 pin_enabled = seed_controls.get("pin_reference_val", False)
                 
                 comparison_html, image_slider_update = create_comparison_selector(
-                    input_path=settings.get("input_path"),
+                    input_path=original_path_for_compare,
                     output_path=output_video or output_image,
                     comparison_mode=comparison_mode,
                     pinned_reference_path=pinned_ref,
@@ -2596,7 +2648,7 @@ def build_seedvr2_callbacks(
             # Build video comparison HTML for videos
             video_comparison_html_update = gr.update(value="", visible=False)
             if output_video and Path(output_video).exists():
-                original_path = settings.get("input_path", "")
+                original_path = original_path_for_compare or ""
                 if original_path and Path(original_path).exists():
                     # Use new video comparison slider
                     from shared.video_comparison_slider import create_video_comparison_html as create_vid_comp
@@ -2612,7 +2664,7 @@ def build_seedvr2_callbacks(
             # If no HTML comparison, use ImageSlider for images
             if not comparison_html and output_image and not output_video:
                 image_slider_update = gr.update(
-                    value=(settings.get("input_path"), output_image),
+                    value=(original_path_for_compare, output_image),
                     visible=True
                 )
             elif not image_slider_update:

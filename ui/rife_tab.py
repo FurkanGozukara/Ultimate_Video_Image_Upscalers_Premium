@@ -15,6 +15,7 @@ from ui.universal_preset_section import (
     wire_universal_preset_events,
 )
 from shared.universal_preset import dict_to_values
+from ui.media_preview import preview_updates
 
 
 def rife_tab(
@@ -100,11 +101,26 @@ def rife_tab(
             
             # Input section
             with gr.Accordion("📁 Input Configuration", open=True):
-                input_file = gr.File(
-                    label="Upload Video or Image",
-                    type="filepath",
-                    file_types=["video", "image"]
-                )
+                with gr.Row():
+                    input_file = gr.File(
+                        label="Upload Video or Image",
+                        type="filepath",
+                        file_types=["video", "image"]
+                    )
+                    with gr.Column():
+                        input_image_preview = gr.Image(
+                            label="📸 Input Preview (Image)",
+                            type="filepath",
+                            interactive=False,
+                            height=220,
+                            visible=False,
+                        )
+                        input_video_preview = gr.Video(
+                            label="🎬 Input Preview (Video)",
+                            interactive=False,
+                            height=220,
+                            visible=False,
+                        )
                 input_path = gr.Textbox(
                     label="Input Path",
                     value=values[0],
@@ -628,10 +644,41 @@ def rife_tab(
         outputs=[input_path, input_cache_msg, shared_state]
     )
 
+    # Input preview (image + video)
+    input_file.change(
+        fn=lambda p: preview_updates(p),
+        inputs=[input_file],
+        outputs=[input_image_preview, input_video_preview],
+    )
+
+    # If user clears the upload (clicks “X”), clear the textbox + hide the cached message.
+    def clear_on_upload_clear(file_path, state):
+        if file_path:
+            return gr.update(), gr.update(), state
+        try:
+            state = state or {}
+            state.setdefault("seed_controls", {})
+            state["seed_controls"]["last_input_path"] = ""
+        except Exception:
+            pass
+        return "", gr.update(value="", visible=False), state
+
+    input_file.change(
+        fn=clear_on_upload_clear,
+        inputs=[input_file, shared_state],
+        outputs=[input_path, input_cache_msg, shared_state],
+    )
+
     input_path.change(
         fn=lambda val, state: (gr.update(value="✅ Input path updated.", visible=True), state),
         inputs=[input_path, shared_state],
         outputs=[input_cache_msg, shared_state]
+    )
+
+    input_path.change(
+        fn=lambda p: preview_updates(p),
+        inputs=[input_path],
+        outputs=[input_image_preview, input_video_preview],
     )
 
     # Main processing
@@ -670,4 +717,5 @@ def rife_tab(
         callbacks=preset_callbacks,
         inputs_list=inputs_list,
         shared_state=shared_state,
+        tab_name="rife",
     )

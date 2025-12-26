@@ -15,7 +15,9 @@ from shared.path_utils import (
     ffmpeg_set_fps,
     get_media_dimensions,
     detect_input_type,
+    IMAGE_EXTENSIONS,
 )
+from shared.resolution_calculator import estimate_fixed_scale_upscale_plan_from_dims
 from shared.face_restore import restore_image, restore_video
 from shared.logging_utils import RunLogger
 from shared.realesrgan_runner import run_realesrgan
@@ -47,44 +49,17 @@ def _parse_scale_from_name(name: str) -> int:
     return 4
 
 
-def _calculate_input_resolution_for_target(input_dims: Tuple[int, int], target_resolution: int, model_scale: int, enable_max: bool = True, max_resolution: int = 0) -> Tuple[int, int]:
+def _calculate_input_resolution_for_target(*args, **kwargs) -> Tuple[int, int]:
     """
-    Calculate optimal input resolution for GAN models with fixed scale factors.
+    LEGACY (deprecated): kept to avoid breaking imports from older code paths.
 
-    For fixed-scale GAN models (2x, 4x), we need to determine what input resolution
-    will produce output closest to the desired target resolution.
+    vNext sizing is handled via `estimate_fixed_scale_upscale_plan_from_dims()`.
     """
-    if not input_dims or target_resolution <= 0:
-        return input_dims
-
-    input_w, input_h = input_dims
-    input_short = min(input_w, input_h)
-
-    # Calculate what input resolution would give us the target when multiplied by scale
-    ideal_input_short = target_resolution / model_scale
-
-    # Apply max resolution constraint if enabled
-    if enable_max and max_resolution > 0:
-        max_input_for_max_res = max_resolution / model_scale
-        ideal_input_short = min(ideal_input_short, max_input_for_max_res)
-
-    # Don't upscale beyond original resolution (would be wasteful)
-    ideal_input_short = min(ideal_input_short, input_short)
-
-    # Calculate new dimensions maintaining aspect ratio
-    aspect_ratio = input_w / input_h
-    if input_w <= input_h:  # Portrait or square
-        new_w = ideal_input_short * aspect_ratio
-        new_h = ideal_input_short
-    else:  # Landscape
-        new_w = ideal_input_short
-        new_h = ideal_input_short / aspect_ratio
-
-    # Round to even numbers (often required by models)
-    new_w = int(new_w // 2 * 2)
-    new_h = int(new_h // 2 * 2)
-
-    return (max(64, new_w), max(64, new_h))  # Minimum 64px
+    try:
+        input_dims = args[0] if args else None
+        return input_dims if input_dims else (0, 0)
+    except Exception:
+        return (0, 0)
 
 
 def _load_gan_catalog(base_dir: Path):
@@ -119,6 +94,37 @@ def _get_gan_meta(filename: str, base_dir: Path) -> Dict[str, Any]:
         "author": metadata.author,
         "tags": metadata.tags
     }
+
+
+def _save_preprocessed_artifact(pre_path: Path, output_path_str: str) -> Optional[str]:
+    """
+    Save the preprocessed (downscaled) input next to outputs for inspection.
+
+    Requirement:
+    - Save into a `pre_processed/` folder inside the output folder
+    - Use the SAME base name as the final output
+    """
+    try:
+        if not pre_path or not pre_path.exists():
+            return None
+
+        outp = Path(output_path_str)
+        parent = outp.parent if outp.suffix else outp.parent
+        pre_dir = parent / "pre_processed"
+        pre_dir.mkdir(parents=True, exist_ok=True)
+
+        base = outp.stem if outp.suffix else outp.name
+
+        if pre_path.is_dir():
+            dest_dir = collision_safe_dir(pre_dir / base)
+            shutil.copytree(pre_path, dest_dir, dirs_exist_ok=False)
+            return str(dest_dir)
+
+        dest_file = collision_safe_path(pre_dir / f"{base}{pre_path.suffix}")
+        shutil.copy2(pre_path, dest_file)
+        return str(dest_file)
+    except Exception:
+        return None
 
 
 def _is_realesrgan_builtin(name: str) -> bool:
@@ -166,6 +172,10 @@ def gan_defaults(base_dir: Path) -> Dict[str, Any]:
         "downscale_first": True,
         "auto_calculate_input": True,
         "use_resolution_tab": True,  # Enable Resolution tab integration by default
+        # NEW (vNext): unified Upscale-x sizing (applies to both images and videos)
+        "upscale_factor": 4.0,
+        "max_resolution": 0,  # Max edge cap (0 = no cap)
+        "pre_downscale_then_upscale": False,
         "tile_size": 0,
         "overlap": 32,
         "denoising_strength": 0.0,
@@ -215,6 +225,10 @@ GAN_ORDER: List[str] = [
     "output_quality",
     "save_metadata",
     "create_subfolders",
+    # vNext sizing (app-level; preserves backward compatibility by appending)
+    "upscale_factor",
+    "max_resolution",
+    "pre_downscale_then_upscale",
 ]
 
 
@@ -339,44 +353,60 @@ def build_gan_callbacks(
         s["model_name"] = meta.get("canonical", s.get("model", ""))
         # PNG padding (from Output tab cache if present)
         s["png_padding"] = int(seed_controls.get("png_padding_val", 6))  # Match CLI default
+        # vNext: disable legacy downscale system in gan_runner (we do all preprocessing here)
+        s["target_resolution"] = 0
+        s["downscale_first"] = False
+        s["auto_calculate_input"] = False
         return s
 
     def maybe_downscale(s):
             """
             Dynamic resolution adjustment for fixed-scale GAN models.
-            When using Resolution & Scene Split settings, calculate optimal input resolution
-            that will produce output closest to target resolution after model scaling.
-            """
-            if not s.get("use_resolution_tab"):
-                return s
 
+            vNext behavior:
+            - Use Upscale-x + max-edge cap (LONG side) to compute an effective scale.
+            - For fixed-scale models (2x/4x), pre-downscale the input so that one model pass
+              reaches the capped target (mandatory to avoid post-downscale).
+            """
             # Get model scale factor
             model_scale = s.get("scale", 4)
             if model_scale <= 1:  # Not a scaling model
                 return s
 
-            # Get resolution settings from cache
-            model_cache = seed_controls.get("resolution_cache", {}).get(s.get("model"), {})
-            target_resolution = model_cache.get("resolution_val") or seed_controls.get("resolution_val", 0)
-            max_resolution = model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val", 0)
-            enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
-            auto_resolution = model_cache.get("auto_resolution", seed_controls.get("auto_resolution", True))
+            # Decide whether to use global Resolution tab cache or local per-tab values
+            use_global = bool(s.get("use_resolution_tab", True))
+            model_cache = seed_controls.get("resolution_cache", {}).get(s.get("model"), {}) if use_global else {}
 
-            if not target_resolution and not auto_resolution:
-                return s
+            enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True)) if use_global else True
+            scale_x = float(
+                (model_cache.get("upscale_factor_val") or seed_controls.get("upscale_factor_val"))
+                if use_global
+                else (s.get("upscale_factor") or 4.0)
+            )
+            max_edge = int(
+                (model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val"))
+                if use_global
+                else (s.get("max_resolution") or 0)
+            )
+            if not enable_max:
+                max_edge = 0
 
             # Get input dimensions
             dims = get_media_dimensions(s["input_path"])
             if not dims:
                 return s
 
-            # Calculate optimal input resolution for target output
-            optimal_input_dims = _calculate_input_resolution_for_target(
-                dims, target_resolution, model_scale, enable_max, max_resolution
+            input_w, input_h = dims
+            plan = estimate_fixed_scale_upscale_plan_from_dims(
+                input_w,
+                input_h,
+                requested_scale=float(scale_x),
+                model_scale=int(model_scale),
+                max_edge=int(max_edge or 0),
+                force_pre_downscale=True,
             )
 
-            input_w, input_h = dims
-            optimal_w, optimal_h = optimal_input_dims
+            optimal_w, optimal_h = int(plan.preprocess_width), int(plan.preprocess_height)
 
             # Skip if already at optimal resolution (within tolerance)
             tolerance = 32  # Allow some tolerance for rounding
@@ -384,10 +414,10 @@ def build_gan_callbacks(
                 return s
 
             # Create temporary adjusted file
+            in_type = detect_input_type(s["input_path"])
             tmp_path = Path(current_temp_dir) / f"gan_input_adjust_{Path(s['input_path']).stem}.mp4"
-            input_is_video = Path(s["input_path"]).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi")
 
-            if input_is_video:
+            if in_type == "video":
                 # Video resolution adjustment with ffmpeg
                 subprocess.run(
                     [
@@ -403,20 +433,52 @@ def build_gan_callbacks(
                     stderr=subprocess.DEVNULL,
                 )
                 if tmp_path.exists():
+                    s["_original_input_path_before_preprocess"] = s["input_path"]
+                    s["_preprocessed_input_path"] = str(tmp_path)
                     s["input_path"] = str(tmp_path)
                     s["resolution_adjusted"] = True
-            else:
+            elif in_type == "image":
                 # Image resolution adjustment with OpenCV
                 try:
                     import cv2
                     img = cv2.imread(s["input_path"], cv2.IMREAD_UNCHANGED)
                     if img is not None:
-                        adjusted = cv2.resize(img, (optimal_w, optimal_h), interpolation=cv2.INTER_LANCZOS4)
+                        adjusted = cv2.resize(img, (optimal_w, optimal_h), interpolation=cv2.INTER_AREA)
                         tmp_path = tmp_path.with_suffix(Path(s["input_path"]).suffix)
                         cv2.imwrite(str(tmp_path), adjusted)
                         if tmp_path.exists():
+                            s["_original_input_path_before_preprocess"] = s["input_path"]
+                            s["_preprocessed_input_path"] = str(tmp_path)
                             s["input_path"] = str(tmp_path)
                             s["resolution_adjusted"] = True
+                except Exception:
+                    pass
+            elif in_type == "directory":
+                # Directory of frames: pre-downscale each image into a temp directory.
+                try:
+                    src_dir = Path(s["input_path"])
+                    img_files = [p for p in sorted(src_dir.iterdir()) if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+                    if not img_files:
+                        return s
+
+                    tmp_dir = collision_safe_dir(
+                        Path(current_temp_dir) / f"gan_input_adjust_{src_dir.name}_pre{optimal_w}x{optimal_h}"
+                    )
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+                    import cv2
+                    for f in img_files:
+                        img = cv2.imread(str(f), cv2.IMREAD_UNCHANGED)
+                        if img is None:
+                            continue
+                        adjusted = cv2.resize(img, (optimal_w, optimal_h), interpolation=cv2.INTER_AREA)
+                        cv2.imwrite(str(tmp_dir / f.name), adjusted)
+
+                    if any(tmp_dir.iterdir()):
+                        s["_original_input_path_before_preprocess"] = s["input_path"]
+                        s["_preprocessed_input_path"] = str(tmp_dir)
+                        s["input_path"] = str(tmp_dir)
+                        s["resolution_adjusted"] = True
                 except Exception:
                     pass
 
@@ -840,6 +902,16 @@ def build_gan_callbacks(
                 if progress_cb:
                     progress_cb(status)
                 relocated = relocate_output(result.output_path)
+
+                # Save preprocessed input (if we created one) alongside outputs
+                pre_in = prepped_settings.get("_preprocessed_input_path")
+                if pre_in and (relocated or result.output_path):
+                    saved_pre = _save_preprocessed_artifact(Path(pre_in), relocated or result.output_path)
+                    if saved_pre:
+                        full_log = "\n".join([full_log, f"🧩 Preprocessed input saved: {saved_pre}"])
+                        if progress_cb:
+                            progress_cb(f"🧩 Preprocessed input saved: {saved_pre}")
+
                 if relocated or result.output_path:
                     try:
                         outp = Path(relocated or result.output_path)
@@ -850,7 +922,7 @@ def build_gan_callbacks(
                 run_logger.write_summary(
                     Path(relocated) if relocated else output_dir,
                     {
-                        "input": prepped_settings.get("input_path"),
+                        "input": prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path"),
                         "output": relocated or result.output_path,
                         "returncode": result.returncode,
                         "args": prepped_settings,
@@ -861,7 +933,7 @@ def build_gan_callbacks(
                 cmp_html = ""
                 slider_update = gr.update(value=None)
                 if relocated or result.output_path:
-                    src = prepped_settings.get("input_path")
+                    src = prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path")
                     outp = relocated or result.output_path
                     if outp and Path(outp).exists():
                         if Path(outp).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):

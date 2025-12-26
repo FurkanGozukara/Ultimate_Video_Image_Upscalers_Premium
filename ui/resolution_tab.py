@@ -108,25 +108,26 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     info="Apply maximum resolution cap to prevent excessive upscaling"
                 )
 
-                target_resolution = gr.Slider(
-                    label="Target Resolution (short side)",
-                    minimum=256, maximum=4096, step=16,
+                upscale_factor = gr.Number(
+                    label="Upscale x (any factor)",
                     value=values[3],
-                    info="Target for shortest side (e.g., 1080 for 1080p)"
+                    precision=2,
+                    info="Target scale factor relative to input (e.g., 4.0 = 4x). Works for both images and videos."
                 )
 
-                max_target_resolution = gr.Slider(
-                    label="Max Target Resolution",
-                    minimum=0, maximum=8192, step=16,
-                    value=values[4],
-                    info="Maximum allowed resolution (0 = unlimited)"
-                )
+                with gr.Row():
+                    max_target_resolution = gr.Slider(
+                        label="Max Resolution (max edge, 0 = no cap)",
+                        minimum=0, maximum=8192, step=16,
+                        value=values[4],
+                        info="Caps the LONG side (max(width,height)) of the target. 0 = unlimited."
+                    )
 
-                ratio_downscale_then_upscale = gr.Checkbox(
-                    label="🔀 Enable Downscale-Then-Upscale (for fixed-scale GAN models)",
-                    value=values[7],
-                    info="For 2x/4x models: downscale input first to reach arbitrary target resolutions"
-                )
+                    ratio_downscale_then_upscale = gr.Checkbox(
+                        label="⬇️➡️⬆️ Pre-downscale then upscale (when capped)",
+                        value=values[7],
+                        info="If max edge would reduce effective scale, downscale input first so the model still runs at the full Upscale x."
+                    )
 
             gr.Markdown("#### 🎬 Scene Splitting & Chunking")
             
@@ -231,7 +232,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
 
     # Collect inputs - MUST match RESOLUTION_ORDER exactly
     inputs_list = [
-        model_selector, auto_resolution, enable_max_target, target_resolution,
+        model_selector, auto_resolution, enable_max_target, upscale_factor,
         max_target_resolution, chunk_size, chunk_overlap, ratio_downscale_then_upscale,
         per_chunk_cleanup, scene_threshold, min_scene_len
     ]
@@ -248,6 +249,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         callbacks=preset_callbacks,
         inputs_list=inputs_list,
         shared_state=shared_state,
+        tab_name="resolution",
     )
 
     apply_to_seed_btn.click(
@@ -257,9 +259,9 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     )
 
     # Auto-calculation callbacks
-    def calculate_resolution_wrapper(input_path, target_res, max_res, enable_max, auto_mode, 
-                                    ratio_aware, model_scale, state):
-        """Wrapper for auto-resolution calculation"""
+    def calculate_resolution_wrapper(input_path, scale_x, max_res, enable_max, auto_mode, 
+                                    pre_downscale, model_scale, state):
+        """Wrapper for sizing calculation (new Upscale-x rules)"""
         if not input_path or not input_path.strip():
             # Try to get from shared state
             input_path = state.get("seed_controls", {}).get("last_input_path", "")
@@ -269,11 +271,11 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         # Call service function
         info, updated_state = service["calculate_auto_resolution"](
             input_path, 
-            int(target_res), 
+            float(scale_x), 
             int(max_res),
             enable_max,
             auto_mode,
-            ratio_aware,
+            pre_downscale,
             int(model_scale) if model_scale > 0 else None,
             state
         )
@@ -303,7 +305,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
 
     calc_resolution_btn.click(
         fn=calculate_resolution_wrapper,
-        inputs=[calc_input_path, target_resolution, max_target_resolution, 
+        inputs=[calc_input_path, upscale_factor, max_target_resolution, 
                 enable_max_target, auto_resolution, ratio_downscale_then_upscale, 
                 calc_model_scale, shared_state],
         outputs=[calc_result, shared_state, disk_space_warning]
@@ -330,7 +332,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     )
 
     # Auto-update calculation when settings change
-    for component in [target_resolution, max_target_resolution, auto_resolution, enable_max_target, ratio_downscale_then_upscale]:
+    for component in [upscale_factor, max_target_resolution, auto_resolution, enable_max_target, ratio_downscale_then_upscale]:
         component.change(
             fn=lambda *args: gr.update(value="ℹ️ Settings changed. Click 'Calculate Resolution' to update.", visible=True),
             outputs=calc_result

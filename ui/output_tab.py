@@ -387,6 +387,7 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
         callbacks=preset_callbacks,
         inputs_list=inputs_list,
         shared_state=shared_state,
+        tab_name="output",
     )
 
     # Apply to pipeline

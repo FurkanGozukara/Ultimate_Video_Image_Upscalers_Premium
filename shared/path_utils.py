@@ -36,6 +36,20 @@ def get_media_dimensions(path: str) -> Optional[Tuple[int, int]]:
     Return (width, height) for an image or video using ffprobe first, Pillow fallback.
     """
     try:
+        p = Path(path)
+        if p.exists() and p.is_dir():
+            # Directory input (frame sequence): pick a representative file.
+            # Prefer images, then videos.
+            for ext_set in (IMAGE_EXTENSIONS, VIDEO_EXTENSIONS):
+                items = [x for x in sorted(p.iterdir()) if x.is_file() and x.suffix.lower() in ext_set]
+                if items:
+                    return get_media_dimensions(str(items[0]))
+            return None
+    except Exception:
+        # Fall through to file-based probes
+        pass
+
+    try:
         proc = subprocess.run(
             [
                 "ffprobe",

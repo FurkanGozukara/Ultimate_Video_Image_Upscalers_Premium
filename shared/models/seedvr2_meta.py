@@ -137,11 +137,19 @@ def _built_ins() -> List[SeedVR2Model]:
 def _scan_local_weights() -> List[str]:
     """
     Discover locally downloaded SeedVR2 weights to keep dropdowns in sync with the filesystem.
-    Searches ./models/seedvr2 relative to repository root (shared/models/../../models/seedvr2).
+    Searches common local weight locations relative to the app root:
+    - ./SeedVR2/models (bundled CLI repo folder in this project)
+    - ./models/SEEDVR2 (common shared models folder)
+    - ./models/SeedVR2 / ./models/seedvr2 (legacy/case variants)
     """
     try:
         root = Path(__file__).resolve().parents[2]
         candidates = [
+            # Bundled SeedVR2 repo inside this app (default used by seedvr2_defaults()).
+            root / "SeedVR2" / "models",
+
+            # Shared/global models folder (various case conventions).
+            root / "models" / "SEEDVR2",
             root / "models" / "seedvr2",
             root / "models" / "SeedVR2",
         ]

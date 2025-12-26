@@ -11,12 +11,15 @@ from shared.services.gan_service import (
     build_gan_callbacks, GAN_ORDER
 )
 from shared.video_comparison_slider import create_video_comparison_html
-from shared.ui_validators import validate_resolution
+
 from ui.universal_preset_section import (
     universal_preset_section,
     wire_universal_preset_events,
 )
 from shared.universal_preset import dict_to_values
+from shared.path_utils import get_media_dimensions, normalize_path
+from shared.resolution_calculator import estimate_fixed_scale_upscale_plan_from_dims
+from ui.media_preview import preview_updates
 
 
 def gan_tab(
@@ -102,11 +105,26 @@ def gan_tab(
             
             # Input section
             with gr.Accordion("📁 Input Configuration", open=True):
-                input_file = gr.File(
-                    label="Upload Image or Video",
-                    type="filepath",
-                    file_types=["image", "video"]
-                )
+                with gr.Row():
+                    input_file = gr.File(
+                        label="Upload Image or Video",
+                        type="filepath",
+                        file_types=["image", "video"]
+                    )
+                    with gr.Column():
+                        input_image_preview = gr.Image(
+                            label="📸 Input Preview (Image)",
+                            type="filepath",
+                            interactive=False,
+                            height=250,
+                            visible=False
+                        )
+                        input_video_preview = gr.Video(
+                            label="🎬 Input Preview (Video)",
+                            interactive=False,
+                            height=250,
+                            visible=False
+                        )
                 input_path = gr.Textbox(
                     label="Image/Video Path",
                     value=values[0],
@@ -114,6 +132,8 @@ def gan_tab(
                     info="Direct path to file or folder of images"
                 )
                 input_cache_msg = gr.Markdown("", visible=False)
+                sizing_info = gr.Markdown("", visible=False, elem_classes=["resolution-info"])
+                input_detection_result = gr.Markdown("", visible=False)
 
             # Batch processing
             with gr.Accordion("📦 Batch Processing", open=False):
@@ -183,30 +203,55 @@ def gan_tab(
                     gr.Markdown("#### Upscaling Parameters")
 
                     with gr.Group():
+                        # Legacy controls (kept for old presets, no longer used by vNext sizing)
                         target_resolution = gr.Slider(
-                            label="Target Resolution (longest side)",
+                            label="(Legacy) Target Resolution (longest side) [internal]",
                             minimum=512, maximum=4096, step=64,
                             value=values[5],
-                            info="Desired output resolution (will be adjusted based on model scale)"
+                            visible=False,
+                            interactive=False,
                         )
                         target_res_warning = gr.Markdown("", visible=False)
 
                         downscale_first = gr.Checkbox(
-                            label="Downscale First if Needed",
+                            label="(Legacy) Downscale First if Needed [internal]",
                             value=values[6],
-                            info="GAN models have fixed scales (2x/4x). Enable to downscale input first, then upscale to reach arbitrary target resolutions. E.g., 4x model → 3x effective by downscaling 133% first."
+                            visible=False,
+                            interactive=False,
                         )
 
                         auto_calculate_input = gr.Checkbox(
-                            label="Auto-Calculate Input Resolution",
+                            label="(Legacy) Auto-Calculate Input Resolution [internal]",
                             value=values[7],
-                            info="Automatically calculate optimal input resolution based on target output and model scale. Recommended ON for best results with Resolution & Scene Split tab."
+                            visible=False,
+                            interactive=False,
                         )
+
+                        # NEW sizing controls (Upscale-x)
+                        upscale_factor = gr.Number(
+                            label="Upscale x (any factor)",
+                            value=values[21] if len(values) > 21 else 4.0,
+                            precision=2,
+                            info="Target scale factor relative to input. For fixed-scale GAN models, input is pre-downscaled so one model pass reaches the target."
+                        )
+
+                        with gr.Row():
+                            max_resolution = gr.Slider(
+                                label="Max Resolution (max edge, 0 = no cap)",
+                                minimum=0, maximum=8192, step=16,
+                                value=values[22] if len(values) > 22 else 0,
+                                info="Caps the LONG side (max(width,height)) of the target."
+                            )
+                            pre_downscale_then_upscale = gr.Checkbox(
+                                label="⬇️➡️⬆️ Pre-downscale then upscale (auto when needed)",
+                                value=values[23] if len(values) > 23 else False,
+                                info="For fixed-scale GAN models this is applied automatically when needed to satisfy Upscale-x / Max Resolution without post-resize."
+                            )
 
                         use_resolution_tab = gr.Checkbox(
                             label="🔗 Use Resolution & Scene Split Tab Settings",
                             value=values[8],
-                            info="Apply target resolution, max resolution, and downscale-then-upscale settings from Resolution tab. Enables universal resolution control across all models. Recommended ON."
+                            info="Apply Upscale-x, Max Resolution, and Pre-downscale settings from the Resolution tab. Recommended ON."
                         )
 
                         tile_size = gr.Number(
@@ -423,14 +468,16 @@ def gan_tab(
     # ============================================================================
     # 📋 GAN PRESET INPUT LIST - MUST match GAN_ORDER in gan_service.py
     # Adding controls? Update gan_defaults(), GAN_ORDER, and this list in sync.
-    # Current count: 21 components
+    # Current count: 24 components (includes vNext sizing)
     # ============================================================================
     
     inputs_list = [
         input_path, batch_enable, batch_input, batch_output, gan_model,
         target_resolution, downscale_first, auto_calculate_input, use_resolution_tab, tile_size, overlap,
         denoising_strength, sharpening, color_correction, gpu_acceleration, gpu_device,
-        batch_size, output_format_gan, output_quality_gan, save_metadata, create_subfolders
+        batch_size, output_format_gan, output_quality_gan, save_metadata, create_subfolders,
+        # vNext sizing
+        upscale_factor, max_resolution, pre_downscale_then_upscale
     ]
     
     # Development validation
@@ -504,21 +551,204 @@ def gan_tab(
     )
 
     # Input handling
-    def cache_input(val, state):
+    def _build_input_detection_md(path_val: str) -> gr.update:
+        from shared.input_detector import detect_input
+        if not path_val or not str(path_val).strip():
+            # Hide when empty (clearing input should clear this panel).
+            return gr.update(value="", visible=False)
+        try:
+            info = detect_input(path_val)
+            if not info.is_valid:
+                return gr.update(value=f"❌ **Invalid Input**\n\n{info.error_message}", visible=True)
+            parts = [f"✅ **Input Detected: {info.input_type.upper()}**"]
+            if info.input_type == "frame_sequence":
+                parts.append(f"&nbsp;&nbsp;📁 Pattern: `{info.frame_pattern}`")
+                parts.append(f"&nbsp;&nbsp;🎞️ Frames: {info.frame_start}-{info.frame_end}")
+                if info.missing_frames:
+                    parts.append(f"&nbsp;&nbsp;⚠️ Missing: {len(info.missing_frames)}")
+            elif info.input_type == "directory":
+                parts.append(f"&nbsp;&nbsp;📂 Files: {info.total_files}")
+            elif info.input_type in ["video", "image"]:
+                parts.append(f"&nbsp;&nbsp;📄 Format: **{info.format.upper()}**")
+            return gr.update(value=" ".join(parts), visible=True)
+        except Exception as e:
+            return gr.update(value=f"❌ **Detection Error**\n\n{str(e)}", visible=True)
+
+    def _resolve_dims_for_preview(path_val: str):
+        """Return (w,h) and a representative file path for directories (first media file)."""
+        if not path_val:
+            return None, None, None
+        p = Path(normalize_path(path_val))
+        if not p.exists():
+            return None, None, None
+        if p.is_file():
+            dims = get_media_dimensions(str(p))
+            return (dims[0], dims[1], str(p)) if dims else (None, None, str(p))
+        # Directory: pick first media file
+        exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".mp4", ".mov", ".mkv", ".avi", ".webm")
+        items = [x for x in sorted(p.iterdir()) if x.is_file() and x.suffix.lower() in exts]
+        if not items:
+            return None, None, None
+        dims = get_media_dimensions(str(items[0]))
+        return (dims[0], dims[1], str(items[0])) if dims else (None, None, str(items[0]))
+
+    def _build_sizing_info(
+        input_path_val: str,
+        model_name: str,
+        use_global: bool,
+        local_scale_x: float,
+        local_max_edge: int,
+        local_pre_down: bool,
+        state,
+    ) -> gr.update:
+        if not input_path_val or not str(input_path_val).strip():
+            return gr.update(visible=False)
+        # Determine model scale
+        try:
+            from shared.gan_runner import get_gan_model_metadata
+            meta = get_gan_model_metadata(model_name, base_dir)
+            model_scale = int(meta.scale or 4)
+        except Exception:
+            model_scale = 4
+
+        seed_controls = (state or {}).get("seed_controls", {})
+        scale_x = float(seed_controls.get("upscale_factor_val", 4.0) or 4.0) if use_global else float(local_scale_x or 4.0)
+        max_edge = int(seed_controls.get("max_resolution_val", 0) or 0) if use_global else int(local_max_edge or 0)
+        pre_down = bool(seed_controls.get("ratio_downscale", False)) if use_global else bool(local_pre_down)
+
+        enable_max = bool(seed_controls.get("enable_max_target", True)) if use_global else True
+        if not enable_max:
+            max_edge = 0
+
+        w, h, rep = _resolve_dims_for_preview(input_path_val)
+        if not w or not h:
+            return gr.update(value="⚠️ Could not determine input dimensions for sizing preview.", visible=True)
+
+        # Fixed-scale planning (GAN)
+        plan = estimate_fixed_scale_upscale_plan_from_dims(
+            int(w),
+            int(h),
+            requested_scale=float(scale_x),
+            model_scale=int(model_scale),
+            max_edge=int(max_edge or 0),
+            force_pre_downscale=True,
+        )
+
+        out_w = plan.final_saved_width or plan.resize_width
+        out_h = plan.final_saved_height or plan.resize_height
+        input_short = min(plan.input_width, plan.input_height)
+        out_short = min(int(out_w), int(out_h))
+
+        items = []
+        items.append(f"📐 <strong>Input:</strong> {plan.input_width}×{plan.input_height} (short side: {input_short}px)")
+
+        t = f"🎯 <strong>Target setting:</strong> upscale {scale_x:g}x"
+        if max_edge and max_edge > 0:
+            t += f", max edge {max_edge}px (effective {plan.effective_scale:.2f}x)"
+        items.append(t)
+
+        # For fixed-scale models, pre-downscale is mandatory when the effective scale < model_scale.
+        if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
+            items.append(
+                f"🧩 <strong>Preprocess:</strong> {plan.input_width}×{plan.input_height} → {plan.preprocess_width}×{plan.preprocess_height} (×{plan.preprocess_scale:.3f})"
+            )
+
+        items.append(f"🧱 <strong>Model pass:</strong> fixed {model_scale}x GAN upscale")
+        items.append(f"✅ <strong>Final saved output:</strong> {int(out_w)}×{int(out_h)}")
+
+        if out_short < input_short:
+            items.append(f"📉 <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)")
+        elif out_short > input_short:
+            items.append(f"📈 <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)")
+        else:
+            items.append("➡️ <strong>Mode:</strong> Keep size (output short side matches input short side)")
+
+        if plan.notes:
+            for n in plan.notes:
+                items.append(f"ℹ️ {n}")
+
+        html = '<div style="font-size: 1.15em; line-height: 1.8;">' + "<br>".join(items) + "</div>"
+        return gr.update(value=html, visible=True)
+
+    def cache_input(val, model_val, use_global, scale_x, max_edge, pre_down, state):
         state["seed_controls"]["last_input_path"] = val if val else ""
-        return val or "", gr.update(value="✅ Input cached for processing.", visible=True), state
+        det = _build_input_detection_md(val or "")
+        info = _build_sizing_info(val or "", model_val, bool(use_global), scale_x, max_edge, pre_down, state)
+        img_prev, vid_prev = preview_updates(val)
+        return (
+            val or "",
+            gr.update(value="✅ Input cached for processing.", visible=True),
+            img_prev,
+            vid_prev,
+            det,
+            info,
+            state,
+        )
 
     input_file.upload(
-        fn=lambda val, state: cache_input(val, state),
-        inputs=[input_file, shared_state],
-        outputs=[input_path, input_cache_msg, shared_state]
+        fn=cache_input,
+        inputs=[input_file, gan_model, use_resolution_tab, upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
+        outputs=[input_path, input_cache_msg, input_image_preview, input_video_preview, input_detection_result, sizing_info, shared_state]
     )
 
-    input_path.change(
-        fn=lambda val, state: (gr.update(value="✅ Input path updated.", visible=True), state),
-        inputs=[input_path, shared_state],
-        outputs=[input_cache_msg, shared_state]
+    # When the user clicks the “X” to clear the upload, clear the path + hide panels.
+    def clear_on_upload_clear(file_path, state):
+        if file_path:
+            return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), state
+        try:
+            state = state or {}
+            state.setdefault("seed_controls", {})
+            state["seed_controls"]["last_input_path"] = ""
+        except Exception:
+            pass
+        img_prev, vid_prev = preview_updates(None)
+        return (
+            "",  # input_path
+            gr.update(value="", visible=False),  # input_cache_msg
+            img_prev,
+            vid_prev,
+            gr.update(value="", visible=False),  # input_detection_result
+            gr.update(value="", visible=False),  # sizing_info
+            state,
+        )
+
+    input_file.change(
+        fn=clear_on_upload_clear,
+        inputs=[input_file, shared_state],
+        outputs=[input_path, input_cache_msg, input_image_preview, input_video_preview, input_detection_result, sizing_info, shared_state],
     )
+
+    def update_from_path(val, model_val, use_global, scale_x, max_edge, pre_down, state):
+        det = _build_input_detection_md(val or "")
+        info = _build_sizing_info(val or "", model_val, bool(use_global), scale_x, max_edge, pre_down, state)
+        img_prev, vid_prev = preview_updates(val)
+        return (
+            gr.update(value="✅ Input path updated.", visible=True),
+            img_prev,
+            vid_prev,
+            det,
+            info,
+            state,
+        )
+
+    input_path.change(
+        fn=update_from_path,
+        inputs=[input_path, gan_model, use_resolution_tab, upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
+        outputs=[input_cache_msg, input_image_preview, input_video_preview, input_detection_result, sizing_info, shared_state]
+    )
+
+    # Refresh sizing info when settings change
+    def refresh_sizing(scale_x, max_edge, pre_down, use_global, model_val, path_val, state):
+        info = _build_sizing_info(path_val or "", model_val, bool(use_global), scale_x, max_edge, pre_down, state)
+        return info, state
+
+    for comp in [upscale_factor, max_resolution, pre_downscale_then_upscale, use_resolution_tab, gan_model]:
+        comp.change(
+            fn=refresh_sizing,
+            inputs=[upscale_factor, max_resolution, pre_downscale_then_upscale, use_resolution_tab, gan_model, input_path, shared_state],
+            outputs=[sizing_info, shared_state],
+            trigger_mode="always_last",
+        )
 
     # Batch results gallery
     batch_gallery = gr.Gallery(
@@ -550,18 +780,7 @@ def gan_tab(
         ]
     )
     
-    # Add resolution validation
-    def validate_target_res_ui(val):
-        is_valid, message, corrected = validate_resolution(val, must_be_multiple_of=64)
-        if not is_valid:
-            return corrected, gr.update(value=f"<span style='color: orange;'>{message}</span>", visible=True)
-        return val, gr.update(value="", visible=False)
-    
-    target_resolution.change(
-        fn=validate_target_res_ui,
-        inputs=target_resolution,
-        outputs=[target_resolution, target_res_warning]
-    )
+    # NOTE: Legacy target_resolution is hidden; sizing is now driven by Upscale-x.
 
     cancel_btn.click(
         fn=lambda ok, state: (service["cancel_action"](), state) if ok else (gr.update(value="⚠️ Enable 'Confirm cancel' to stop."), "", state),
@@ -593,4 +812,5 @@ def gan_tab(
         callbacks=preset_callbacks,
         inputs_list=inputs_list,
         shared_state=shared_state,
+        tab_name="gan",
     )

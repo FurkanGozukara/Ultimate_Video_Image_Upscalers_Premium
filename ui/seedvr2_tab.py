@@ -14,13 +14,14 @@ from shared.services.seedvr2_service import (
 )
 from shared.models.seedvr2_meta import get_seedvr2_model_names
 from shared.video_comparison_slider import create_video_comparison_html
-from shared.ui_validators import validate_batch_size_seedvr2, validate_resolution
+from shared.ui_validators import validate_batch_size_seedvr2
 from ui.universal_preset_section import (
     universal_preset_section,
     wire_universal_preset_events,
     get_tab_values_from_state,
 )
 from shared.universal_preset import dict_to_values
+from ui.media_preview import preview_updates
 
 
 def seedvr2_tab(
@@ -150,13 +151,20 @@ def seedvr2_tab(
                         type="filepath",
                         file_types=["video", "image"]
                     )
-                    input_preview = gr.Image(
-                        label="📸 Input Preview",
-                        type="filepath",
-                        interactive=False,
-                        height=250,
-                        visible=True
-                    )
+                    with gr.Column():
+                        input_image_preview = gr.Image(
+                            label="📸 Input Preview (Image)",
+                            type="filepath",
+                            interactive=False,
+                            height=250,
+                            visible=False,
+                        )
+                        input_video_preview = gr.Video(
+                            label="🎬 Input Preview (Video)",
+                            interactive=False,
+                            height=250,
+                            visible=False,
+                        )
                 
                 # Status messages (compact display, auto-detected on upload/path change)
                 input_cache_msg = gr.Markdown("", visible=False)
@@ -273,21 +281,40 @@ def seedvr2_tab(
             # Timer for periodic model status updates
             model_status_timer = gr.Timer(value=2.0, active=False)  # Update every 2 seconds when active
 
-            # Resolution controls with auto-resolution
+            # -----------------------------------------------------------------
+            # ✅ New sizing controls (Upscale-x)
+            # -----------------------------------------------------------------
+            # Keep the legacy short-side resolution value for backward compatibility
+            # with old presets, but hide it from the UI. The runtime `resolution`
+            # passed to SeedVR2 CLI is computed from `upscale_factor` + input size.
+            resolution = gr.Number(
+                label="(Legacy) Target Resolution (short side) [internal]",
+                value=values[9],  # Kept for old presets; NOT used for sizing anymore
+                precision=0,
+                visible=False,
+                interactive=False,
+            )
+
             with gr.Row():
-                resolution = gr.Slider(
-                    label="Target Resolution (short side)",
-                    minimum=256, maximum=4096, step=16,
-                    value=values[9],  # Was 12, now 9 (removed 3 legacy items)
-                    info="Target resolution for shortest side. 1080 = 1080p, 2160 = 4K. Higher = better quality but slower. Must be multiple of 16."
+                upscale_factor = gr.Number(
+                    label="Upscale x (any factor)",
+                    value=float(merged_defaults.get("upscale_factor", 4.0) or 4.0),
+                    precision=2,
+                    info="e.g., 4.0 = 4x. Target size is computed from input, then capped by Max Resolution (max edge)."
                 )
+
                 max_resolution = gr.Slider(
-                    label="Max Resolution (0 = no cap)",
+                    label="Max Resolution (max edge, 0 = no cap)",
                     minimum=0, maximum=8192, step=16,
-                    value=values[10],  # Was 13, now 10
-                    info="Maximum resolution cap for safety. Prevents accidental 8K+ upscaling. 0 = unlimited. Set to 4096 for 4K max, 2160 for 1080p max."
+                    value=values[10],
+                    info="Caps the LONG side (max(width,height)) of the target. 0 = unlimited."
                 )
-            resolution_warning = gr.Markdown("", visible=False)
+
+                pre_downscale_then_upscale = gr.Checkbox(
+                    label="⬇️➡️⬆️ Pre-downscale then upscale (when capped)",
+                    value=bool(merged_defaults.get("pre_downscale_then_upscale", False)),
+                    info="If max edge would reduce effective scale, downscale input first so the model still runs at the full Upscale x."
+                )
 
             # Core processing parameters
             batch_size = gr.Slider(
@@ -485,13 +512,13 @@ def seedvr2_tab(
             
             save_metadata = gr.Checkbox(
                 label="Save Processing Metadata",
-                value=values[46] if len(values) > 46 else True,
+                value=values[47] if len(values) > 47 else True,
                 info="Save run metadata (settings, timestamps, status) to output folder. Respects global telemetry toggle."
             )
             
             fps_override = gr.Number(
                 label="FPS Override (0 = use source FPS)",
-                value=values[47] if len(values) > 47 else 0,
+                value=values[48] if len(values) > 48 else 0,
                 precision=2,
                 info="Override output video FPS. 0 = preserve original FPS, 30 = force 30fps, 60 = force 60fps. Also sourced from Output tab if set."
             )
@@ -512,7 +539,7 @@ def seedvr2_tab(
             
             with gr.Row():
                 # Validate video_backend value before using it
-                backend_value = values[48] if len(values) > 48 else "opencv"
+                backend_value = values[49] if len(values) > 49 else "opencv"
                 if backend_value not in ["opencv", "ffmpeg"]:
                     backend_value = "opencv"  # Fallback to default if invalid
                 
@@ -524,7 +551,7 @@ def seedvr2_tab(
                 )
                 
                 # Validate use_10bit value before using it
-                use_10bit_value = values[49] if len(values) > 49 else False
+                use_10bit_value = values[50] if len(values) > 50 else False
                 if not isinstance(use_10bit_value, bool):
                     use_10bit_value = False  # Fallback to default if invalid
                 
@@ -875,7 +902,7 @@ def seedvr2_tab(
     # ✅ BACKWARD COMPATIBILITY:
     # Old presets automatically get new defaults via merge_config() - no migration needed!
     #
-    # Current count: len(SEEDVR2_ORDER) = 51, len(inputs_list) must also = 51
+    # Current count: len(SEEDVR2_ORDER) = 53, len(inputs_list) must also = 53
     # (includes: save_metadata, fps_override, video_backend, use_10bit)
     # ============================================================================
     
@@ -896,7 +923,9 @@ def seedvr2_tab(
         # Output & shared settings (integrated from Output tab)
         save_metadata, fps_override,
         # ADDED v2.5.22: FFmpeg 10-bit encoding support
-        video_backend, use_10bit
+        video_backend, use_10bit,
+        # vNext sizing
+        upscale_factor, pre_downscale_then_upscale
     ]
     
     # Validate synchronization at tab initialization (development-time check)
@@ -921,143 +950,77 @@ def seedvr2_tab(
 
     # Wire up all the event handlers
 
-    # Input handling with auto-resolution calculation
+    # Input handling with sizing info updates (Upscale-x)
     def cache_path_value(val, state):
-        """Cache input path and optionally auto-calculate resolution"""
+        """Cache input path and refresh sizing info panel."""
         state["seed_controls"]["last_input_path"] = val if val else ""
-        
-        # Check if auto-resolution is enabled in seed_controls
-        auto_res_enabled = state.get("seed_controls", {}).get("auto_resolution", False)
-        
-        if auto_res_enabled and val and val.strip():
-            # Auto-calculate resolution if enabled
+        if val and str(val).strip():
             try:
-                # Use the service's auto-resolution function
-                res_slider, max_res_slider, calc_msg, updated_state = service["auto_res_on_input"](val, state)
-                # calc_msg is already a gr.update object, just make it visible
+                calc_msg, updated_state = service["auto_res_on_input"](val, state)
                 if isinstance(calc_msg, dict):
                     calc_msg["visible"] = True
                 else:
                     calc_msg = gr.update(value=str(calc_msg), visible=True)
-                return (
-                    gr.update(visible=False),  # Hide the cache message - not needed
-                    updated_state,
-                    res_slider,
-                    max_res_slider,
-                    calc_msg
-                )
+                return gr.update(visible=False), updated_state, calc_msg
             except Exception as e:
-                # Fallback if auto-calc fails
-                import traceback
-                print(f"Auto-resolution error: {e}")
-                print(traceback.format_exc())
-                return (
-                    gr.update(value=f"✅ Input cached. Auto-calc warning: {str(e)[:50]}", visible=True),
-                    state,
-                    gr.update(),
-                    gr.update(),
-                    gr.update(visible=False)
-                )
-        else:
-            # Just cache without auto-calc
-            return (
-                gr.update(value="✅ Input cached. Enable auto-resolution to see target resolution.", visible=True),
-                state,
-                gr.update(),
-                gr.update(),
-                gr.update(visible=False)
-            )
+                return gr.update(value=f"✅ Input cached (info error: {str(e)[:80]})", visible=True), state, gr.update(visible=False)
+        # If input is empty, hide panels (clearing input should clear this info).
+        return gr.update(value="", visible=False), state, gr.update(value="", visible=False)
 
     def cache_upload(val, state):
-        """Cache uploaded file and optionally auto-calculate resolution"""
+        """Cache uploaded file path and refresh sizing info panel."""
         state["seed_controls"]["last_input_path"] = val if val else ""
-        
-        # Check if auto-resolution is enabled
-        auto_res_enabled = state.get("seed_controls", {}).get("auto_resolution", False)
-        
-        if auto_res_enabled and val:
+        if val:
             try:
-                # Auto-calculate resolution if enabled
-                res_slider, max_res_slider, calc_msg, updated_state = service["auto_res_on_input"](val, state)
-                # calc_msg is already a gr.update object, just make it visible
+                calc_msg, updated_state = service["auto_res_on_input"](val, state)
                 if isinstance(calc_msg, dict):
                     calc_msg["visible"] = True
                 else:
                     calc_msg = gr.update(value=str(calc_msg), visible=True)
-                return (
-                    val or "",
-                    gr.update(visible=False),  # Hide the cache message - not needed
-                    updated_state,
-                    res_slider,
-                    max_res_slider,
-                    calc_msg
-                )
+                return val or "", gr.update(visible=False), updated_state, calc_msg
             except Exception as e:
-                import traceback
-                print(f"Auto-resolution error: {e}")
-                print(traceback.format_exc())
-                return (
-                    val or "",
-                    gr.update(value="✅ File uploaded and cached.", visible=True),
-                    state,
-                    gr.update(),
-                    gr.update(),
-                    gr.update(visible=False)
-                )
-        else:
-            return (
-                val or "",
-                gr.update(value="✅ File uploaded. Enable auto-resolution to see target resolution.", visible=True),
-                state,
-                gr.update(),
-                gr.update(),
-                gr.update(visible=False)
-            )
+                return val or "", gr.update(value=f"✅ File uploaded (info error: {str(e)[:80]})", visible=True), state, gr.update(visible=False)
+        # If upload is cleared, hide panels (don’t show a persistent message).
+        return val or "", gr.update(value="", visible=False), state, gr.update(value="", visible=False)
 
     # Wire up input events with resolution auto-calculation
     input_file.upload(
         fn=lambda val, state: cache_upload(val, state),
         inputs=[input_file, shared_state],
-        outputs=[input_path, input_cache_msg, shared_state, resolution, max_resolution, auto_res_msg]
+        outputs=[input_path, input_cache_msg, shared_state, auto_res_msg]
     )
 
     input_path.change(
         fn=lambda val, state: cache_path_value(val, state),
         inputs=[input_path, shared_state],
-        outputs=[input_cache_msg, shared_state, resolution, max_resolution, auto_res_msg]
+        outputs=[input_cache_msg, shared_state, auto_res_msg]
     )
     
-    # Recalculate resolution info when resolution sliders change
-    def recalculate_resolution_info(res_val, max_res_val, state):
-        """Recalculate and update resolution info when sliders change.
-        
-        IMPORTANT UX: do NOT clamp/overwrite while the user is typing in the slider's number box.
-        Gradio can send intermediate values (e.g. "5" while typing "512"). We simply skip
-        updating until the value is within range.
-        """
+    # Recalculate sizing info when any sizing control changes
+    def recalculate_sizing_info(scale_x, max_res_val, pre_down, state):
         try:
-            res_val_i = int(res_val) if res_val is not None else None
-            max_res_val_i = int(max_res_val) if max_res_val is not None else None
+            scale_f = float(scale_x) if scale_x is not None else None
+            max_i = int(max_res_val) if max_res_val is not None else None
         except (ValueError, TypeError):
             return gr.update(), state
 
-        # Skip updates for out-of-range intermediate typing values
-        if res_val_i is None or res_val_i < 256 or res_val_i > 4096:
+        if scale_f is None or scale_f <= 0:
             return gr.update(), state
-        if max_res_val_i is None or max_res_val_i < 0 or max_res_val_i > 8192:
+        if max_i is None or max_i < 0 or max_i > 8192:
             return gr.update(), state
-        
-        # Update state with new values
-        state["seed_controls"]["resolution_val"] = res_val_i
-        state["seed_controls"]["max_resolution_val"] = max_res_val_i
-        
-        # Get cached input path
+
+        # Cache globally (used by other tabs/services)
+        state["seed_controls"]["upscale_factor_val"] = scale_f
+        state["seed_controls"]["max_resolution_val"] = max_i
+        state["seed_controls"]["ratio_downscale"] = bool(pre_down)
+        # vNext UX: a non-zero max_resolution means "cap enabled". Ensure the legacy flag can't block it.
+        if max_i and max_i > 0:
+            state["seed_controls"]["enable_max_target"] = True
+
         input_path_val = state.get("seed_controls", {}).get("last_input_path", "")
-        
         if input_path_val:
-            # Recalculate using the service function
             try:
-                _, _, calc_msg, updated_state = service["auto_res_on_input"](input_path_val, state)
+                calc_msg, updated_state = service["auto_res_on_input"](input_path_val, state)
                 if isinstance(calc_msg, dict):
                     calc_msg["visible"] = True
                 else:
@@ -1065,29 +1028,35 @@ def seedvr2_tab(
                 return calc_msg, updated_state
             except Exception:
                 return gr.update(visible=False), state
-        else:
-            return gr.update(visible=False), state
-    
-    # Wire up resolution slider changes
-    # Use .release() for sliders (only fires when user releases the slider/finishes typing)
-    # This avoids intermediate invalid values during typing
-    resolution.release(
-        fn=recalculate_resolution_info,
-        inputs=[resolution, max_resolution, shared_state],
+        return gr.update(visible=False), state
+
+    upscale_factor.change(
+        fn=recalculate_sizing_info,
+        inputs=[upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
         outputs=[auto_res_msg, shared_state],
-        # IMPORTANT: Gradio validates Slider bounds in preprocess() BEFORE our fn runs.
-        # When the user types into the slider's number box, intermediate values like "5" (while typing "512")
-        # are out of bounds (min=256) and would raise before our clamping runs.
-        # Setting preprocess=False skips Slider.preprocess(), so we can safely clamp in our callback.
+        trigger_mode="always_last",
+    )
+
+    pre_downscale_then_upscale.change(
+        fn=recalculate_sizing_info,
+        inputs=[upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
+        outputs=[auto_res_msg, shared_state],
+        trigger_mode="always_last",
+    )
+
+    max_resolution.release(
+        fn=recalculate_sizing_info,
+        inputs=[upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
+        outputs=[auto_res_msg, shared_state],
         preprocess=False,
         trigger_mode="always_last",
     )
-    
-    max_resolution.release(
-        fn=recalculate_resolution_info,
-        inputs=[resolution, max_resolution, shared_state],
+
+    # Also respond to typed value changes (release may not fire when user edits the number field directly)
+    max_resolution.change(
+        fn=recalculate_sizing_info,
+        inputs=[upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
         outputs=[auto_res_msg, shared_state],
-        preprocess=False,
         trigger_mode="always_last",
     )
 
@@ -1353,17 +1322,18 @@ def seedvr2_tab(
         callbacks=preset_callbacks,
         inputs_list=inputs_list,
         shared_state=shared_state,
+        tab_name="seedvr2",
     )
     
-    # Recalculate resolution info after preset changes (resolution/max_resolution may have changed)
-    def recalc_after_preset_change(res_val, max_res_val, state):
-        """Recalculate resolution info after preset load/reset"""
-        return recalculate_resolution_info(res_val, max_res_val, state)
+    # Recalculate sizing info after preset changes (upscale/max/pre-downscale may have changed)
+    def recalc_after_preset_change(scale_x, max_res_val, pre_down, state):
+        """Recalculate sizing info after preset load/reset"""
+        return recalculate_sizing_info(scale_x, max_res_val, pre_down, state)
     
     # Trigger recalculation when resolution values change from preset loading
     load_preset_btn.click(
         fn=recalc_after_preset_change,
-        inputs=[resolution, max_resolution, shared_state],
+        inputs=[upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
         outputs=[auto_res_msg, shared_state]
     ).then(
         fn=None,  # Just trigger the update
@@ -1373,7 +1343,7 @@ def seedvr2_tab(
     
     reset_defaults_btn.click(
         fn=recalc_after_preset_change,
-        inputs=[resolution, max_resolution, shared_state],
+        inputs=[upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
         outputs=[auto_res_msg, shared_state]
     ).then(
         fn=None,
@@ -1392,28 +1362,46 @@ def seedvr2_tab(
         outputs=health_display
     )
     
-    # Update input preview when file is uploaded
-    def update_input_preview(file_path):
-        """Display preview of uploaded file if it's an image"""
-        if not file_path:
-            return gr.update(value=None, visible=False)
-        
-        try:
-            from pathlib import Path
-            file_ext = Path(file_path).suffix.lower()
-            # Check if it's an image file
-            if file_ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.tif']:
-                return gr.update(value=file_path, visible=True)
-            else:
-                # Video file - show placeholder or hide
-                return gr.update(value=None, visible=False)
-        except Exception:
-            return gr.update(value=None, visible=False)
-    
+    # Input preview (image + video) for Gradio 6.2.0
+    def update_input_previews(path_val):
+        return preview_updates(path_val)
+
     input_file.change(
-        fn=update_input_preview,
+        fn=update_input_previews,
         inputs=[input_file],
-        outputs=[input_preview]
+        outputs=[input_image_preview, input_video_preview],
+    )
+
+    # When the user clicks the “X” to clear the upload, also clear derived info panels + textbox path.
+    def clear_input_panels_on_upload_clear(file_path, state):
+        # Only act when cleared.
+        if file_path:
+            return gr.update(), gr.update(), gr.update(), gr.update(), state
+        try:
+            state = state or {}
+            state.setdefault("seed_controls", {})
+            state["seed_controls"]["last_input_path"] = ""
+        except Exception:
+            pass
+        return (
+            "",  # input_path
+            gr.update(value="", visible=False),  # input_cache_msg
+            gr.update(value="", visible=False),  # auto_res_msg
+            gr.update(value="", visible=False),  # input_detection_result
+            state,
+        )
+
+    input_file.change(
+        fn=clear_input_panels_on_upload_clear,
+        inputs=[input_file, shared_state],
+        outputs=[input_path, input_cache_msg, auto_res_msg, input_detection_result, shared_state],
+    )
+
+    # Also preview when user types/pastes a path (not only uploads)
+    input_path.change(
+        fn=update_input_previews,
+        inputs=[input_path],
+        outputs=[input_image_preview, input_video_preview],
     )
 
     # Output format change handler for alpha warnings
@@ -1634,7 +1622,8 @@ def seedvr2_tab(
         from shared.input_detector import detect_input
         
         if not input_path_val or not input_path_val.strip():
-            return gr.update(value="⚠️ No input path provided", visible=True)
+            # Hide when empty (clearing input should clear this panel).
+            return gr.update(value="", visible=False)
         
         try:
             input_info = detect_input(input_path_val)
@@ -1709,35 +1698,7 @@ def seedvr2_tab(
         outputs=[batch_size, batch_size_warning]
     )
     
-    # Add resolution validation
-    def validate_resolution_ui(val):
-        """
-        Validate without forcing a correction while typing.
-        
-        With preprocess=False, we receive raw intermediate values (e.g. 5, 51, 512).
-        We should NOT overwrite the slider value (or the user can't type). Instead we
-        show a warning and let the user finish typing. Corrections (multiple-of-16 etc)
-        will naturally be applied when the user commits or starts processing.
-        """
-        is_valid, message, corrected = validate_resolution(val, must_be_multiple_of=16)
-        if not is_valid:
-            # Do NOT update the slider value here; just show a warning + suggestion.
-            suggestion = f" Suggested: {corrected}" if corrected is not None else ""
-            return (
-                gr.update(),  # keep current user-typed value
-                gr.update(value=f"<span style='color: orange;'>{message}{suggestion}</span>", visible=True),
-            )
-        return gr.update(), gr.update(value="", visible=False)
-    
-    resolution.change(
-        fn=validate_resolution_ui,
-        inputs=resolution,
-        outputs=[resolution, resolution_warning],
-        # See note above: Slider.preprocess() enforces min/max before our validation runs.
-        # Disable preprocessing so validate_resolution_ui can correct values safely.
-        preprocess=False,
-        trigger_mode="always_last",
-    )
+    # NOTE: Legacy `resolution` control is hidden; sizing is now driven by Upscale-x.
 
     # Automatic chunk estimation when input or chunk settings change
     def auto_estimate_chunks(input_path_val, state):
