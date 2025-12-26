@@ -185,6 +185,18 @@ def clear_cuda_cache():
     """
     try:
         import torch
+        # IMPORTANT:
+        # - On Windows, initializing a CUDA context in the *main* Gradio process can
+        #   reserve a few hundred MB of VRAM (often ~300-800MB) even if no model is loaded.
+        # - In subprocess-based pipelines (SeedVR2), we do NOT want to create a CUDA
+        #   context in the parent process "just to clear cache" because it can look
+        #   like leftover VRAM after cancel.
+        #
+        # So we only clear if CUDA is already initialized in THIS process.
+        if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_initialized"):
+            if not torch.cuda.is_initialized():
+                return
+        # If CUDA isn't available, empty_cache would raise; keep it best-effort.
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()  # Wait for GPU operations to finish

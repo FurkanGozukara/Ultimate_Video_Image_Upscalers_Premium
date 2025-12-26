@@ -144,6 +144,18 @@ class Runner:
                     proc.wait(timeout=1.0)
                 except Exception:
                     pass
+
+                # EXTRA SAFETY: kill the whole process tree (SeedVR2 may spawn helpers).
+                # Prevents orphaned child processes from holding VRAM/handles after cancel.
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                except Exception:
+                    pass
                     
             else:
                 # Unix/Linux: SIGTERM then SIGKILL
@@ -179,6 +191,9 @@ class Runner:
             try:
                 from .gpu_utils import clear_cuda_cache
                 clear_cuda_cache()
+                # Note: If the *main* app process has initialized CUDA, Windows may still
+                # show a small persistent VRAM reservation (CUDA context overhead).
+                # That is expected and only fully disappears when the app exits.
                 print("✅ CUDA cache cleared after cancellation")
             except Exception:
                 # Silently ignore if CUDA not available
@@ -230,6 +245,13 @@ class Runner:
             # Force single-frame preview: load_cap=1, image path remains same
             settings = settings.copy()
             settings["load_cap"] = 1
+            # The CLI supports batch_size=1 (4n+1 rule) and recommends it for 1-frame runs.
+            # Our UI batch size slider starts at 5, so force a sane preview value here.
+            try:
+                settings["batch_size"] = 1
+                settings["uniform_batch_size"] = False
+            except Exception:
+                pass
 
         # Respect CLI auto-detect: if format is None/auto, choose based on input type
         if preview_only:
@@ -285,7 +307,64 @@ class Runner:
         if self._active_mode == "in_app":
             return self._run_seedvr2_in_app(cli_path, cmd, predicted_output, settings, on_progress)
         else:
-            return self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
+            result = self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
+
+            # -----------------------------------------------------------------
+            # Windows hard-crash auto-retry
+            # -----------------------------------------------------------------
+            # Some CUDA extensions (flash-attn / sage-attn / triton) can hard-crash
+            # on Windows with 0xC0000005 (3221225477) depending on GPU + build.
+            # We can't catch a Python exception because the process dies, so we
+            # provide a single safe retry using PyTorch SDPA.
+            windows_access_violation = (platform.system() == "Windows" and result.returncode == 3221225477)
+            current_attn = str(settings.get("attention_mode") or "").strip().lower()
+            if windows_access_violation and current_attn and current_attn != "sdpa":
+                retry_msg = (
+                    "\n[SeedVR2] ⚠️ Detected Windows native crash (0xC0000005 / access violation).\n"
+                    "[SeedVR2] ↻ Auto-retrying with safer settings: attention_mode=sdpa"
+                )
+                if preview_only or int(settings.get("load_cap") or 0) == 1:
+                    retry_msg += ", batch_size=1"
+                retry_msg += "\n"
+
+                print(retry_msg, flush=True)
+                if on_progress:
+                    on_progress(retry_msg)
+
+                retry_settings = settings.copy()
+                retry_settings["attention_mode"] = "sdpa"
+                # Ensure compile stays off for the retry (compile-related crashes can also happen)
+                retry_settings["compile_dit"] = False
+                retry_settings["compile_vae"] = False
+
+                # Safe batch size for tiny runs (incl. preview-only)
+                if preview_only or int(retry_settings.get("load_cap") or 0) == 1:
+                    retry_settings["batch_size"] = 1
+                    retry_settings["uniform_batch_size"] = False
+
+                retry_cmd = self._build_seedvr2_cmd(
+                    cli_path,
+                    retry_settings,
+                    format_for_cli,
+                    preview_only,
+                    output_override=cli_output_arg,
+                )
+                retry_result = self._run_seedvr2_subprocess(
+                    cli_path, retry_cmd, predicted_output, retry_settings, on_progress
+                )
+
+                combined_log = "\n".join(
+                    [
+                        "=== SeedVR2 attempt 1 (original settings) ===",
+                        result.log or "",
+                        "",
+                        "=== SeedVR2 attempt 2 (auto-retry: attention_mode=sdpa) ===",
+                        retry_result.log or "",
+                    ]
+                )
+                return RunResult(retry_result.returncode, retry_result.output_path, combined_log)
+
+            return result
 
     def _run_seedvr2_subprocess(self, cli_path: Path, cmd: List[str], predicted_output: Optional[Path], settings: Dict[str, Any], on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
         """
@@ -327,6 +406,11 @@ class Runner:
         env["TEMP"] = str(self.temp_dir)
         env["TMP"] = str(self.temp_dir)
         env.setdefault("PYTHONWARNINGS", "ignore")
+        # Windows consoles often default to legacy code pages (cp1252) which can crash
+        # SeedVR2 when it prints emojis (UnicodeEncodeError). Force UTF-8 for the CLI.
+        if platform.system() == "Windows":
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
 
         # Ensure base dirs exist
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -352,6 +436,8 @@ class Runner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=env,
                 cwd=self.base_dir,
                 creationflags=creationflags,

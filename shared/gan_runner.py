@@ -160,7 +160,10 @@ class GanModelRegistry:
             )
 
         # Try spandrel first for accurate detection
-        model_path = self.base_dir / "Image_Upscale_Models" / model_filename
+        # Support both `models/` (current) and `Image_Upscale_Models/` (legacy).
+        model_path = self.base_dir / "models" / model_filename
+        if not model_path.exists():
+            model_path = self.base_dir / "Image_Upscale_Models" / model_filename
         if model_path.exists():
             spandrel_meta = self.get_model_metadata_with_spandrel(model_path)
             if spandrel_meta:
@@ -605,7 +608,10 @@ def _run_with_spandrel_image(
         if on_progress:
             on_progress("Loading model with spandrel...\n")
 
-        model_path = base_dir / "Image_Upscale_Models" / model_name
+        # Support both `models/` (current) and `Image_Upscale_Models/` (legacy).
+        model_path = base_dir / "models" / model_name
+        if not model_path.exists():
+            model_path = base_dir / "Image_Upscale_Models" / model_name
         model = spandrel.ModelLoader().load_from_file(str(model_path))
         
         # Load image

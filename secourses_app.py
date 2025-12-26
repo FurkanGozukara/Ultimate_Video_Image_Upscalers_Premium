@@ -3,6 +3,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
+# Hugging Face download transport:
+# - hf_transfer can improve download speed but can also cause issues on some Windows setups.
+# - Default to disabled unless the launcher/user explicitly enables it.
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
 # Fix Unicode encoding on Windows console to support emojis and special characters
 if sys.platform == 'win32':
     # Force UTF-8 encoding for console output
@@ -309,229 +314,230 @@ def main():
         health_banner = gr.Markdown(f'<div class="health-banner">{health_text}</div>')
         gr.Markdown(f"# {APP_TITLE}")
 
-        # Global settings tab (simple controls)
-        with gr.Tab("Global Settings"):
-            gr.Markdown("### 📁 Output & Temp Directories")
-            with gr.Row():
-                output_dir_box = gr.Textbox(
-                    label="Default Outputs Folder",
-                    value=global_settings["output_dir"],
-                    info="Where processed files will be saved"
-                )
-                temp_dir_box = gr.Textbox(
-                    label="Temp Folder",
-                    value=global_settings["temp_dir"],
-                    info="Temporary files during processing"
-                )
-            
-            gr.Markdown("### 🎭 Face Restoration")
-            with gr.Row():
-                telemetry_toggle = gr.Checkbox(
-                    label="Save run metadata (local telemetry)",
-                    value=global_settings.get("telemetry", True),
-                    info="Save processing metadata for troubleshooting"
-                )
-                face_global_toggle = gr.Checkbox(
-                    label="Apply Face Restoration globally",
-                    value=global_settings.get("face_global", False),
-                    info="Enable face restoration for all upscaling operations (SeedVR2, GAN, RIFE, FlashVSR+)"
-                )
-            with gr.Row():
-                face_strength_slider = gr.Slider(
-                    label="Global Face Restoration Strength",
-                    minimum=0.0,
-                    maximum=1.0,
-                    step=0.05,
-                    value=global_settings.get("face_strength", 0.5),
-                    info="Strength of face restoration when globally enabled (0.0 = subtle, 1.0 = maximum)"
-                )
-            
-            # FIXED: Make model cache paths EDITABLE and persistable (not read-only)
-            gr.Markdown("### 📦 Model Cache Paths")
-            
-            with gr.Row():
-                with gr.Column():
-                    gr.Markdown("""
-                    **Configure where AI models are downloaded and cached.**
-                    
-                    These paths control where models (SeedVR2, FlashVSR+, Real-ESRGAN, etc.) are stored.
-                    If left empty, defaults from launcher BAT file or system defaults will be used.
-                    """)
-                with gr.Column():
-                    gr.Markdown("""
-                    ⚠️ **IMPORTANT**: Changing these paths will NOT move existing models. You must:
-                    1. Save new paths here
-                    2. Restart the application
-                    3. Models will re-download to new location (or manually copy from old location)
-                    """)
-            
-            with gr.Row():
-                models_dir_box = gr.Textbox(
-                    label="Models Directory (MODELS_DIR)",
-                    value=global_settings.get("models_dir", ""),
-                    placeholder=str(BASE_DIR / "models"),
-                    info="Base directory for all model weights. Leave empty to use launcher default or './models'."
-                )
-            
-            with gr.Row():
-                hf_home_box = gr.Textbox(
-                    label="HuggingFace Home (HF_HOME)",
-                    value=global_settings.get("hf_home", ""),
-                    placeholder=str(BASE_DIR / "models"),
-                    info="HuggingFace cache directory. Usually same as Models Directory. Leave empty to use MODELS_DIR."
-                )
-                transformers_cache_box = gr.Textbox(
-                    label="Transformers Cache (TRANSFORMERS_CACHE)",
-                    value=global_settings.get("transformers_cache", ""),
-                    placeholder=str(BASE_DIR / "models"),
-                    info="Transformers library cache. Usually same as HF_HOME. Leave empty to use MODELS_DIR."
-                )
-            
-            gr.Markdown("""
-            💡 **Current launcher settings** (from `Windows_Run_SECourses_Upscaler_Pro.bat`):
-            - Models Dir: `{}`
-            - HF Home: `{}`
-            - Transformers: `{}`
-            
-            You can override these in the UI above, or edit the launcher BAT file for permanent changes.
-            """.format(
-                launcher_models_dir or "Not set (using defaults)",
-                launcher_hf_home or "Not set (using MODELS_DIR)",
-                launcher_transformers_cache or "Not set (using MODELS_DIR)"
-            ))
-            
-            # Processing mode selection controls (placed before Execution Mode explanation)
-            mode_radio = gr.Radio(
-                choices=["subprocess", "in_app"],
-                value=saved_mode,  # Restore from saved settings
-                label="Processing Mode",
-                info="⚠️ Changing to in-app requires confirmation and persists until app restart",
-                interactive=True
-            )
-            mode_confirm = gr.Checkbox(
-                label="⚠️ I understand that in-app mode requires app restart to revert",
-                value=False,
-                visible=True,
-                info="Enable this checkbox to confirm mode switch to in-app (cannot be undone without restart)"
-            )
-            apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
-            mode_status = gr.Markdown("")  # Status display for mode changes
-            
-            save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
-            global_status = gr.Markdown("")
-            
-            # Execution mode controls
-            gr.Markdown("### ⚙️ Execution Mode")
-            
-            with gr.Row():
-                with gr.Column():
-                    gr.Markdown("""
-                    ## 🟢 Subprocess Mode
-                    **(Default & STRONGLY RECOMMENDED)**
-                    
-                    **What it does:**
-                    - Completely isolated subprocess per run
-                    - Models load fresh, process, exit with guaranteed cleanup
-                    - Works perfectly for ALL models
-                    
-                    **Benefits:**
-                    - ✅ **100% VRAM/RAM cleanup** after each run
-                    - ✅ **Full cancellation support** - kill anytime
-                    - ✅ **Automatic vcvars wrapper** (Windows torch.compile)
-                    - ✅ **Process isolation** - prevents memory leaks
-                    - ✅ **Proven stability** - production-ready
-                    - ✅ **Cross-platform** - Windows and Linux
-                    
-                    **Performance:**
-                    - ~5-10s loading overhead per run
-                    - Negligible for long videos (<1% total time)
-                    - Amortized across batch processing
-                    """)
+        # Global settings tab (rendered LAST for a cleaner workflow)
+        def render_global_settings_tab():
+            with gr.Tab("Global Settings"):
+                gr.Markdown("### 📁 Output & Temp Directories")
+                with gr.Row():
+                    output_dir_box = gr.Textbox(
+                        label="Default Outputs Folder",
+                        value=global_settings["output_dir"],
+                        info="Where processed files will be saved"
+                    )
+                    temp_dir_box = gr.Textbox(
+                        label="Temp Folder",
+                        value=global_settings["temp_dir"],
+                        info="Temporary files during processing"
+                    )
                 
-                with gr.Column():
-                    gr.Markdown("""
-                    ## 🔴 In-App Mode
-                    **(EXPERIMENTAL - DO NOT USE)**
-                    
-                    **⚠️ CRITICAL: NON-FUNCTIONAL PLACEHOLDER**
-                    
-                    **Status**: Partially implemented with **ZERO BENEFITS** and **CRITICAL LIMITATIONS**
-                    
-                    **Why It Doesn't Work:**
-                    
-                    **1. ❌ NO MODEL PERSISTENCE**
-                    - Models reload EVERY RUN (identical to subprocess)
-                    - Expected: Models stay in VRAM for speed
-                    - Result: **ZERO SPEED BENEFIT**
-                    
-                    **2. ❌ NO CANCELLATION**
-                    - Cannot stop once started
-                    - Must wait or force-quit entire app
-                    
-                    **3. ❌ NO VCVARS WRAPPER**
-                    - torch.compile fails on Windows
-                    - Must activate vcvars before launch
-                    """)
+                gr.Markdown("### 🎭 Face Restoration")
+                with gr.Row():
+                    telemetry_toggle = gr.Checkbox(
+                        label="Save run metadata (local telemetry)",
+                        value=global_settings.get("telemetry", True),
+                        info="Save processing metadata for troubleshooting"
+                    )
+                    face_global_toggle = gr.Checkbox(
+                        label="Apply Face Restoration globally",
+                        value=global_settings.get("face_global", False),
+                        info="Enable face restoration for all upscaling operations (SeedVR2, GAN, RIFE, FlashVSR+)"
+                    )
+                with gr.Row():
+                    face_strength_slider = gr.Slider(
+                        label="Global Face Restoration Strength",
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.05,
+                        value=global_settings.get("face_strength", 0.5),
+                        info="Strength of face restoration when globally enabled (0.0 = subtle, 1.0 = maximum)"
+                    )
                 
-                with gr.Column():
-                    gr.Markdown("""
-                    ## 🔴 More Issues
+                # FIXED: Make model cache paths EDITABLE and persistable (not read-only)
+                gr.Markdown("### 📦 Model Cache Paths")
+                
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("""
+                        **Configure where AI models are downloaded and cached.**
+                        
+                        These paths control where models (SeedVR2, FlashVSR+, Real-ESRGAN, etc.) are stored.
+                        If left empty, defaults from launcher BAT file or system defaults will be used.
+                        """)
+                    with gr.Column():
+                        gr.Markdown("""
+                        ⚠️ **IMPORTANT**: Changing these paths will NOT move existing models. You must:
+                        1. Save new paths here
+                        2. Restart the application
+                        3. Models will re-download to new location (or manually copy from old location)
+                        """)
+                
+                with gr.Row():
+                    models_dir_box = gr.Textbox(
+                        label="Models Directory (MODELS_DIR)",
+                        value=global_settings.get("models_dir", ""),
+                        placeholder=str(BASE_DIR / "models"),
+                        info="Base directory for all model weights. Leave empty to use launcher default or './models'."
+                    )
+                
+                with gr.Row():
+                    hf_home_box = gr.Textbox(
+                        label="HuggingFace Home (HF_HOME)",
+                        value=global_settings.get("hf_home", ""),
+                        placeholder=str(BASE_DIR / "models"),
+                        info="HuggingFace cache directory. Usually same as Models Directory. Leave empty to use MODELS_DIR."
+                    )
+                    transformers_cache_box = gr.Textbox(
+                        label="Transformers Cache (TRANSFORMERS_CACHE)",
+                        value=global_settings.get("transformers_cache", ""),
+                        placeholder=str(BASE_DIR / "models"),
+                        info="Transformers library cache. Usually same as HF_HOME. Leave empty to use MODELS_DIR."
+                    )
+                
+                gr.Markdown("""
+                💡 **Current launcher settings** (from `Windows_Run_SECourses_Upscaler_Pro.bat`):
+                - Models Dir: `{}`
+                - HF Home: `{}`
+                - Transformers: `{}`
+                
+                You can override these in the UI above, or edit the launcher BAT file for permanent changes.
+                """.format(
+                    launcher_models_dir or "Not set (using defaults)",
+                    launcher_hf_home or "Not set (using MODELS_DIR)",
+                    launcher_transformers_cache or "Not set (using MODELS_DIR)"
+                ))
+                
+                # Processing mode selection controls (placed before Execution Mode explanation)
+                mode_radio = gr.Radio(
+                    choices=["subprocess", "in_app"],
+                    value=saved_mode,  # Restore from saved settings
+                    label="Processing Mode",
+                    info="⚠️ Changing to in-app requires confirmation and persists until app restart",
+                    interactive=True
+                )
+                mode_confirm = gr.Checkbox(
+                    label="⚠️ I understand that in-app mode requires app restart to revert",
+                    value=False,
+                    visible=True,
+                    info="Enable this checkbox to confirm mode switch to in-app (cannot be undone without restart)"
+                )
+                apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
+                mode_status = gr.Markdown("")  # Status display for mode changes
+                
+                save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
+                global_status = gr.Markdown("")
+                
+                # Execution mode controls
+                gr.Markdown("### ⚙️ Execution Mode")
+                
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("""
+                        ## 🟢 Subprocess Mode
+                        **(Default & STRONGLY RECOMMENDED)**
+                        
+                        **What it does:**
+                        - Completely isolated subprocess per run
+                        - Models load fresh, process, exit with guaranteed cleanup
+                        - Works perfectly for ALL models
+                        
+                        **Benefits:**
+                        - ✅ **100% VRAM/RAM cleanup** after each run
+                        - ✅ **Full cancellation support** - kill anytime
+                        - ✅ **Automatic vcvars wrapper** (Windows torch.compile)
+                        - ✅ **Process isolation** - prevents memory leaks
+                        - ✅ **Proven stability** - production-ready
+                        - ✅ **Cross-platform** - Windows and Linux
+                        
+                        **Performance:**
+                        - ~5-10s loading overhead per run
+                        - Negligible for long videos (<1% total time)
+                        - Amortized across batch processing
+                        """)
                     
-                    **4. ⚠️ MEMORY LEAKS**
-                    - VRAM may not fully clear
-                    - Usage creeps up, eventual OOM crashes
+                    with gr.Column():
+                        gr.Markdown("""
+                        ## 🔴 In-App Mode
+                        **(EXPERIMENTAL - DO NOT USE)**
+                        
+                        **⚠️ CRITICAL: NON-FUNCTIONAL PLACEHOLDER**
+                        
+                        **Status**: Partially implemented with **ZERO BENEFITS** and **CRITICAL LIMITATIONS**
+                        
+                        **Why It Doesn't Work:**
+                        
+                        **1. ❌ NO MODEL PERSISTENCE**
+                        - Models reload EVERY RUN (identical to subprocess)
+                        - Expected: Models stay in VRAM for speed
+                        - Result: **ZERO SPEED BENEFIT**
+                        
+                        **2. ❌ NO CANCELLATION**
+                        - Cannot stop once started
+                        - Must wait or force-quit entire app
+                        
+                        **3. ❌ NO VCVARS WRAPPER**
+                        - torch.compile fails on Windows
+                        - Must activate vcvars before launch
+                        """)
                     
-                    **5. ⚠️ MODE LOCK**
-                    - Cannot switch back without restart
-                    - Locked-in until app restart
-                    
-                    **Required for Functional Mode:**
-                    - Refactor CLIs for persistent loading
-                    - Implement VRAM caching
-                    - Add threading cancellation
-                    - Pre-activate vcvars on startup
-                    - CUDA memory profiling
-                    
-                    **Effort**: 40-60 hours + testing  
-                    **Risk**: High (CUDA complexity)  
-                    **Benefit**: Marginal (5-10% for short videos)
-                    
-                    ---
-                    
-                    **Recommendation:**
-                    
-                    ✅ **USE SUBPROCESS MODE**
-                    - Production-ready and battle-tested
-                    - Reliable cleanup and cancellation
-                    
-                    🚫 **AVOID IN-APP MODE**
-                    - Non-functional (models reload anyway)
-                    - Dangerous (memory leaks, failures)
-                    """)
-            
-            gr.Markdown("💡 **Note**: In-app mode exists ONLY as a code framework for potential future optimization. Consider it **disabled** for all practical purposes.")
+                    with gr.Column():
+                        gr.Markdown("""
+                        ## 🔴 More Issues
+                        
+                        **4. ⚠️ MEMORY LEAKS**
+                        - VRAM may not fully clear
+                        - Usage creeps up, eventual OOM crashes
+                        
+                        **5. ⚠️ MODE LOCK**
+                        - Cannot switch back without restart
+                        - Locked-in until app restart
+                        
+                        **Required for Functional Mode:**
+                        - Refactor CLIs for persistent loading
+                        - Implement VRAM caching
+                        - Add threading cancellation
+                        - Pre-activate vcvars on startup
+                        - CUDA memory profiling
+                        
+                        **Effort**: 40-60 hours + testing  
+                        **Risk**: High (CUDA complexity)  
+                        **Benefit**: Marginal (5-10% for short videos)
+                        
+                        ---
+                        
+                        **Recommendation:**
+                        
+                        ✅ **USE SUBPROCESS MODE**
+                        - Production-ready and battle-tested
+                        - Reliable cleanup and cancellation
+                        
+                        🚫 **AVOID IN-APP MODE**
+                        - Non-functional (models reload anyway)
+                        - Dangerous (memory leaks, failures)
+                        """)
+                
+                gr.Markdown("💡 **Note**: In-app mode exists ONLY as a code framework for potential future optimization. Consider it **disabled** for all practical purposes.")
 
-            # Wire up global settings events
-            def save_global_settings(od, td, tel, face, face_str, models_dir, hf_home, trans_cache, state):
-                from shared.services.global_service import save_global_settings
-                return save_global_settings(od, td, tel, face, face_str, models_dir, hf_home, trans_cache, runner, preset_manager, global_settings, run_logger, state)
+                # Wire up global settings events
+                def save_global_settings(od, td, tel, face, face_str, models_dir, hf_home, trans_cache, state):
+                    from shared.services.global_service import save_global_settings
+                    return save_global_settings(od, td, tel, face, face_str, models_dir, hf_home, trans_cache, runner, preset_manager, global_settings, run_logger, state)
 
-            def apply_mode_selection(mode_choice, confirm, state):
-                from shared.services.global_service import apply_mode_selection
-                return apply_mode_selection(mode_choice, confirm, runner, preset_manager, global_settings, state)
+                def apply_mode_selection(mode_choice, confirm, state):
+                    from shared.services.global_service import apply_mode_selection
+                    return apply_mode_selection(mode_choice, confirm, runner, preset_manager, global_settings, state)
 
-            save_global.click(
-                fn=save_global_settings,
-                inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, face_strength_slider, 
-                       models_dir_box, hf_home_box, transformers_cache_box, shared_state],
-                outputs=[global_status, shared_state],
-            )
+                save_global.click(
+                    fn=save_global_settings,
+                    inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, face_strength_slider, 
+                           models_dir_box, hf_home_box, transformers_cache_box, shared_state],
+                    outputs=[global_status, shared_state],
+                )
 
-            apply_mode_btn.click(
-                fn=apply_mode_selection,
-                inputs=[mode_radio, mode_confirm, shared_state],
-                outputs=[mode_radio, mode_confirm, mode_status, shared_state],
-            )
+                apply_mode_btn.click(
+                    fn=apply_mode_selection,
+                    inputs=[mode_radio, mode_confirm, shared_state],
+                    outputs=[mode_radio, mode_confirm, mode_status, shared_state],
+                )
 
         # Self-contained tabs following SECourses pattern
         with gr.Tab("🎬 SeedVR2 (Video/Image)"):
@@ -611,6 +617,9 @@ def main():
                 temp_dir=temp_dir,
                 output_dir=output_dir
             )
+
+        # Global Settings should be the last tab (far-right)
+        render_global_settings_tab()
 
         # Update health banner on load and changes
         def update_health_banner(state):

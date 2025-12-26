@@ -159,7 +159,10 @@ class GanModelRegistry:
             )
 
         # Try spandrel first for accurate detection
-        model_path = self.base_dir / "Image_Upscale_Models" / model_filename
+        # Support both `models/` (current) and `Image_Upscale_Models/` (legacy).
+        model_path = self.base_dir / "models" / model_filename
+        if not model_path.exists():
+            model_path = self.base_dir / "Image_Upscale_Models" / model_filename
         if model_path.exists():
             spandrel_meta = self.get_model_metadata_with_spandrel(model_path)
             if spandrel_meta:
@@ -276,7 +279,10 @@ class GanRunner:
             if on_progress:
                 on_progress(f"Loading {model_name} with Spandrel...")
             
-            model_path = self.base_dir / "Image_Upscale_Models" / model_name
+            # Support both `models/` (current) and `Image_Upscale_Models/` (legacy).
+            model_path = self.base_dir / "models" / model_name
+            if not model_path.exists():
+                model_path = self.base_dir / "Image_Upscale_Models" / model_name
             if not model_path.exists():
                 raise FileNotFoundError(f"Model not found: {model_path}")
             
@@ -308,7 +314,10 @@ class GanRunner:
             if on_progress:
                 on_progress(f"Loading {model_name} with Real-ESRGAN...")
             
-            model_path = self.base_dir / "Image_Upscale_Models" / model_name
+            # Support both `models/` (current) and `Image_Upscale_Models/` (legacy).
+            model_path = self.base_dir / "models" / model_name
+            if not model_path.exists():
+                model_path = self.base_dir / "Image_Upscale_Models" / model_name
             if not model_path.exists():
                 raise FileNotFoundError(f"Model not found: {model_path}")
             

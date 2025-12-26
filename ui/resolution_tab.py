@@ -44,6 +44,8 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         *flashvsr_models,
         *rife_models
     }))
+    if not combined_models:
+        combined_models = ["default"]
 
     # Build service callbacks
     service = build_resolution_callbacks(preset_manager, shared_state, combined_models)
@@ -82,11 +84,15 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     This is the **PREFERRED chunking method** for long videos, managing VRAM, and optimizing quality per scene.
     """)
 
-    # Model selector
+    # Model selector (guard against stale preset values not present in choices)
+    model_selector_value = values[0]
+    if model_selector_value not in combined_models:
+        model_selector_value = combined_models[0] if combined_models else "default"
+
     model_selector = gr.Dropdown(
         label="Model Context (for presets)",
         choices=combined_models,
-        value=values[0],
+        value=model_selector_value,
         info="Settings are saved/loaded per model"
     )
 

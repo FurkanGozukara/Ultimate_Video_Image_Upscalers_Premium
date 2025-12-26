@@ -142,14 +142,18 @@ def _is_realesrgan_builtin(name: str) -> bool:
 
 def _scan_gan_models(base_dir: Path) -> List[str]:
     """Scan for GAN models with comprehensive metadata"""
-    models_dir = base_dir / "Image_Upscale_Models"
-    if not models_dir.exists():
-        return []
-
-    models = []
-    for f in models_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in GAN_MODEL_EXTS:
-            models.append(f.name)
+    # Support both the legacy folder (`Image_Upscale_Models/`) and the current layout (`models/`).
+    models: set[str] = set()
+    for folder_name in ("models", "Image_Upscale_Models"):
+        models_dir = base_dir / folder_name
+        if not models_dir.exists():
+            continue
+        try:
+            for f in models_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in GAN_MODEL_EXTS:
+                    models.add(f.name)
+        except Exception:
+            continue
     
     # Trigger cache reload for metadata
     from shared.gan_runner import reload_gan_models_cache
@@ -869,9 +873,24 @@ def build_gan_callbacks(
                 # Run backend and collect logs
                 try:
                     # Use new unified GAN runner
-                    model_path_check = base_dir / "Image_Upscale_Models" / prepped_settings["model_name"]
-                    if not model_path_check.exists() and not _is_realesrgan_builtin(prepped_settings["model_name"]):
-                        return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.update(value=None), state)
+                    # Support both `models/` and legacy `Image_Upscale_Models/`.
+                    builtin_key = prepped_settings.get("model_name") or prepped_settings.get("model") or ""
+                    if not _is_realesrgan_builtin(builtin_key):
+                        candidates = [
+                            prepped_settings.get("model_name"),
+                            prepped_settings.get("model"),
+                        ]
+                        candidates = [c for c in candidates if c]
+                        found = False
+                        for name in candidates:
+                            for folder in ("models", "Image_Upscale_Models"):
+                                if (base_dir / folder / name).exists():
+                                    found = True
+                                    break
+                            if found:
+                                break
+                        if not found:
+                            return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.update(value=None), state)
                     
                     # Add face restoration settings
                     prepped_settings["face_restore"] = face_apply

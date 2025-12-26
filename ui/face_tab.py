@@ -19,16 +19,10 @@ from shared.universal_preset import dict_to_values
 
 
 def _get_gan_model_names(base_dir) -> list:
-    """Get GAN model names from Image_Upscale_Models folder"""
+    """Get GAN model names from the app's model folders (supports legacy layout)."""
     from pathlib import Path
-    models_dir = Path(base_dir) / "Image_Upscale_Models"
-    if not models_dir.exists():
-        return []
-    choices = []
-    for f in models_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in (".pth", ".safetensors"):
-            choices.append(f.name)
-    return sorted(choices)
+    from shared.models import scan_gan_models
+    return scan_gan_models(Path(base_dir))
 
 
 def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.State, base_dir=None):
@@ -48,10 +42,10 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
         if output_dir_path.name == "outputs":
             base_dir = output_dir_path.parent
         else:
-            # Fallback: try to find Image_Upscale_Models in parent directories
+            # Fallback: try to find model folders in parent directories
             current = output_dir_path
             for _ in range(3):  # Search up to 3 levels
-                if (current / "Image_Upscale_Models").exists():
+                if (current / "models").exists() or (current / "Image_Upscale_Models").exists():
                     base_dir = current
                     break
                 current = current.parent

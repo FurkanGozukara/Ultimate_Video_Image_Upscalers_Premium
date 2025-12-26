@@ -165,7 +165,7 @@ def gan_tab(
                             label="GAN Model",
                             choices=service["model_scanner"](),
                             value=values[4],
-                            info="Pre-trained GAN models with fixed scale factors (2x, 4x, etc.). Models auto-detected from Image_Upscale_Models folder."
+                            info="Pre-trained GAN models with fixed scale factors (2x, 4x, etc.). Models auto-detected from ./models (or legacy Image_Upscale_Models)."
                         )
 
                         model_info = gr.Markdown("Select a model to see details...")

@@ -22,3 +22,4 @@ open-model-database
 *__pycache__*
 outputs/
 models/
+temp/

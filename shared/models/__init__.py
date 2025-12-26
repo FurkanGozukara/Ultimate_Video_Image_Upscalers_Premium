@@ -6,24 +6,43 @@ from pathlib import Path
 from typing import List
 
 
+GAN_MODEL_EXTS = (".pth", ".safetensors")
+
+
+def _iter_gan_model_dirs(base_dir: Path) -> List[Path]:
+    """
+    Return model directories that may contain GAN / image upscaler weights.
+
+    This project historically used `Image_Upscale_Models/`, but newer layouts store
+    weights under `models/`. We support both for backwards compatibility.
+    """
+    dirs: List[Path] = []
+    for folder_name in ("models", "Image_Upscale_Models"):
+        d = base_dir / folder_name
+        if d.exists() and d.is_dir():
+            dirs.append(d)
+    return dirs
+
+
 def scan_gan_models(base_dir: Path) -> List[str]:
     """
-    Scan for GAN models in Image_Upscale_Models folder.
+    Scan for GAN / image upscaler model weights.
     
     Args:
-        base_dir: Base directory containing Image_Upscale_Models folder
+        base_dir: App base directory
         
     Returns:
         Sorted list of model filenames
     """
-    models_dir = base_dir / "Image_Upscale_Models"
-    if not models_dir.exists():
-        return []
-    
-    choices = []
-    for f in models_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in (".pth", ".safetensors"):
-            choices.append(f.name)
+    choices: set[str] = set()
+    for models_dir in _iter_gan_model_dirs(base_dir):
+        try:
+            for f in models_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in GAN_MODEL_EXTS:
+                    choices.add(f.name)
+        except Exception:
+            # Ignore unreadable dirs; keep scanning others.
+            continue
     return sorted(choices)
 
 
