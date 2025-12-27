@@ -36,6 +36,7 @@ from shared.face_restore import restore_image, restore_video
 from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
 from shared.comparison_unified import create_unified_comparison, build_comparison_selector
+from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
 from shared.video_comparison import create_comparison_selector
 from shared.model_manager import get_model_manager, ModelType
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
@@ -187,7 +188,7 @@ def seedvr2_defaults(model_name: Optional[str] = None, base_dir: Optional[Path] 
         # Legacy chunk_enable, scene_threshold, scene_min_len removed from ORDER
         "chunk_size": 0,  # SeedVR2 native chunking (frames per chunk, 0=disabled)
         "resolution": 1080,
-        "max_resolution": max_res_cap,  # Apply model-specific cap
+        "max_resolution": 1920,  # Default 1920 (model cap only limits max slider, not default)
         # NEW (vNext): replace manual short-side target with an Upscale factor (default 4x).
         # The actual SeedVR2 CLI `resolution` is computed at runtime from the input dimensions.
         "upscale_factor": 4.0,
@@ -205,15 +206,15 @@ def seedvr2_defaults(model_name: Optional[str] = None, base_dir: Optional[Path] 
         "input_noise_scale": 0.0,
         "latent_noise_scale": 0.0,
         "cuda_device": cuda_default,
-        "dit_offload_device": "none",
-        "vae_offload_device": "none",
+        "dit_offload_device": "cpu",
+        "vae_offload_device": "cpu",
         "tensor_offload_device": "cpu",
         "blocks_to_swap": 0,
         "swap_io_components": False,
-        "vae_encode_tiled": False,
+        "vae_encode_tiled": True,
         "vae_encode_tile_size": 1024,
         "vae_encode_tile_overlap": 128,
-        "vae_decode_tiled": False,
+        "vae_decode_tiled": True,
         "vae_decode_tile_size": 1024,
         "vae_decode_tile_overlap": 128,
         "tile_debug": "false",
@@ -1771,6 +1772,8 @@ def build_seedvr2_callbacks(
         try:
             state = state or {"seed_controls": {}, "operation_status": "ready"}
             state["operation_status"] = "running"
+            # Clear any previous VRAM OOM banner at the start of a new run.
+            clear_vram_oom_alert(state)
             seed_controls = state.get("seed_controls", {})
 
             # Parse settings
@@ -2526,8 +2529,13 @@ def build_seedvr2_callbacks(
                     elif update_type == "error":
                         if progress:
                             progress(0, desc="Error occurred")
+                        # If this looks like VRAM OOM, show big banner + actionable guidance.
+                        if maybe_set_vram_oom_alert(state, model_label="SeedVR2", text=data, settings=settings):
+                            state["operation_status"] = "error"
+                            # Also show a modal popup (easy to notice even if user is scrolled).
+                            show_vram_oom_modal(state, title="Out of VRAM (GPU) — SeedVR2", duration=None)
                         yield (
-                            "❌ Processing failed",  # status_box
+                            ("🚫 Out of VRAM (GPU) — see banner above" if state.get("alerts", {}).get("oom", {}).get("visible") else "❌ Processing failed"),  # status_box
                             f"Error: {data}",  # log_box
                             "",  # progress_indicator
                             None,  # output_video
@@ -2564,6 +2572,13 @@ def build_seedvr2_callbacks(
                     state  # shared_state
                 )
                 return
+
+            # Final pass: if logs contain VRAM OOM signatures, raise the global banner.
+            if maybe_set_vram_oom_alert(state, model_label="SeedVR2", text=logs, settings=settings):
+                state["operation_status"] = "error"
+                status = "🚫 Out of VRAM (GPU) — see banner above"
+                # Modal popup so users don't miss the guidance.
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) — SeedVR2", duration=None)
 
             # Create comparison based on mode from Output tab
             comparison_mode = seed_controls.get("comparison_mode_val", "native")
@@ -2663,6 +2678,9 @@ def build_seedvr2_callbacks(
         except Exception as e:
             error_msg = f"Critical error in SeedVR2 processing: {str(e)}"
             state["operation_status"] = "error"
+            # If this was VRAM OOM, show the big banner.
+            if maybe_set_vram_oom_alert(state, model_label="SeedVR2", text=str(e), settings=locals().get("settings")):
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) — SeedVR2", duration=None)
             yield (
                 "❌ Critical error",  # status_box
                 error_msg,  # log_box

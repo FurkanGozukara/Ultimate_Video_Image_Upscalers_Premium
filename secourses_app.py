@@ -188,6 +188,109 @@ def main():
         block_title_text_weight="700",
     )
 
+    # --------------------------------------------------------------------- #
+    # Global VRAM OOM banner styling (big + flashing)
+    # --------------------------------------------------------------------- #
+    CUSTOM_CSS = """
+    .vram-oom-banner {
+      position: relative;
+      border: 2px solid #ff1744;
+      background: linear-gradient(90deg, rgba(255,23,68,0.16), rgba(255,193,7,0.14));
+      padding: 16px 18px;
+      border-radius: 14px;
+      margin: 10px 0 18px 0;
+      overflow: hidden;
+      animation: vramPulse 1.15s ease-in-out infinite;
+    }
+    .vram-oom-banner::before {
+      content: "";
+      position: absolute;
+      top: -30%;
+      left: -60%;
+      width: 180%;
+      height: 160%;
+      background: linear-gradient(120deg, rgba(255,255,255,0.0), rgba(255,255,255,0.22), rgba(255,255,255,0.0));
+      transform: rotate(10deg);
+      animation: vramShimmer 2.2s linear infinite;
+      pointer-events: none;
+      opacity: 0.55;
+    }
+    .vram-oom-title {
+      font-size: 28px;
+      font-weight: 900;
+      letter-spacing: 0.4px;
+      color: #ff1744;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+      text-shadow: 0 0 10px rgba(255,23,68,0.35);
+    }
+    .vram-oom-subtitle {
+      font-size: 15px;
+      opacity: 0.95;
+      margin-bottom: 10px;
+    }
+    .vram-oom-model, .vram-oom-settings {
+      font-size: 14px;
+      opacity: 0.9;
+      margin-bottom: 6px;
+    }
+    .vram-oom-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 10px;
+      margin-bottom: 10px;
+    }
+    @media (max-width: 900px) {
+      .vram-oom-grid { grid-template-columns: 1fr; }
+    }
+    .vram-oom-card {
+      border: 1px solid rgba(255,23,68,0.25);
+      background: rgba(15, 23, 42, 0.06);
+      border-radius: 12px;
+      padding: 12px 12px;
+    }
+    .vram-oom-card-title {
+      font-weight: 800;
+      margin-bottom: 6px;
+    }
+    .vram-oom-list { margin: 0.4rem 0 0 1.2rem; }
+    .vram-oom-snippet-wrap {
+      margin-top: 12px;
+      border-top: 1px dashed rgba(255,23,68,0.35);
+      padding-top: 10px;
+    }
+    .vram-oom-snippet-title { font-weight: 800; margin-bottom: 6px; }
+    .vram-oom-snippet {
+      background: rgba(0,0,0,0.55);
+      color: #e2e8f0;
+      padding: 10px;
+      border-radius: 10px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      font-size: 12.5px;
+      line-height: 1.35;
+      border: 1px solid rgba(255,255,255,0.10);
+    }
+    .vram-oom-details {
+      margin-top: 6px;
+      border: 1px solid rgba(255,23,68,0.22);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.06);
+    }
+    .vram-oom-summary { font-weight: 800; cursor: pointer; }
+    @keyframes vramPulse {
+      0%   { box-shadow: 0 0 0 rgba(255,23,68,0.0), 0 0 0 rgba(255,193,7,0.0); }
+      50%  { box-shadow: 0 0 18px rgba(255,23,68,0.48), 0 0 34px rgba(255,193,7,0.22); }
+      100% { box-shadow: 0 0 0 rgba(255,23,68,0.0), 0 0 0 rgba(255,193,7,0.0); }
+    }
+    @keyframes vramShimmer {
+      0%   { transform: translateX(-20%) rotate(10deg); }
+      100% { transform: translateX(35%) rotate(10deg); }
+    }
+    """
+
     # =========================================================================
     # UNIVERSAL PRESET SYSTEM - Load last used preset on startup
     # =========================================================================
@@ -246,7 +349,7 @@ def main():
     # Load universal preset on startup
     startup_preset, startup_preset_name, all_models = load_startup_universal_preset()
     
-    with gr.Blocks(title=APP_TITLE, theme=modern_theme) as demo:
+    with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=CUSTOM_CSS) as demo:
         # =========================================================================
         # SHARED STATE - Populated from UNIVERSAL PRESET on startup
         # =========================================================================
@@ -256,6 +359,7 @@ def main():
         
         shared_state = gr.State({
             "health_banner": {"text": health_text},
+            "alerts": {"oom": {"visible": False, "html": "", "ts": None}},
             "seed_controls": {
                 # UNIVERSAL PRESET: Current preset name
                 "current_preset_name": startup_preset_name,
@@ -312,6 +416,13 @@ def main():
 
         # Health banner at the top
         health_banner = gr.Markdown(f'<div class="health-banner">{health_text}</div>')
+
+        # VRAM OOM banner (shown only on VRAM OOM)
+        # NOTE: We update this via a Timer tick because gr.State change events can be
+        # inconsistent across Gradio versions/environments.
+        oom_banner = gr.HTML(value="", visible=False)
+        oom_dismiss_btn = gr.Button("Dismiss VRAM Alert", variant="secondary", size="sm", visible=False)
+        oom_timer = gr.Timer(value=0.5, active=True)
         gr.Markdown(f"# {APP_TITLE}")
 
         # Global settings tab (rendered LAST for a cleaner workflow)
@@ -627,12 +738,39 @@ def main():
             health_text = state.get("health_banner", {}).get("text", "System ready")
             return gr.update(value=f'<div class="health-banner">{health_text}</div>')
 
+        def update_oom_banner(state):
+            """Update global VRAM OOM banner."""
+            info = (state or {}).get("alerts", {}).get("oom", {}) if isinstance(state, dict) else {}
+            html = info.get("html", "") if isinstance(info, dict) else ""
+            visible = bool(isinstance(info, dict) and info.get("visible") and html)
+            return gr.update(value=html or "", visible=visible), gr.update(visible=visible)
+
+        def dismiss_oom(state):
+            """Clear VRAM OOM banner (user dismiss)."""
+            try:
+                from shared.oom_alert import clear_vram_oom_alert
+                clear_vram_oom_alert(state)
+            except Exception:
+                pass
+            return state
+
         # Update on load
         demo.load(fn=update_health_banner, inputs=shared_state, outputs=health_banner)
+        demo.load(fn=update_oom_banner, inputs=shared_state, outputs=[oom_banner, oom_dismiss_btn])
         
         # Update when shared state changes (for dynamic updates from tabs)
         shared_state.change(fn=update_health_banner, inputs=shared_state, outputs=health_banner)
+        shared_state.change(fn=update_oom_banner, inputs=shared_state, outputs=[oom_banner, oom_dismiss_btn])
 
+        # Polling fallback (most reliable): refresh OOM banner visibility periodically
+        oom_timer.tick(fn=update_oom_banner, inputs=shared_state, outputs=[oom_banner, oom_dismiss_btn])
+
+        # Allow user to dismiss the banner without restarting
+        oom_dismiss_btn.click(fn=dismiss_oom, inputs=shared_state, outputs=shared_state)
+
+    # Enable Gradio queue so built-in toast notifications (gr.Info/gr.Warning/gr.Error) can work
+    # and to improve streaming/progress consistency.
+    demo.queue()
     demo.launch(inbrowser=True)
 
 

@@ -25,6 +25,7 @@ from shared.gan_runner import run_gan_upscale, GanResult, get_gan_model_metadata
 from shared.comparison_unified import create_unified_comparison, create_video_comparison_slider
 from shared.video_comparison_slider import create_video_comparison_html
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
+from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
 
 
 GAN_MODEL_EXTS = {".pth", ".safetensors"}
@@ -670,6 +671,8 @@ def build_gan_callbacks(
         try:
             state = state or {"seed_controls": {}}
             seed_controls = state.get("seed_controls", {})
+            # Clear any previous VRAM OOM banner at the start of a new run.
+            clear_vram_oom_alert(state)
             cancel_event.clear()
             settings_dict = _gan_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
@@ -807,6 +810,9 @@ def build_gan_callbacks(
                     progress(1.0, desc="Chunking complete!")
                 
                 status = "✅ GAN chunked upscale complete" if rc == 0 else f"⚠️ GAN chunking failed (code {rc})"
+                if rc != 0 and maybe_set_vram_oom_alert(state, model_label="GAN", text=clog, settings=settings):
+                    status = "🚫 Out of VRAM (GPU) — see banner above"
+                    show_vram_oom_modal(state, title="Out of VRAM (GPU) — GAN", duration=None)
                 
                 # Build comparison for chunked output
                 video_comp_html_update = gr.update(value="", visible=False)
@@ -909,6 +915,10 @@ def build_gan_callbacks(
                     )
                 except Exception as exc:  # surface ffmpeg or other runtime issues
                     err_msg = f"❌ GAN upscale failed: {exc}"
+                    if maybe_set_vram_oom_alert(state, model_label="GAN", text=str(exc), settings=prepped_settings):
+                        # NOTE: Modal popups must be triggered from the main Gradio event thread.
+                        # We show the modal after the worker thread finishes (see below).
+                        pass
                     if progress_cb:
                         progress_cb(err_msg)
                     return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.update(value=None), state)
@@ -917,6 +927,8 @@ def build_gan_callbacks(
                 else:
                     status = "✅ GAN upscale complete" if result.returncode == 0 else f"⚠️ GAN upscale failed"
                 log_body = result.log or ""
+                if result.returncode != 0 and maybe_set_vram_oom_alert(state, model_label="GAN", text=log_body, settings=prepped_settings):
+                    status = "🚫 Out of VRAM (GPU) — see banner above"
                 full_log = "\n".join(header_log + [log_body])
                 if progress_cb:
                     progress_cb(status)
@@ -1064,6 +1076,10 @@ def build_gan_callbacks(
                         slider_position=50.0
                     )
                     video_comp_html_update = gr.update(value=video_comp_html_value, visible=True)
+
+            # If VRAM OOM was detected during the worker run, show a modal popup (easy to notice).
+            if isinstance(state, dict) and state.get("alerts", {}).get("oom", {}).get("visible"):
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) — GAN", duration=None)
             
             yield (
                 status,

@@ -30,6 +30,7 @@ from shared.models.flashvsr_meta import get_flashvsr_metadata, get_flashvsr_defa
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.error_handling import logger as error_logger
 from shared.resolution_calculator import estimate_fixed_scale_upscale_plan_from_dims
+from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
 
 # Cancel event for FlashVSR+ processing
 _flashvsr_cancel_event = threading.Event()
@@ -323,6 +324,8 @@ def build_flashvsr_callbacks(
         """Main processing action with gr.Progress integration and pre-flight checks."""
         try:
             state = state or {"seed_controls": {}}
+            # Clear any previous VRAM OOM banner at the start of a new run.
+            clear_vram_oom_alert(state)
             seed_controls = state.get("seed_controls", {})
             settings_dict = _flashvsr_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
@@ -620,6 +623,8 @@ def build_flashvsr_callbacks(
                         last_output_path = outp
                         logs.append(f"✅ [{idx}/{len(items)}] {Path(item_path).name} → {Path(outp).name}")
                     else:
+                        if getattr(result, "returncode", 0) != 0:
+                            maybe_set_vram_oom_alert(state, model_label="FlashVSR+", text=getattr(result, "log", ""), settings=item_settings)
                         logs.append(f"❌ [{idx}/{len(items)}] {Path(item_path).name} failed")
 
                     # Log run summary per-item
@@ -822,8 +827,10 @@ def build_flashvsr_callbacks(
             if "error" in result_holder:
                 if progress:
                     progress(0, desc="Error")
+                if maybe_set_vram_oom_alert(state, model_label="FlashVSR+", text=result_holder.get("error", ""), settings=settings):
+                    show_vram_oom_modal(state, title="Out of VRAM (GPU) — FlashVSR+", duration=None)
                 yield (
-                    "❌ Processing failed",
+                    ("🚫 Out of VRAM (GPU) — see banner above" if state.get("alerts", {}).get("oom", {}).get("visible") else "❌ Processing failed"),
                     f"Error: {result_holder['error']}",
                     None,
                     None,
@@ -917,6 +924,9 @@ def build_flashvsr_callbacks(
             )
             
             status = "✅ FlashVSR+ upscaling complete" if result.returncode == 0 else f"⚠️ Exited with code {result.returncode}"
+            if result.returncode != 0 and maybe_set_vram_oom_alert(state, model_label="FlashVSR+", text=result.log, settings=settings):
+                status = "🚫 Out of VRAM (GPU) — see banner above"
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) — FlashVSR+", duration=None)
             
             yield (
                 status,
@@ -931,6 +941,8 @@ def build_flashvsr_callbacks(
         except Exception as e:
             if progress:
                 progress(0, desc="Critical error")
+            if maybe_set_vram_oom_alert(state, model_label="FlashVSR+", text=str(e), settings=locals().get("settings")):
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) — FlashVSR+", duration=None)
             yield (
                 "❌ Critical error",
                 f"Error: {str(e)}",

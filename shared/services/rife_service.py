@@ -22,6 +22,7 @@ from shared.logging_utils import RunLogger
 from shared.models.rife_meta import get_rife_metadata, get_rife_default_model
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.error_handling import logger as error_logger
+from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
 
 
 # Defaults and ordering --------------------------------------------------------
@@ -554,6 +555,8 @@ def build_rife_callbacks(
         try:
             state = state or {"seed_controls": {}, "operation_status": "ready"}
             state["operation_status"] = "running"
+            # Clear any previous VRAM OOM banner at the start of a new run.
+            clear_vram_oom_alert(state)
             seed_controls = state.get("seed_controls", {})
             
             settings_dict = _rife_dict_from_args(list(args))
@@ -701,6 +704,10 @@ def build_rife_callbacks(
                 )
                 
                 status = "✅ RIFE chunked processing complete" if rc == 0 else f"⚠️ RIFE chunking failed (code {rc})"
+                if rc != 0 and maybe_set_vram_oom_alert(state, model_label="RIFE", text=clog, settings=settings):
+                    state["operation_status"] = "error"
+                    status = "🚫 Out of VRAM (GPU) — see banner above"
+                    show_vram_oom_modal(state, title="Out of VRAM (GPU) — RIFE", duration=None)
                 
                 # Build comparison for chunked output
                 video_comp_html_update = gr.update(value="", visible=False)
@@ -909,7 +916,12 @@ def build_rife_callbacks(
                             processing_complete = True
                             break
                         elif update_type == "error":
-                            yield ("❌ RIFE processing failed", f"Error: {data}", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                            if maybe_set_vram_oom_alert(state, model_label="RIFE", text=data, settings=rife_settings):
+                                state["operation_status"] = "error"
+                                show_vram_oom_modal(state, title="Out of VRAM (GPU) — RIFE", duration=None)
+                                yield ("🚫 Out of VRAM (GPU) — see banner above", f"Error: {data}", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                            else:
+                                yield ("❌ RIFE processing failed", f"Error: {data}", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                             return
                     except queue.Empty:
                         continue
@@ -919,6 +931,10 @@ def build_rife_callbacks(
                     return
 
                 status = "✅ RIFE complete" if result.returncode == 0 else f"⚠️ RIFE exited with code {result.returncode}"
+                if result.returncode != 0 and maybe_set_vram_oom_alert(state, model_label="RIFE", text=result.log, settings=rife_settings):
+                    state["operation_status"] = "error"
+                    status = "🚫 Out of VRAM (GPU) — see banner above"
+                    show_vram_oom_modal(state, title="Out of VRAM (GPU) — RIFE", duration=None)
                 final_output_path = result.output_path
             else:
                 # No RIFE processing, use the current input as final output
@@ -1018,6 +1034,8 @@ def build_rife_callbacks(
             error_msg = f"Critical error in RIFE processing: {str(e)}"
             state = state or {}
             state["operation_status"] = "error"
+            if maybe_set_vram_oom_alert(state, model_label="RIFE", text=str(e), settings=locals().get("settings")):
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) — RIFE", duration=None)
             yield ("❌ Critical error", error_msg, gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
 
     def cancel():

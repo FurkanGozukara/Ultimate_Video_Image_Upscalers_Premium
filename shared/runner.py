@@ -295,6 +295,13 @@ class Runner:
                 original_filename=settings.get("_original_filename"),  # Preserve user's filename
             )
 
+        # IMPORTANT: If we predicted a FILE output (e.g., .mp4 or single-image .png),
+        # pass that exact path to the CLI so the real output matches our collision-safe
+        # prediction. Otherwise the CLI may overwrite the base name and the UI won't
+        # find the expected *_0001 file.
+        if predicted_output and predicted_output.suffix:
+            cli_output_arg = str(predicted_output)
+
         # FIXED: Pass cli_output_arg to command builder (not effective_output_override)
         cmd = self._build_seedvr2_cmd(cli_path, settings, format_for_cli, preview_only, output_override=cli_output_arg)
 

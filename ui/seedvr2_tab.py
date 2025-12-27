@@ -425,17 +425,6 @@ def seedvr2_tab(
             # Performance & Compile (moved here: directly above Output & Metadata)
             gr.Markdown("#### ⚡ Performance & Compile")
             
-            # Show compile availability warning if not available
-            if not compile_available:
-                gr.Markdown(
-                    f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
-                    f'<strong>⚠️ Torch.compile Unavailable</strong><br>'
-                    f'Compile options are disabled. Install Visual Studio Build Tools (Windows) or ensure CUDA is available.<br>'
-                    f'Compilation provides 2-3x speedup but is not required for processing.'
-                    f'</div>',
-                    elem_classes="warning-text"
-                )
-            
             # Validate attention_mode value before using it
             attention_value = values[34] if len(values) > 34 else "sdpa"
             if attention_value not in ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"]:
