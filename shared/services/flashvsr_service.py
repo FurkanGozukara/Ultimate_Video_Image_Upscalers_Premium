@@ -71,9 +71,11 @@ def flashvsr_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
     Get default FlashVSR+ settings aligned with CLI defaults.
     Applies model-specific metadata when model_name is provided.
     """
+    # IMPORTANT: do not import torch in the parent Gradio process.
+    # Use NVML-based detection (nvidia-smi) via shared.gpu_utils instead.
     try:
-        import torch
-        cuda_default = "auto" if torch.cuda.is_available() else "cpu"
+        from shared.gpu_utils import get_gpu_info
+        cuda_default = "auto" if get_gpu_info() else "cpu"
     except Exception:
         cuda_default = "cpu"
     
@@ -191,16 +193,18 @@ def _enforce_flashvsr_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) 
             
             # Validate CUDA device ID is actually available
             try:
-                import torch
-                if torch.cuda.is_available():
-                    device_count = torch.cuda.device_count()
-                    device_id_str = cfg["device"].replace("cuda:", "")
-                    if device_id_str.isdigit():
-                        device_id = int(device_id_str)
-                        if device_id >= device_count:
-                            error_logger.warning(f"Device ID {device_id} not available (only {device_count} GPUs detected) - falling back to auto")
-                            cfg["device"] = "auto"
-                            cfg["_device_validation_warning"] = f"Requested GPU {device_id} not found, using auto-select"
+                from shared.gpu_utils import get_gpu_info
+
+                device_count = len(get_gpu_info())
+                device_id_str = str(cfg.get("device", "")).replace("cuda:", "").strip()
+                if device_id_str.isdigit():
+                    device_id = int(device_id_str)
+                    if device_count == 0 or device_id >= device_count:
+                        error_logger.warning(
+                            f"Device ID {device_id} not available (detected {device_count} GPU(s)) - falling back to auto"
+                        )
+                        cfg["device"] = "auto"
+                        cfg["_device_validation_warning"] = f"Requested GPU {device_id} not found, using auto-select"
             except Exception as e:
                 error_logger.warning(f"Failed to validate device ID: {e}")
         

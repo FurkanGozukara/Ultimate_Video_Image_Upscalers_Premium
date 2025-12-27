@@ -65,20 +65,22 @@ def flashvsr_tab(
             return state
         shared_state.value = update_status(shared_state.value)
 
-    # GPU detection and warnings
+    # GPU detection and warnings (parent-process safe: NO torch import)
     cuda_available = False
     cuda_count = 0
     gpu_hint = "CUDA detection in progress..."
     
     try:
-        import torch
-        cuda_available = torch.cuda.is_available()
-        cuda_count = torch.cuda.device_count() if cuda_available else 0
+        from shared.gpu_utils import get_gpu_info
+
+        gpus = get_gpu_info()
+        cuda_count = len(gpus)
+        cuda_available = cuda_count > 0
         
-        if cuda_available and cuda_count > 0:
+        if cuda_available:
             gpu_hint = f"✅ Detected {cuda_count} CUDA GPU(s) - GPU acceleration available\n⚠️ FlashVSR+ uses single GPU only (multi-GPU not supported)"
         else:
-            gpu_hint = "⚠️ CUDA not available - Processing will use CPU (significantly slower)"
+            gpu_hint = "⚠️ CUDA not detected (nvidia-smi unavailable or no NVIDIA GPU) - Processing will use CPU (significantly slower)"
     except Exception as e:
         gpu_hint = f"❌ CUDA detection failed: {str(e)}"
         cuda_available = False

@@ -30,9 +30,11 @@ def rife_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
     Get default RIFE settings aligned with RIFE CLI.
     Applies model-specific metadata when model_name is provided.
     """
+    # IMPORTANT: do not import torch in the parent Gradio process.
+    # Use NVML-based detection (nvidia-smi) via shared.gpu_utils instead.
     try:
-        import torch
-        cuda_default = "0" if torch.cuda.is_available() else ""
+        from shared.gpu_utils import get_gpu_info
+        cuda_default = "0" if get_gpu_info() else ""
     except Exception:
         cuda_default = ""
     
@@ -381,21 +383,12 @@ def _apply_video_editing(input_path: str, output_path: str, settings: Dict[str, 
 def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
     """Validate CUDA device specification."""
     try:
-        import torch
-        
         if not cuda_spec:
             return None
-        if not torch.cuda.is_available():
-            return "CUDA is not available on this system."
-        
-        devices = [d.strip() for d in str(cuda_spec).split(",") if d.strip() != ""]
-        count = torch.cuda.device_count()
-        invalid = [d for d in devices if (not d.isdigit()) or int(d) >= count]
-        if invalid:
-            return f"Invalid CUDA device id(s): {', '.join(invalid)}. Available: 0-{count-1}"
+        expanded = expand_cuda_device_spec(cuda_spec)
+        return validate_cuda_device_spec(expanded)
     except Exception as exc:
         return f"CUDA validation failed: {exc}"
-    return None
 
 
 def _ffmpeg_available() -> bool:

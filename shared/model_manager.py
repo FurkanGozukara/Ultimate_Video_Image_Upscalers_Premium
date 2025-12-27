@@ -16,6 +16,7 @@ Key Features:
 """
 
 import gc
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -23,12 +24,15 @@ from enum import Enum
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 import logging
 
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None
+def _get_torch():
+    """
+    Return already-imported torch module if present.
+
+    IMPORTANT: We intentionally do NOT import torch here.
+    Importing torch in the parent Gradio process can permanently increase RAM usage,
+    and certain CUDA queries can create a CUDA context (hundreds of MB VRAM reserved).
+    """
+    return sys.modules.get("torch")
 
 
 class ModelState(Enum):
@@ -120,11 +124,16 @@ class ModelManager:
 
     def _get_memory_usage(self) -> int:
         """Get current GPU memory usage in MB"""
-        if not TORCH_AVAILABLE or not torch.cuda.is_available():
+        torch = _get_torch()
+        if torch is None or not hasattr(torch, "cuda"):
             return 0
-
         try:
-            return torch.cuda.memory_allocated() // (1024 * 1024)
+            # Avoid creating a CUDA context just to read memory in the parent process.
+            if hasattr(torch.cuda, "is_initialized") and not torch.cuda.is_initialized():
+                return 0
+            if not torch.cuda.is_available():
+                return 0
+            return int(torch.cuda.memory_allocated() // (1024 * 1024))
         except Exception:
             return 0
 
@@ -138,48 +147,53 @@ class ModelManager:
         Returns:
             (success, message)
         """
-        if not TORCH_AVAILABLE:
-            return True, "PyTorch not available"
-        
+        # Never import torch here. Only act if torch is already loaded (in-app mode).
+        from .gpu_utils import clear_cuda_cache
+
+        torch = _get_torch()
         initial_mem = 0
         final_mem = 0
-        
+
         try:
-            if torch.cuda.is_available():
-                # Record memory before cleanup
+            cuda_ready = (
+                torch is not None
+                and hasattr(torch, "cuda")
+                and hasattr(torch.cuda, "is_initialized")
+                and torch.cuda.is_initialized()
+                and torch.cuda.is_available()
+            )
+
+            if cuda_ready:
                 if verify:
-                    initial_mem = torch.cuda.memory_allocated() // (1024 * 1024)  # MB
-                
-                # Clear CUDA cache multiple times for thorough cleanup
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-                
-                # Force another pass
+                    try:
+                        initial_mem = int(torch.cuda.memory_allocated() // (1024 * 1024))
+                    except Exception:
+                        initial_mem = 0
+
+                clear_cuda_cache()
                 gc.collect()
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-                
-                # Record memory after cleanup
+                clear_cuda_cache()
+
                 if verify:
-                    final_mem = torch.cuda.memory_allocated() // (1024 * 1024)  # MB
+                    try:
+                        final_mem = int(torch.cuda.memory_allocated() // (1024 * 1024))
+                    except Exception:
+                        final_mem = initial_mem
                     freed_mb = initial_mem - final_mem
-                    
                     if freed_mb > 0:
                         msg = f"VRAM cleanup successful: freed {freed_mb}MB (was {initial_mem}MB, now {final_mem}MB)"
                         self._logger.info(msg)
                         return True, msg
-                    else:
-                        msg = f"VRAM cleanup completed (memory stable at {final_mem}MB)"
-                        return True, msg
-                else:
-                    return True, "VRAM cleared (verification disabled)"
-                    
+                    return True, f"VRAM cleanup completed (memory stable at {final_mem}MB)"
+
+                return True, "VRAM cleared"
+
         except Exception as e:
             msg = f"Failed to clear CUDA cache: {e}"
             self._logger.warning(msg)
             return False, msg
-        
-        # Force garbage collection even if CUDA unavailable
+
+        # Force garbage collection even if CUDA not active in this process.
         gc.collect()
         return True, "Garbage collection completed"
 
@@ -488,20 +502,20 @@ class ModelManager:
                     "last_used": model_info.last_used
                 }
 
-        # Try to get actual GPU memory info
-        gpu_info = {}
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            try:
-                for i in range(torch.cuda.device_count()):
-                    props = torch.cuda.get_device_properties(i)
-                    gpu_info[f"cuda:{i}"] = {
-                        "allocated_mb": torch.cuda.memory_allocated(i) // (1024 * 1024),
-                        "reserved_mb": torch.cuda.memory_reserved(i) // (1024 * 1024),
-                        "total_mb": props.total_memory // (1024 * 1024),
-                        "name": props.name
-                    }
-            except Exception:
-                pass
+        # NVML-based GPU info (does not create a CUDA context in this process)
+        gpu_info: Dict[str, Any] = {}
+        try:
+            from .gpu_utils import get_gpu_info as nvml_get_gpu_info
+
+            for gpu in nvml_get_gpu_info():
+                gpu_info[f"cuda:{gpu.id}"] = {
+                    "name": gpu.name,
+                    "total_gb": gpu.total_memory_gb,
+                    "free_gb": gpu.available_memory_gb,
+                    "compute_capability": gpu.compute_capability,
+                }
+        except Exception:
+            pass
 
         return {
             "total_tracked_usage_mb": total_usage,
@@ -523,22 +537,37 @@ class ModelManager:
                 (current_time - model_info.last_used) > max_idle_time):
                 models_to_unload.append(model_id)
 
+        unloaded = 0
         for model_id in models_to_unload:
-            self.unload_model(model_id)
+            with self._lock:
+                model_info = self.loaded_models.get(model_id)
+                if not model_info or model_info.state != ModelState.LOADED:
+                    continue
+                self._unload_model(model_info)
+                try:
+                    del self.loaded_models[model_id]
+                except Exception:
+                    pass
+                if self.current_model_id == model_id:
+                    self.current_model_id = None
+                unloaded += 1
 
-        return len(models_to_unload)
+        if unloaded:
+            self._clear_vram(verify=False)
+        return unloaded
 
     def force_vram_cleanup(self):
         """
         Force cleanup of GPU memory (PyTorch CUDA cache).
         """
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            try:
-                torch.cuda.empty_cache()
-                return True
-            except Exception:
-                pass
-        return False
+        try:
+            from .gpu_utils import clear_cuda_cache
+
+            # Only clears if torch is already imported and CUDA is initialized.
+            clear_cuda_cache()
+            return True
+        except Exception:
+            return False
 
 
 # Global instance

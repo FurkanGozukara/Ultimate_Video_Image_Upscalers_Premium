@@ -106,15 +106,20 @@ def seedvr2_tab(
         gpu_hint = "❌ CRITICAL: ffmpeg not found. Install ffmpeg to enable video processing."
 
     try:
-        import torch
-        cuda_available = torch.cuda.is_available()
-        cuda_count = torch.cuda.device_count() if cuda_available else 0
-        
+        # IMPORTANT: Do NOT import torch here. Using torch.cuda in the parent Gradio
+        # process can create a persistent CUDA context (~500MB VRAM) that never goes
+        # away until the UI exits. We use NVML (`nvidia-smi`) via shared.gpu_utils instead.
+        from shared.gpu_utils import get_gpu_info
+
+        gpus = [] if is_macos else get_gpu_info()
+        cuda_count = len(gpus)
+        cuda_available = (not is_macos) and cuda_count > 0
+
         if is_macos:
             gpu_hint = "macOS detected - CUDA device selection disabled (not supported by SeedVR2 CLI)"
-            compile_available = False  # macOS doesn't support torch.compile with MPS well
+            compile_available = False
         else:
-            if cuda_available and cuda_count > 0:
+            if cuda_available:
                 gpu_hint = f"✅ Detected {cuda_count} CUDA GPU(s) - GPU acceleration available"
                 # Check if VS Build Tools available for compile
                 from shared.health import is_vs_build_tools_available
@@ -122,16 +127,17 @@ def seedvr2_tab(
                 if not compile_available:
                     gpu_hint += "\n⚠️ VS Build Tools not detected - torch.compile will be disabled"
             else:
-                gpu_hint = "⚠️ CUDA not available - GPU-only features disabled. Processing will use CPU (significantly slower)"
+                gpu_hint = "⚠️ CUDA not detected (nvidia-smi unavailable or no NVIDIA GPU) - GPU-only features disabled. Processing will use CPU (significantly slower)"
                 compile_available = False
-        
+
         # Append ffmpeg status to GPU hint
         if not ffmpeg_available:
             gpu_hint = f"❌ CRITICAL: ffmpeg not found\n{gpu_hint}"
-        
+
     except Exception as e:
         gpu_hint = f"❌ CUDA detection failed: {str(e)}"
         cuda_available = False
+        cuda_count = 0
         compile_available = False
 
     # Layout: Two-column design
@@ -1530,56 +1536,49 @@ def seedvr2_tab(
         if not cuda_device_val or not cuda_device_val.strip():
             return gr.update(value="", visible=False)
         
+        # IMPORTANT: No torch import here (keeps parent process VRAM at 0).
         try:
-            import torch
-            
-            if not torch.cuda.is_available():
-                return gr.update(value="⚠️ CUDA not available on this system. GPU acceleration disabled.", visible=True)
-            
+            if not cuda_available or cuda_count <= 0:
+                return gr.update(value="⚠️ CUDA not detected on this system. GPU acceleration disabled.", visible=True)
+
             # Parse device spec (handle "all" and comma-separated IDs)
             device_str = str(cuda_device_val).strip()
-            
             if device_str.lower() == "all":
-                device_count = torch.cuda.device_count()
-                return gr.update(value=f"✅ Using all {device_count} available GPU(s)", visible=True)
-            
-            # Parse comma-separated device IDs
+                return gr.update(value=f"✅ Using all {cuda_count} available GPU(s)", visible=True)
+
             devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
-            device_count = torch.cuda.device_count()
-            
-            # Validate each device ID
-            invalid_devices = []
-            valid_devices = []
-            
+
+            invalid_devices: List[str] = []
+            valid_devices: List[int] = []
+
             for device in devices:
                 if not device.isdigit():
                     invalid_devices.append(device)
+                    continue
+                device_id = int(device)
+                if device_id >= cuda_count:
+                    invalid_devices.append(f"{device} (max: {cuda_count-1})")
                 else:
-                    device_id = int(device)
-                    if device_id >= device_count:
-                        invalid_devices.append(f"{device} (max: {device_count-1})")
-                    else:
-                        valid_devices.append(device_id)
-            
+                    valid_devices.append(device_id)
+
             if invalid_devices:
                 return gr.update(
-                    value=f"❌ Invalid CUDA device ID(s): {', '.join(invalid_devices)}. Available devices: 0-{device_count-1}",
-                    visible=True
+                    value=f"❌ Invalid CUDA device ID(s): {', '.join(invalid_devices)}. Available devices: 0-{cuda_count-1}",
+                    visible=True,
                 )
-            
+
             if len(valid_devices) > 1:
                 return gr.update(
-                    value=f"✅ Multi-GPU: Using {len(valid_devices)} GPUs ({', '.join(map(str, valid_devices))})\n⚠️ Note: Multi-GPU disables model caching (cache_dit/cache_vae auto-disabled)",
-                    visible=True
+                    value=(
+                        f"✅ Multi-GPU: Using {len(valid_devices)} GPUs ({', '.join(map(str, valid_devices))})\n"
+                        f"⚠️ Note: Multi-GPU disables model caching (cache_dit/cache_vae auto-disabled)"
+                    ),
+                    visible=True,
                 )
-            elif len(valid_devices) == 1:
-                return gr.update(
-                    value=f"✅ Single GPU: Using GPU {valid_devices[0]}",
-                    visible=True
-                )
-            else:
-                return gr.update(value="", visible=False)
-                
+            if len(valid_devices) == 1:
+                return gr.update(value=f"✅ Single GPU: Using GPU {valid_devices[0]}", visible=True)
+
+            return gr.update(value="", visible=False)
         except Exception as e:
             return gr.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
     

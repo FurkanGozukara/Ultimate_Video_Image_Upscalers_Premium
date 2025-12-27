@@ -71,94 +71,53 @@ def _get_default_attention_mode() -> str:
     Returns:
         Best attention mode for detected GPU architecture
     """
+    # IMPORTANT:
+    # Do NOT import torch / flash-attn / sageattention in the parent Gradio process.
+    # Importing torch can permanently increase RAM usage, and some CUDA queries can
+    # create a CUDA context that reserves hundreds of MB of VRAM for the life of the UI.
+    #
+    # We use NVML (nvidia-smi) via shared.gpu_utils to detect compute capability without
+    # initializing CUDA, and `importlib.util.find_spec()` to check optional backends
+    # without importing their CUDA extensions.
     try:
-        import torch
-        
-        # Check if CUDA is available (all attention modes except sdpa require CUDA)
-        if not torch.cuda.is_available():
+        from shared.gpu_utils import get_gpu_info
+        import importlib.util
+
+        gpus = get_gpu_info()
+        if not gpus:
             return "sdpa"
-        
-        # Get GPU compute capability
-        device_props = torch.cuda.get_device_properties(0)
-        compute_cap = (device_props.major, device_props.minor)
-        gpu_name = device_props.name
-        
-        # Blackwell GPUs (12.0+) - Latest architecture
-        if compute_cap[0] >= 12:
-            # Check for SageAttention 3 (optimized for Blackwell)
-            try:
-                import sageattn3
-                return "sageattn_3"  # Fastest for Blackwell
-            except ImportError:
-                pass
-            
-            # Fall back to Flash Attention 3
-            try:
-                import flash_attn
-                if hasattr(flash_attn, '__version__'):
-                    # FA3 available in flash-attn 2.7.0+
-                    return "flash_attn_3"
-            except ImportError:
-                pass
-            
-            # Last resort: Flash Attention 2 (still fast)
-            try:
-                import flash_attn
+
+        compute_cap = gpus[0].compute_capability
+        has_flash_attn = importlib.util.find_spec("flash_attn") is not None
+        has_sageattention = importlib.util.find_spec("sageattention") is not None
+        has_sageattn3 = importlib.util.find_spec("sageattn3") is not None
+
+        # If we can't detect architecture, pick a safe default.
+        if not compute_cap:
+            return "flash_attn_2" if has_flash_attn else "sdpa"
+
+        major, minor = compute_cap
+
+        # Blackwell (12.x): prefer sageattn_3 if installed, else flash_attn_2, else sdpa.
+        if major >= 12:
+            if has_sageattn3:
+                return "sageattn_3"
+            return "flash_attn_2" if has_flash_attn else "sdpa"
+
+        # Hopper (9.x-11.x): flash_attn_2 is generally safe if installed, else sageattn_2, else sdpa.
+        if major >= 9:
+            if has_flash_attn:
                 return "flash_attn_2"
-            except ImportError:
-                return "sdpa"
-        
-        # Hopper GPUs (9.0-11.x) - H100, etc.
-        elif compute_cap[0] >= 9:
-            # Check for Flash Attention 3 (optimized for Hopper)
-            try:
-                import flash_attn
-                if hasattr(flash_attn, '__version__'):
-                    return "flash_attn_3"  # Best for Hopper
-            except ImportError:
-                pass
-            
-            # Fall back to SageAttention 2
-            try:
-                import sageattention
+            if has_sageattention:
                 return "sageattn_2"
-            except ImportError:
-                pass
-            
-            # Flash Attention 2 still good
-            try:
-                import flash_attn
-                return "flash_attn_2"
-            except ImportError:
-                return "sdpa"
-        
-        # Ada Lovelace / Ampere GPUs (8.0-8.9) - RTX 40xx, RTX 30xx, A100
-        elif compute_cap[0] == 8:
-            # Flash Attention 2 is optimal for Ampere/Ada
-            try:
-                import flash_attn
-                # Verify it's actually functional
-                from flash_attn import flash_attn_func
-                return "flash_attn_2"  # Best for Ampere/Ada
-            except ImportError:
-                return "sdpa"
-        
-        # Turing GPUs (7.5) - RTX 20xx, GTX 16xx
-        elif compute_cap[0] == 7 and compute_cap[1] >= 5:
-            # Flash attention CAN run on Turing but sdpa is often faster
-            # Use sdpa by default for compatibility
             return "sdpa"
-        
-        # Older GPUs (<7.5) - Pascal, Maxwell, Kepler
-        else:
-            # Flash attention not supported, sdpa only option
-            return "sdpa"
-            
-    except ImportError:
-        # PyTorch not available
+
+        # Ampere/Ada (8.x): flash_attn_2 if installed.
+        if major >= 8:
+            return "flash_attn_2" if has_flash_attn else "sdpa"
+
         return "sdpa"
     except Exception as e:
-        # Any other error, fall back safely to sdpa
         print(f"Warning: Attention mode detection failed ({e}), using sdpa")
         return "sdpa"
 
@@ -172,9 +131,11 @@ def seedvr2_defaults(model_name: Optional[str] = None, base_dir: Optional[Path] 
         model_name: Optional model name to apply metadata from
         base_dir: Optional base directory (app root) to resolve model_dir path
     """
+    # IMPORTANT: do not import torch here (parent Gradio process must remain GPU-free).
+    # Use NVML-based detection (nvidia-smi) instead.
     try:
-        import torch
-        cuda_default = "0" if torch.cuda.is_available() else ""
+        from shared.gpu_utils import get_gpu_info
+        cuda_default = "0" if get_gpu_info() else ""
     except Exception:
         cuda_default = ""
     

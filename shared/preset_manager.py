@@ -199,20 +199,27 @@ class PresetManager:
                 # Attention mode GPU compatibility check
                 attention_mode = str(validated.get("attention_mode", "sdpa"))
                 try:
-                    import torch
-                    if torch.cuda.is_available():
-                        device_props = torch.cuda.get_device_properties(0)
-                        compute_cap = (device_props.major, device_props.minor)
-                        
+                    # Use NVML-based GPU probing to avoid importing torch in the parent process.
+                    from .gpu_utils import get_gpu_info
+
+                    gpus = get_gpu_info()
+                    compute_cap = gpus[0].compute_capability if gpus else None
+                    if compute_cap:
                         # flash_attn_3 and sageattn_3 require Hopper+ (9.0+)
                         if attention_mode in ("flash_attn_3", "sageattn_3") and compute_cap[0] < 9:
                             validated["attention_mode"] = "flash_attn_2" if compute_cap[0] >= 8 else "sdpa"
-                            print(f"⚠️ Preset '{preset_name}': {attention_mode} requires Hopper+ GPU (9.0+), falling back to {validated['attention_mode']}")
-                        
+                            print(
+                                f"⚠️ Preset '{preset_name}': {attention_mode} requires Hopper+ GPU (9.0+), "
+                                f"falling back to {validated['attention_mode']}"
+                            )
+
                         # flash_attn_2 works best on Ampere+ (8.0+)
                         elif attention_mode == "flash_attn_2" and compute_cap[0] < 8:
                             validated["attention_mode"] = "sdpa"
-                            print(f"⚠️ Preset '{preset_name}': flash_attn_2 requires Ampere+ GPU (8.0+), falling back to sdpa")
+                            print(
+                                f"⚠️ Preset '{preset_name}': flash_attn_2 requires Ampere+ GPU (8.0+), "
+                                f"falling back to sdpa"
+                            )
                 except Exception:
                     pass  # Skip GPU check if torch unavailable
             

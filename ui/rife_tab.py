@@ -64,21 +64,22 @@ def rife_tab(
             return state
         shared_state.value = update_status(shared_state.value)
 
-    # GPU availability check (like SeedVR2/GAN tabs)
+    # GPU availability check (parent-process safe: NO torch import)
     import platform
     cuda_available = False
     cuda_count = 0
     gpu_hint = "CUDA detection in progress..."
     
     try:
-        import torch
-        cuda_available = torch.cuda.is_available()
-        cuda_count = torch.cuda.device_count() if cuda_available else 0
+        from shared.gpu_utils import get_gpu_info
+        gpus = get_gpu_info()
+        cuda_count = len(gpus)
+        cuda_available = cuda_count > 0
         
-        if cuda_available and cuda_count > 0:
+        if cuda_available:
             gpu_hint = f"✅ Detected {cuda_count} CUDA GPU(s) - GPU acceleration available"
         else:
-            gpu_hint = "⚠️ CUDA not available - GPU acceleration disabled. Processing will use CPU (significantly slower)"
+            gpu_hint = "⚠️ CUDA not detected (nvidia-smi unavailable or no NVIDIA GPU) - GPU acceleration disabled. Processing will use CPU (significantly slower)"
     except Exception as e:
         gpu_hint = f"❌ CUDA detection failed: {str(e)}"
         cuda_available = False
@@ -579,13 +580,11 @@ def rife_tab(
             return gr.update(value="", visible=False)
         
         try:
-            import torch
-            
-            if not torch.cuda.is_available():
-                return gr.update(value="⚠️ CUDA not available. CPU mode will be used (very slow).", visible=True)
+            if not cuda_available or cuda_count <= 0:
+                return gr.update(value="⚠️ CUDA not detected. CPU mode will be used (very slow).", visible=True)
             
             device_str = str(cuda_device_val).strip()
-            device_count = torch.cuda.device_count()
+            device_count = cuda_count
             
             if device_str.lower() == "all":
                 return gr.update(value=f"⚠️ RIFE uses single GPU only. Will use GPU 0 (ignoring 'all')", visible=True)

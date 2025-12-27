@@ -18,18 +18,19 @@ import numpy as np
 def _check_gfpgan() -> bool:
     """Check if GFPGAN is available"""
     try:
-        import gfpgan  # noqa: F401
-        return True
-    except ImportError:
+        import importlib.util
+        # Use spec lookup to avoid importing heavy ML stacks (torch/CUDA) in the parent process.
+        return importlib.util.find_spec("gfpgan") is not None
+    except Exception:
         return False
 
 
 def _check_codeformer() -> bool:
     """Check if CodeFormer is available"""
     try:
-        import codeformer  # noqa: F401
-        return True
-    except ImportError:
+        import importlib.util
+        return importlib.util.find_spec("codeformer") is not None
+    except Exception:
         return False
 
 

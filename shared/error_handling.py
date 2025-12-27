@@ -122,26 +122,12 @@ def validate_cuda_device(device_spec: str) -> Tuple[bool, Optional[str]]:
         return True, None  # Empty is OK (will use defaults)
     
     try:
-        import torch
-        
-        if not torch.cuda.is_available():
-            return False, "❌ CUDA is not available on this system"
-        
-        devices = [d.strip() for d in device_spec.split(",") if d.strip()]
-        count = torch.cuda.device_count()
-        
-        for device in devices:
-            if not device.isdigit():
-                return False, f"❌ Invalid device ID '{device}' - must be numeric"
-            
-            device_id = int(device)
-            if device_id >= count:
-                return False, f"❌ Device ID {device_id} not available. Available: 0-{count-1}"
-        
-        return True, None
-        
-    except ImportError:
-        return False, "❌ PyTorch not available - cannot validate CUDA devices"
+        # Use NVML-based validation (nvidia-smi) to avoid importing torch in the parent process.
+        from .gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
+
+        expanded = expand_cuda_device_spec(device_spec)
+        err = validate_cuda_device_spec(expanded)
+        return (err is None), err
     except Exception as e:
         return False, f"❌ Error validating CUDA devices: {str(e)}"
 

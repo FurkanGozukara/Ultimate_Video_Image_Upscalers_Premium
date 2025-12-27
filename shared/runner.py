@@ -24,11 +24,6 @@ from .path_utils import (
 from .model_manager import get_model_manager, ModelType
 from .command_logger import get_command_logger
 
-try:
-    import torch  # type: ignore
-except Exception:
-    torch = None  # runtime check fallback
-
 
 class RunResult:
     def __init__(self, returncode: int, output_path: Optional[str], log: str):
@@ -1157,8 +1152,9 @@ class Runner:
             return
         if self._last_model_id and self._last_model_id != model_id:
             try:
-                if torch:
-                    torch.cuda.empty_cache()
+                # Avoid importing torch here; only clear if torch is already loaded and CUDA initialized.
+                from .gpu_utils import clear_cuda_cache
+                clear_cuda_cache()
             except Exception:
                 pass
         self._last_model_id = model_id
