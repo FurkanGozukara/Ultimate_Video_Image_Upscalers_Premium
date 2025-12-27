@@ -122,38 +122,52 @@ def _check_vs_build_tools() -> Dict[str, Optional[str]]:
                         
                         # Level 2: Quick execution test (with lenient timeout)
                         result = subprocess.run(
-                            ["cmd", "/c", f'call "{found}" x64 >nul 2>&1 && echo VCVARS_SUCCESS'],
+                            # Do NOT silence output here: if vcvars activation fails, we want the
+                            # real reason surfaced (missing MSVC workload, broken install, etc.).
+                            ["cmd", "/c", f'call "{found}" x64 && echo VCVARS_SUCCESS'],
                             capture_output=True,
                             text=True,
                             timeout=15,
                             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
                         )
                         
-                        if "VCVARS_SUCCESS" in result.stdout:
+                        if result.returncode == 0 and "VCVARS_SUCCESS" in result.stdout:
                             # Perfect: file exists, valid content, and execution works
                             return {
                                 "status": "ok",
                                 "detail": f"✅ VS Build Tools verified and working\nPath: {found}\nTorch.compile support: ENABLED"
                             }
                         else:
-                            # File valid, but execution failed (might be sandbox/permissions issue)
-                            # This is OK - subprocess mode will activate it properly
+                            # File exists and looks valid, but activation test failed.
+                            # In this app we rely on vcvarsall.bat in subprocess mode too, so this
+                            # is a real warning: torch.compile will likely fail until VS is repaired.
+                            stdout_tail = "\n".join((result.stdout or "").splitlines()[-25:])
+                            stderr_tail = "\n".join((result.stderr or "").splitlines()[-25:])
+                            details = [
+                                f"⚠️ VS Build Tools found but activation test FAILED",
+                                f"Path: {found}",
+                                "Torch.compile support: UNRELIABLE (vcvars activation failed)",
+                            ]
+                            if stdout_tail.strip():
+                                details.append("\n--- stdout (tail) ---\n" + stdout_tail)
+                            if stderr_tail.strip():
+                                details.append("\n--- stderr (tail) ---\n" + stderr_tail)
                             return {
-                                "status": "ok",
-                                "detail": f"✅ VS Build Tools detected at {found}\nTorch.compile will be available in subprocess mode\n(Health check execution failed, but file is valid)"
+                                "status": "warning",
+                                "detail": "\n".join(details)
                             }
                             
                     except subprocess.TimeoutExpired:
                         # Timeout doesn't mean file is invalid - could be slow system
                         return {
-                            "status": "ok",
-                            "detail": f"✅ VS Build Tools detected at {found}\nTorch.compile will be available\n(Validation timed out, but file exists)"
+                            "status": "warning",
+                            "detail": f"⚠️ VS Build Tools detected at {found}\nTorch.compile support: UNRELIABLE\n(Activation validation timed out)"
                         }
                     except Exception as exec_err:
                         # Execution test failed, but file content is valid
                         return {
-                            "status": "ok",
-                            "detail": f"✅ VS Build Tools detected at {found}\nTorch.compile will be available in subprocess mode\n(Execution test failed: {str(exec_err)[:50]}, but file is valid)"
+                            "status": "warning",
+                            "detail": f"⚠️ VS Build Tools detected at {found}\nTorch.compile support: UNRELIABLE\n(Activation validation failed: {str(exec_err)[:120]})"
                         }
                         
         except Exception as file_err:

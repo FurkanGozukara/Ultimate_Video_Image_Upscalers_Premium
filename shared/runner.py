@@ -305,6 +305,57 @@ class Runner:
             result = self._run_seedvr2_subprocess(cli_path, cmd, predicted_output, settings, on_progress)
 
             # -----------------------------------------------------------------
+            # Windows vcvars/Build Tools failure auto-fallback
+            # -----------------------------------------------------------------
+            # If torch.compile is requested, we wrap the CLI with vcvarsall.bat.
+            # If vcvars activation fails, `cmd /c` will exit quickly and Python never starts.
+            # We surface a clear marker ([VCVARS_ERROR]) from the wrapper and then retry once
+            # with torch.compile disabled so the run can still proceed.
+            compile_requested = bool(settings.get("compile_dit") or settings.get("compile_vae"))
+            vcvars_error = (
+                platform.system() == "Windows"
+                and compile_requested
+                and result.returncode != 0
+                and "[VCVARS_ERROR]" in (result.log or "")
+            )
+            if vcvars_error:
+                retry_msg = (
+                    "\n[SeedVR2] ⚠️ VS Build Tools activation failed, so torch.compile cannot run.\n"
+                    "[SeedVR2] ↻ Auto-retrying with torch.compile disabled.\n"
+                    "        To re-enable compile: install/repair Visual Studio Build Tools and the\n"
+                    "        'Desktop development with C++' workload (MSVC toolset).\n"
+                )
+                print(retry_msg, flush=True)
+                if on_progress:
+                    on_progress(retry_msg)
+
+                retry_settings = settings.copy()
+                retry_settings["compile_dit"] = False
+                retry_settings["compile_vae"] = False
+
+                retry_cmd = self._build_seedvr2_cmd(
+                    cli_path,
+                    retry_settings,
+                    format_for_cli,
+                    preview_only,
+                    output_override=cli_output_arg,
+                )
+                retry_result = self._run_seedvr2_subprocess(
+                    cli_path, retry_cmd, predicted_output, retry_settings, on_progress
+                )
+
+                combined_log = "\n".join(
+                    [
+                        "=== SeedVR2 attempt 1 (compile requested, vcvars activation failed) ===",
+                        result.log or "",
+                        "",
+                        "=== SeedVR2 attempt 2 (auto-fallback: compile disabled) ===",
+                        retry_result.log or "",
+                    ]
+                )
+                return RunResult(retry_result.returncode, retry_result.output_path, combined_log)
+
+            # -----------------------------------------------------------------
             # Windows hard-crash auto-retry
             # -----------------------------------------------------------------
             # Some CUDA extensions (flash-attn / sage-attn / triton) can hard-crash
@@ -1084,6 +1135,41 @@ class Runner:
         
         FIXED: Now surfaces warnings to UI via on_progress callback for transparency
         """
+        def _strip_compile_flags(command: List[str]) -> List[str]:
+            """
+            Remove torch.compile-related CLI args from a command list.
+
+            IMPORTANT: Some flags are boolean (no value) and others take a value.
+            The previous implementation incorrectly skipped the next token for
+            boolean flags like --compile_dit, which could delete unrelated args.
+            """
+            flags_no_value = {
+                "--compile_dit",
+                "--compile_vae",
+                "--compile_fullgraph",
+                "--compile_dynamic",
+            }
+            flags_with_value = {
+                "--compile_backend",
+                "--compile_mode",
+                "--compile_dynamo_cache_size_limit",
+                "--compile_dynamo_recompile_limit",
+            }
+
+            out: List[str] = []
+            i = 0
+            while i < len(command):
+                token = command[i]
+                if token in flags_no_value:
+                    i += 1
+                    continue
+                if token in flags_with_value:
+                    i += 2  # Skip flag + its value
+                    continue
+                out.append(token)
+                i += 1
+            return out
+
         if platform.system() != "Windows":
             return cmd
         
@@ -1101,21 +1187,12 @@ class Runner:
                 if on_progress:
                     on_progress(warning_msg)
                 
+                # Reflect runtime behavior in settings (avoid misleading logs/metadata)
+                settings["compile_dit"] = False
+                settings["compile_vae"] = False
+
                 # Remove compile-related flags from command
-                filtered_cmd = []
-                skip_next = False
-                for c in cmd:
-                    if skip_next:
-                        skip_next = False
-                        continue
-                    if c in ("--compile_dit", "--compile_vae", "--compile_backend", "--compile_mode",
-                            "--compile_fullgraph", "--compile_dynamic"):
-                        skip_next = True  # Skip the next argument too
-                        continue
-                    if c.startswith("--compile_dynamo_cache_size_limit=") or c.startswith("--compile_dynamo_recompile_limit="):
-                        continue
-                    filtered_cmd.append(c)
-                return filtered_cmd
+                return _strip_compile_flags(cmd)
             else:
                 # No compile requested and vcvars not found - proceed without vcvars
                 # Log a warning but don't block execution
@@ -1139,8 +1216,25 @@ class Runner:
         if on_progress:
             on_progress(f"✅ Using VS Build Tools for torch.compile: {vcvars_path}\n")
         quoted_cmd = " ".join(f'"{c}"' if " " in c else c for c in cmd)
-        wrapped = ["cmd", "/c", f'call "{vcvars_path}" x64 >nul 2>&1 && {quoted_cmd}']
-        return wrapped
+
+        # IMPORTANT:
+        # - We must not silently swallow vcvars failures. If vcvarsall.bat fails, `&&` prevents Python
+        #   from running, which otherwise looks like "compile failed with no output".
+        # - Capture vcvars output to a temp log and print it ONLY if vcvars/cl.exe checks fail.
+        # - Do NOT print that log if the Python command itself fails (unrelated errors should surface normally).
+        #
+        # We rely on %TEMP% (set to our temp_dir in _run_seedvr2_subprocess) to avoid writing to system temp.
+        vcvars_log = r"%TEMP%\seedvr2_vcvars.log"
+        wrapped_script = (
+            f'call "{vcvars_path}" x64 > "{vcvars_log}" 2>&1'
+            f' & if errorlevel 1 (echo [SeedVR2][VCVARS_ERROR] vcvarsall.bat failed. Install/repair VS Build Tools (Desktop development with C++).'
+            f' & type "{vcvars_log}" & exit /b 1)'
+            f' & where cl.exe >> "{vcvars_log}" 2>&1'
+            f' & if errorlevel 1 (echo [SeedVR2][VCVARS_ERROR] cl.exe not found after vcvarsall. Install MSVC toolset via VS Installer.'
+            f' & type "{vcvars_log}" & exit /b 1)'
+            f' & {quoted_cmd}'
+        )
+        return ["cmd", "/c", wrapped_script]
 
     def _maybe_clear_in_app_model(self, model_id: Optional[str]):
         """

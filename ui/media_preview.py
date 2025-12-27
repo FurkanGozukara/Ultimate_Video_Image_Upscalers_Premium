@@ -105,3 +105,5 @@ def preview_updates(path_val: Optional[str]) -> Tuple[gr.update, gr.update]:
     return img_upd, vid_upd
 
 
+
+
