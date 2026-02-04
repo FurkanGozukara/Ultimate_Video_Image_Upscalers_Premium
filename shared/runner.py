@@ -2,6 +2,7 @@ import io
 import os
 import platform
 import runpy
+import shutil
 import signal
 import subprocess
 import sys
@@ -445,17 +446,49 @@ class Runner:
         print(f"[SeedVR2] Model: {model_name}", flush=True)
         print(f"[SeedVR2] Resolution: {resolution}p", flush=True)
         
-        # Log the command being executed for debugging
+        # Prepare environment (optionally inject MSVC toolchain env for torch.compile on Windows)
+        env = os.environ.copy()
+
+        compile_requested = bool(settings.get("compile_dit") or settings.get("compile_vae"))
+        if platform.system() == "Windows" and compile_requested:
+            vcvars_path = self._find_vcvars()
+            if not vcvars_path:
+                warning_msg = (
+                    "⚠️ VS Build Tools not found; disabling torch.compile for compatibility.\n"
+                    "Install 'Desktop development with C++' workload from Visual Studio Installer for torch.compile support.\n"
+                )
+                self._log_lines.append(warning_msg.strip())
+                log_output(warning_msg)
+                settings["compile_dit"] = False
+                settings["compile_vae"] = False
+                cmd = self._strip_torch_compile_flags(cmd)
+            else:
+                vs_env, vs_detail = self._capture_vcvars_env(vcvars_path, arch="x64")
+                if not vs_env:
+                    vs_env, vs_detail = self._capture_vcvars_env(vcvars_path, arch="amd64")
+
+                if not vs_env:
+                    warning_msg = (
+                        "⚠️ VS Build Tools detected but could not be activated; running without torch.compile.\n"
+                        f"Path: {vcvars_path}\n"
+                        f"Reason: {vs_detail}\n"
+                    )
+                    self._log_lines.append(warning_msg.strip())
+                    log_output(warning_msg)
+                    settings["compile_dit"] = False
+                    settings["compile_vae"] = False
+                    cmd = self._strip_torch_compile_flags(cmd)
+                else:
+                    env.update(vs_env)
+                    log_output(f"✅ Using VS Build Tools for torch.compile: {vcvars_path}\n   {vs_detail}\n")
+
+        # Log the (final) command being executed for debugging
         cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
         log_output(f"[SeedVR2] Executing command:\n{cmd_str}\n")
 
-        # FIXED: Pass on_progress to _maybe_wrap_with_vcvars for transparent warning surfacing
-        # vcvars wrapper now handles compile detection and warning display
-        cmd = self._maybe_wrap_with_vcvars(cmd, settings, on_progress)
-
         log_output("[SeedVR2] Starting subprocess (CLI will handle model loading)...\n")
 
-        env = os.environ.copy()
+        # Ensure our temp dir is used (even if vcvarsall overwrote TEMP/TMP in captured env)
         env["TEMP"] = str(self.temp_dir)
         env["TMP"] = str(self.temp_dir)
         env.setdefault("PYTHONWARNINGS", "ignore")
@@ -917,6 +950,99 @@ class Runner:
     # ------------------------------------------------------------------ #
     # Command builder
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _strip_torch_compile_flags(command: List[str]) -> List[str]:
+        """
+        Remove torch.compile-related CLI args from a command list.
+
+        IMPORTANT:
+        - Some flags are boolean (no value) and others take a value.
+        - We must NOT skip the next token for boolean flags like --compile_dit,
+          otherwise we can accidentally delete unrelated args.
+        """
+        flags_no_value = {
+            "--compile_dit",
+            "--compile_vae",
+            "--compile_fullgraph",
+            "--compile_dynamic",
+        }
+        flags_with_value = {
+            "--compile_backend",
+            "--compile_mode",
+            "--compile_dynamo_cache_size_limit",
+            "--compile_dynamo_recompile_limit",
+        }
+
+        out: List[str] = []
+        i = 0
+        while i < len(command):
+            token = command[i]
+            if token in flags_no_value:
+                i += 1
+                continue
+            if token in flags_with_value:
+                i += 2  # Skip flag + its value
+                continue
+            out.append(token)
+            i += 1
+        return out
+
+    def _capture_vcvars_env(self, vcvars_path: Path, arch: str = "x64", timeout: int = 25) -> Tuple[Optional[Dict[str, str]], str]:
+        """
+        Run vcvarsall.bat and capture the resulting environment via `set`.
+
+        This is more robust than wrapping the whole Python command in `cmd /c ...`:
+        - avoids complex quoting issues
+        - keeps subprocess stdout/stderr capture reliable
+
+        Returns:
+            (env, detail)
+            - env: dict of env vars to apply, or None on failure
+            - detail: short human-readable status / error context
+        """
+        if platform.system() != "Windows":
+            return None, "Not Windows"
+
+        cmd = ["cmd", "/d", "/s", "/c", "call", str(vcvars_path), arch, "&&", "set"]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            )
+        except subprocess.TimeoutExpired:
+            return None, f"vcvars activation timed out ({timeout}s)"
+        except Exception as e:
+            return None, f"vcvars activation failed: {e}"
+
+        if result.returncode != 0:
+            stdout_tail = "\n".join((result.stdout or "").splitlines()[-25:])
+            stderr_tail = "\n".join((result.stderr or "").splitlines()[-25:])
+            detail_lines = [f"vcvarsall.bat returned code {result.returncode}"]
+            if stdout_tail.strip():
+                detail_lines.append("--- stdout (tail) ---\n" + stdout_tail)
+            if stderr_tail.strip():
+                detail_lines.append("--- stderr (tail) ---\n" + stderr_tail)
+            return None, "\n".join(detail_lines)
+
+        env_updates: Dict[str, str] = {}
+        for line in (result.stdout or "").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if not key or key.startswith("="):
+                # Skip special drive vars like '=C:' emitted by `set`
+                continue
+            env_updates[key] = value
+
+        cl = shutil.which("cl.exe", path=env_updates.get("PATH"))
+        if not cl:
+            return None, "cl.exe not found after vcvarsall activation (missing MSVC workload?)"
+
+        return env_updates, f"cl.exe: {cl}"
+
     def _find_vcvars(self) -> Optional[Path]:
         """
         Try to locate vcvarsall.bat using multiple detection methods.

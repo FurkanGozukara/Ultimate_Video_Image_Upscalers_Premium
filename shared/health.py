@@ -70,8 +70,60 @@ def _check_vs_build_tools() -> Dict[str, Optional[str]]:
     if platform.system() != "Windows":
         return {"status": "skipped", "detail": "VS Build Tools not required on this platform"}
 
-    # Comprehensive list of candidate paths for different VS versions and editions
-    candidates = [
+    # Fast-path: if MSVC is already on PATH (e.g. launched from "Developer Command Prompt"),
+    # torch.compile has the compiler toolchain available without needing to locate vcvarsall.
+    cl_path = shutil.which("cl.exe") or shutil.which("cl")
+    if cl_path:
+        return {
+            "status": "ok",
+            "detail": f"✅ MSVC compiler already available in PATH\ncl.exe: {cl_path}\nTorch.compile support: ENABLED",
+        }
+
+    # Build a robust list of candidate paths for different VS versions/editions.
+    # We prefer official discovery (VSINSTALLDIR / vswhere) before hardcoded fallbacks.
+    candidates = []
+
+    # Method 1: VSINSTALLDIR (fastest when present)
+    vs_install_dir = os.environ.get("VSINSTALLDIR")
+    if vs_install_dir:
+        candidates.append(Path(vs_install_dir) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat")
+
+    # Method 2: vswhere (official Visual Studio installer locator)
+    vswhere_candidates = [
+        Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+        Path(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+    ]
+    vswhere = next((p for p in vswhere_candidates if p.exists()), None)
+    if vswhere:
+        try:
+            # Find all installations that include the x86/x64 VC tools.
+            # This handles custom install drives and non-standard layouts.
+            result = subprocess.run(
+                [
+                    str(vswhere),
+                    "-products",
+                    "*",
+                    "-requires",
+                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                    "-property",
+                    "installationPath",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            )
+            if result.returncode == 0 and result.stdout:
+                for line in result.stdout.splitlines():
+                    install_path = line.strip()
+                    if install_path:
+                        candidates.append(Path(install_path) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat")
+        except Exception:
+            # vswhere can fail in some restricted environments; fall back to hardcoded paths below.
+            pass
+
+    # Method 3: Hardcoded common paths (fallback)
+    candidates.extend([
         # VS 2022 - All editions
         Path("C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"),
         Path("C:/Program Files/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"),
@@ -103,7 +155,17 @@ def _check_vs_build_tools() -> Dict[str, Optional[str]]:
         Path("C:/Program Files (x86)/Microsoft Visual Studio/2017/Professional/VC/Auxiliary/Build/vcvarsall.bat"),
         Path("C:/Program Files/Microsoft Visual Studio/2017/Enterprise/VC/Auxiliary/Build/vcvarsall.bat"),
         Path("C:/Program Files (x86)/Microsoft Visual Studio/2017/Enterprise/VC/Auxiliary/Build/vcvarsall.bat"),
-    ]
+    ])
+
+    # De-duplicate while preserving order
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for p in candidates:
+        ps = str(p)
+        if ps not in seen:
+            deduped.append(p)
+            seen.add(ps)
+    candidates = deduped
 
     found = next((p for p in candidates if p.exists()), None)
     if found:
@@ -118,13 +180,29 @@ def _check_vs_build_tools() -> Dict[str, Optional[str]]:
                 else:
                     # File looks valid, try execution test (can fail in sandboxed environments)
                     try:
-                        import subprocess
-                        
                         # Level 2: Quick execution test (with lenient timeout)
+                        # IMPORTANT: Avoid embedding quotes inside the /c string argument.
+                        # Passing tokens separately is significantly more reliable across shells and
+                        # avoids the common `"C:\...\vcvarsall.bat"` not recognized issue.
+                        activation_cmd = [
+                            "cmd",
+                            "/d",
+                            "/s",
+                            "/c",
+                            "call",
+                            str(found),
+                            "x64",
+                            "&&",
+                            "where",
+                            "cl.exe",
+                            "&&",
+                            "echo",
+                            "VCVARS_SUCCESS",
+                        ]
                         result = subprocess.run(
                             # Do NOT silence output here: if vcvars activation fails, we want the
                             # real reason surfaced (missing MSVC workload, broken install, etc.).
-                            ["cmd", "/c", f'call "{found}" x64 && echo VCVARS_SUCCESS'],
+                            activation_cmd,
                             capture_output=True,
                             text=True,
                             timeout=15,
@@ -138,11 +216,32 @@ def _check_vs_build_tools() -> Dict[str, Optional[str]]:
                                 "detail": f"✅ VS Build Tools verified and working\nPath: {found}\nTorch.compile support: ENABLED"
                             }
                         else:
+                            # Retry once with legacy arch token if some vcvarsall versions reject "x64"
+                            try:
+                                activation_cmd_alt = activation_cmd.copy()
+                                activation_cmd_alt[activation_cmd_alt.index("x64")] = "amd64"
+                                result_alt = subprocess.run(
+                                    activation_cmd_alt,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=15,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                                )
+                            except Exception:
+                                result_alt = None
+
+                            if result_alt and result_alt.returncode == 0 and "VCVARS_SUCCESS" in result_alt.stdout:
+                                return {
+                                    "status": "ok",
+                                    "detail": f"✅ VS Build Tools verified and working\nPath: {found}\nTorch.compile support: ENABLED",
+                                }
+
                             # File exists and looks valid, but activation test failed.
                             # In this app we rely on vcvarsall.bat in subprocess mode too, so this
                             # is a real warning: torch.compile will likely fail until VS is repaired.
-                            stdout_tail = "\n".join((result.stdout or "").splitlines()[-25:])
-                            stderr_tail = "\n".join((result.stderr or "").splitlines()[-25:])
+                            primary = result_alt if result_alt and (result_alt.returncode != 0) else result
+                            stdout_tail = "\n".join((primary.stdout or "").splitlines()[-25:])
+                            stderr_tail = "\n".join((primary.stderr or "").splitlines()[-25:])
                             details = [
                                 f"⚠️ VS Build Tools found but activation test FAILED",
                                 f"Path: {found}",

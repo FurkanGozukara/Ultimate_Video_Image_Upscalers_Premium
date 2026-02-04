@@ -151,13 +151,33 @@ def main():
             warnings.append("🔒 IN-APP MODE LOCKED: You are in in-app mode. To switch back to subprocess mode, restart the application.")
         
         for key, info in initial_report.items():
+            # We handle ffmpeg messaging separately so we only show an error when it's missing.
+            # Avoids always-on informational notices.
+            if key == "ffmpeg":
+                continue
             if info.get("status") not in ("ok", "skipped"):
                 warnings.append(f"{key}: {info.get('detail')}")
-        # Surface CPU-only ffmpeg reminder and VS Build Tools guidance up front
-        warnings.append("ffmpeg runs CPU-only; ensure ffmpeg is in PATH. CUDA ffmpeg is not used.")
+
+        # Show ffmpeg error ONLY if ffmpeg is missing from PATH
+        try:
+            from shared.error_handling import check_ffmpeg_available
+
+            ffmpeg_ok, ffmpeg_msg = check_ffmpeg_available()
+            if not ffmpeg_ok:
+                warnings.append(ffmpeg_msg or "❌ ffmpeg not found in PATH. Please install ffmpeg and add it to your system PATH.")
+        except Exception:
+            # If the check itself fails, don't block startup; health tab/services will surface details later.
+            pass
+
         vs_info = initial_report.get("vs_build_tools")
-        if vs_info and vs_info.get("status") != "ok":
-            warnings.append("VS Build Tools not detected; torch.compile will be disabled on Windows until installed.")
+        if vs_info and vs_info.get("status") not in ("ok", "skipped"):
+            # vs_build_tools already contains a detailed diagnostic (included above). Add a short,
+            # accurate summary line without misleading "not detected" wording when VS is present but failing.
+            detail = (vs_info.get("detail") or "").lower()
+            if "not detected" in detail or "not found" in detail:
+                warnings.append("VS Build Tools not detected; torch.compile will be disabled on Windows until installed.")
+            else:
+                warnings.append("VS Build Tools found but could not be validated; torch.compile may be unreliable. See vs_build_tools details above.")
         health_text = "\n".join(warnings) if warnings else "All health checks passed."
     except Exception:
         health_text = "Health check failed to initialize. Run Health Check tab for details."
