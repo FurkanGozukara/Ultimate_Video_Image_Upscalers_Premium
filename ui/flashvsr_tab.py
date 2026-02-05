@@ -315,13 +315,6 @@ def flashvsr_tab(
         # Right Column: Output & Controls
         with gr.Column(scale=2):
             gr.Markdown("#### 🎯 Output & Actions")
-
-            output_override = gr.Textbox(
-                label="Output Override (folder or .mp4 file)",
-                value=values[1],
-                placeholder="Leave empty for auto naming",
-                info="Optional custom output location. A folder saves into that folder. A .mp4 file path renames the final output to that exact file.",
-            )
             
             status_box = gr.Markdown(value="Ready.")
             progress_indicator = gr.Markdown(value="", visible=True)
@@ -332,18 +325,27 @@ def flashvsr_tab(
                 lines=12,
                 buttons=["copy"]
             )
+
+            output_override = gr.Textbox(
+                label="Output Override (folder or .mp4 file)",
+                value=values[1],
+                placeholder="Leave empty for auto naming",
+                info="Optional custom output location. A folder saves into that folder. A .mp4 file path renames the final output to that exact file.",
+            )
             
-            # Output displays
-            output_video = gr.Video(
-                label="🎬 Upscaled Video",
-                interactive=False,
-                buttons=["download"]
-            )
-            output_image = gr.Image(
-                label="🖼️ Output Image",
-                interactive=False,
-                buttons=["download"]
-            )
+            with gr.Accordion("🎬 Upscaled Output", open=True):
+                output_video = gr.Video(
+                    label="🎬 Upscaled Video",
+                    interactive=False,
+                    visible=False,
+                    buttons=["download"],
+                )
+                output_image = gr.Image(
+                    label="🖼️ Upscaled Image",
+                    interactive=False,
+                    visible=False,
+                    buttons=["download"],
+                )
             
             # Comparison
             image_slider = gr.ImageSlider(

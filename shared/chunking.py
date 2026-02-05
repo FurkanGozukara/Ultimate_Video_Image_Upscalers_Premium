@@ -18,6 +18,7 @@ from .path_utils import (
     emit_metadata,
     get_media_fps,
 )
+from .audio_utils import ensure_audio_on_video, has_audio_stream
 
 # Try to import PySceneDetect (optional dependency)
 try:
@@ -322,6 +323,7 @@ def split_video(
     if not normalized_scenes:
         return [Path(video_path)]
 
+    src_has_audio = has_audio_stream(Path(video_path))
     src_pix_fmt = _probe_pix_fmt(video_path) if preserve_quality else None
     for idx, (start_f, end_f) in enumerate(normalized_scenes, 1):
         out = work_dir / f"chunk_{idx:04d}.mp4"
@@ -377,6 +379,35 @@ def split_video(
             ]
             _run_ffmpeg(cmd)
 
+        def _split_copy_aac_audio() -> None:
+            # Stream-copy video but re-encode audio to AAC for MP4 compatibility.
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(start_f),
+                "-i",
+                video_path,
+                "-t",
+                str(duration),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
+                str(out),
+            ]
+            _run_ffmpeg(cmd)
+
         def _split_precise_lossless(pix_fmt: Optional[str]) -> None:
             # Frame-accurate trimming requires re-encoding (stream-copy is keyframe-limited).
             # Use lossless x264 to preserve input quality as much as possible.
@@ -401,6 +432,41 @@ def split_video(
                 "0",
                 "-c:a",
                 "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
+            ]
+            if pix_fmt:
+                cmd += ["-pix_fmt", pix_fmt]
+            cmd += [str(out)]
+            _run_ffmpeg(cmd)
+
+        def _split_precise_lossless_aac_audio(pix_fmt: Optional[str]) -> None:
+            # Frame-accurate trimming with lossless video + AAC audio (robust across containers/codecs).
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(start_f),
+                "-i",
+                video_path,
+                "-t",
+                str(duration),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-qp",
+                "0",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
                 "-avoid_negative_ts",
                 "make_zero",
                 "-movflags",
@@ -441,6 +507,13 @@ def split_video(
             cmd += [str(out)]
             _run_ffmpeg(cmd)
 
+        def _ok_with_audio() -> bool:
+            if not _is_decodable(out):
+                return False
+            if src_has_audio and not has_audio_stream(out):
+                return False
+            return True
+
         # Strategy:
         # - precise=True: prefer lossless re-encode (frame-accurate), fall back to stream copy.
         # - precise=False: prefer stream copy (bit-exact), fall back to lossless re-encode if needed.
@@ -455,13 +528,40 @@ def split_video(
 
         if precise:
             _split_precise_lossless(src_pix_fmt)
-            if not _is_decodable(out) and src_pix_fmt:
+            if not _ok_with_audio() and src_pix_fmt:
                 # Retry without forcing pixel format (better compatibility with non-x264 pix_fmts).
                 try:
                     out.unlink(missing_ok=True)
                 except Exception:
                     pass
                 _split_precise_lossless(None)
+            if not _ok_with_audio():
+                # Audio-copy can fail on some codecs/containers; retry with AAC audio.
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_precise_lossless_aac_audio(src_pix_fmt)
+                if not _ok_with_audio() and src_pix_fmt:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    _split_precise_lossless_aac_audio(None)
+            if not _ok_with_audio():
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_copy()
+            if not _ok_with_audio():
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_copy_aac_audio()
+
+            # Last-resort fallbacks: keep video even if audio cannot be preserved.
             if not _is_decodable(out):
                 try:
                     out.unlink(missing_ok=True)
@@ -479,33 +579,47 @@ def split_video(
                     out.unlink(missing_ok=True)
                 except Exception:
                     pass
-                _split_copy()
-            if not _is_decodable(out):
-                try:
-                    out.unlink(missing_ok=True)
-                except Exception:
-                    pass
                 _split_copy_video_only()
         else:
             _split_copy()
-            if not _is_decodable(out):
+            if not _ok_with_audio():
                 try:
                     out.unlink(missing_ok=True)
                 except Exception:
                     pass
-                _split_copy_video_only()
-            if not _is_decodable(out):
+                _split_copy_aac_audio()
+            if not _ok_with_audio():
                 try:
                     out.unlink(missing_ok=True)
                 except Exception:
                     pass
                 _split_precise_lossless(src_pix_fmt)
-                if not _is_decodable(out) and src_pix_fmt:
+                if not _ok_with_audio() and src_pix_fmt:
                     try:
                         out.unlink(missing_ok=True)
                     except Exception:
                         pass
                     _split_precise_lossless(None)
+            if not _ok_with_audio():
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_precise_lossless_aac_audio(src_pix_fmt)
+                if not _ok_with_audio() and src_pix_fmt:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    _split_precise_lossless_aac_audio(None)
+
+            # Last-resort fallbacks: keep video even if audio cannot be preserved.
+            if not _is_decodable(out):
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_copy_video_only()
             if not _is_decodable(out):
                 try:
                     out.unlink(missing_ok=True)
@@ -753,6 +867,13 @@ def detect_resume_state(work_dir: Path, output_format: str) -> Tuple[Optional[Pa
     if not work_dir.exists():
         return None, []
 
+    processed_dir = work_dir / "processed_chunks"
+    if processed_dir.exists() and processed_dir.is_dir():
+        chunks_root = processed_dir
+    else:
+        # Backward compatibility: older versions stored chunks directly in work_dir.
+        chunks_root = work_dir
+
     # Check for partial outputs
     if output_format == "png":
         partial_candidates = list(work_dir.glob("*_partial"))
@@ -766,7 +887,9 @@ def detect_resume_state(work_dir: Path, output_format: str) -> Tuple[Optional[Pa
             return partial_dir, completed_chunks
     else:
         # Video: detect completed per-chunk outputs to support cancel salvage and best-effort resume.
-        completed_chunks = sorted(work_dir.glob("chunk_*_out.mp4"))
+        completed_chunks = sorted(chunks_root.glob("chunk_*_upscaled.mp4"))
+        if not completed_chunks:
+            completed_chunks = sorted(chunks_root.glob("chunk_*_out.mp4"))
 
         # If a stitched partial exists inside the chunks dir, prefer it as the "partial indicator".
         partial_candidates = list(work_dir.glob("*_partial.mp4"))
@@ -781,12 +904,11 @@ def detect_resume_state(work_dir: Path, output_format: str) -> Tuple[Optional[Pa
     return None, []
 
 
-def check_resume_available(temp_dir: Path, output_format: str) -> Tuple[bool, str]:
+def check_resume_available(work_dir: Path, output_format: str) -> Tuple[bool, str]:
     """
     Check if resume is available for chunking.
     Returns (available, status_message).
     """
-    work_dir = temp_dir / "chunks"
     partial_path, completed_chunks = detect_resume_state(work_dir, output_format)
 
     if not partial_path:
@@ -802,12 +924,70 @@ def check_resume_available(temp_dir: Path, output_format: str) -> Tuple[bool, st
         return False, "Partial output found but no completed chunks to resume from."
 
 
+def salvage_partial_from_run_dir(
+    run_dir: Path,
+    *,
+    partial_basename: str = "cancelled_partial",
+    audio_source: Optional[str] = None,
+    audio_codec: str = "copy",
+    audio_bitrate: Optional[str] = None,
+) -> Tuple[Optional[Path], str]:
+    """
+    Best-effort salvage of partial chunk outputs from a run directory.
+
+    Returns:
+        (path, method) where method is one of: "simple", "png_collection", "none"
+    """
+    run_dir = Path(run_dir)
+    if not run_dir.exists() or not run_dir.is_dir():
+        return None, "none"
+
+    # Prefer video chunk salvage first.
+    _partial_video, completed_chunks = detect_resume_state(run_dir, "mp4")
+    if completed_chunks:
+        target = collision_safe_path(run_dir / f"{partial_basename}.mp4")
+        ok = concat_videos(completed_chunks, target)
+        if ok and target.exists():
+            try:
+                if audio_source and Path(audio_source).exists():
+                    _changed, _final, _err = ensure_audio_on_video(
+                        target,
+                        Path(audio_source),
+                        audio_codec=str(audio_codec or "copy"),
+                        audio_bitrate=audio_bitrate,
+                        on_progress=None,
+                    )
+                    if _final:
+                        target = Path(_final)
+            except Exception:
+                pass
+            return target, "simple"
+
+    # Fallback: PNG chunks.
+    _partial_png, completed_png_chunks = detect_resume_state(run_dir, "png")
+    if completed_png_chunks:
+        target_dir = collision_safe_dir(run_dir / f"{partial_basename}_png")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for idx, chunk_path in enumerate(completed_png_chunks, 1):
+            dest = target_dir / f"chunk_{idx:04d}"
+            try:
+                if Path(chunk_path).is_dir():
+                    shutil.copytree(chunk_path, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(chunk_path, dest)
+            except Exception:
+                continue
+        return target_dir, "png_collection"
+
+    return None, "none"
+
+
 def chunk_and_process(
     runner,
     settings: dict,
     scene_threshold: float,
     min_scene_len: float,
-    temp_dir: Path,
+    work_dir: Path,
     on_progress: Callable[[str], None],
     chunk_seconds: float = 0.0,
     chunk_overlap: float = 0.0,
@@ -847,11 +1027,11 @@ def chunk_and_process(
         settings: Processing settings dict (must include input_path, output_format, etc.)
         scene_threshold: PySceneDetect sensitivity (lower = more cuts, 27 = default)
         min_scene_len: Minimum scene duration in seconds
-        temp_dir: Temporary directory for chunk storage
+        work_dir: Run folder for chunk artifacts (creates input_chunks/ and processed_chunks/)
         on_progress: Progress callback for UI updates
         chunk_seconds: Fixed chunk size in seconds (0 = use intelligent scene detection)
         chunk_overlap: Overlap between chunks in seconds (for smooth transitions)
-        per_chunk_cleanup: Delete temp files after each chunk (saves disk space)
+        per_chunk_cleanup: Delete chunk artifacts from the run output folder to save disk space
         allow_partial: Save partial results on cancel/error
         global_output_dir: Output directory override
         resume_from_partial: Resume from previous interrupted run
@@ -864,12 +1044,22 @@ def chunk_and_process(
         (returncode, log, final_output_path, chunk_count)
     """
     input_path = normalize_path(settings["input_path"])
+    # When inputs are preprocessed (e.g., downscaled) we still want to preserve the original audio.
+    audio_source_for_mux = normalize_path(settings.get("_original_input_path_before_preprocess")) or input_path
     input_type = detect_input_type(input_path)
     output_format = settings.get("output_format") or "mp4"
     if output_format in (None, "auto"):
         output_format = "mp4"
-    work = Path(temp_dir) / "chunks"
-    existing_partial, existing_chunks = detect_resume_state(work, output_format)
+    audio_codec = str(settings.get("audio_codec") or "copy")
+    audio_bitrate = settings.get("audio_bitrate") or None
+    work_root = Path(work_dir)
+    work_root.mkdir(parents=True, exist_ok=True)
+    input_chunks_dir = work_root / "input_chunks"
+    processed_chunks_dir = work_root / "processed_chunks"
+    input_chunks_dir.mkdir(parents=True, exist_ok=True)
+    processed_chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    existing_partial, existing_chunks = detect_resume_state(work_root, output_format)
 
     # Initialize variables
     start_chunk_idx = 0
@@ -882,9 +1072,11 @@ def chunk_and_process(
         # chunk_paths will be set later from actual input, not from existing chunks
         start_chunk_idx = len(existing_chunks)
     else:
-        # Fresh start - clean work directory
-        shutil.rmtree(work, ignore_errors=True)
-        work.mkdir(parents=True, exist_ok=True)
+        # Fresh start - clean ONLY the chunk subfolders (never delete the run folder itself)
+        shutil.rmtree(input_chunks_dir, ignore_errors=True)
+        shutil.rmtree(processed_chunks_dir, ignore_errors=True)
+        input_chunks_dir.mkdir(parents=True, exist_ok=True)
+        processed_chunks_dir.mkdir(parents=True, exist_ok=True)
         start_chunk_idx = 0
 
     # Predict final output locations for partial/cancel handling
@@ -958,7 +1150,7 @@ def chunk_and_process(
         on_progress(f"Detected {len(chunk_specs)} frame chunks\n")
         chunk_paths = []
         for idx, frame_list in chunk_specs:
-            cdir = work / f"chunk_{idx:04d}"
+            cdir = input_chunks_dir / f"chunk_{idx:04d}"
             cdir.mkdir(parents=True, exist_ok=True)
             for f in frame_list:
                 shutil.copy2(f, cdir / f.name)
@@ -974,7 +1166,7 @@ def chunk_and_process(
         chunk_paths = split_video(
             input_path,
             scenes,
-            work,
+            input_chunks_dir,
             precise=precise_split,
             preserve_quality=True,
             on_progress=on_progress,
@@ -983,6 +1175,104 @@ def chunk_and_process(
 
     output_chunks: List[Path] = []
     chunk_logs: List[dict] = []
+
+    def _notify_progress(progress_val: float, desc: str, **kwargs) -> None:
+        """
+        Call the optional `progress_tracker` in a backward-compatible way.
+
+        Some callers expect `progress_tracker(progress_val, desc="...")`, while newer
+        callers may accept additional keyword args (chunk paths, indices, etc.).
+        """
+        if not progress_tracker:
+            return
+        try:
+            progress_tracker(progress_val, desc=desc, **kwargs)
+        except TypeError:
+            try:
+                progress_tracker(progress_val, desc=desc)
+            except TypeError:
+                try:
+                    progress_tracker(progress_val, desc)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _cleanup_chunk_dirs(preserve_thumbs: bool = True) -> None:
+        """
+        Best-effort cleanup for chunk artifacts when `per_chunk_cleanup` is enabled.
+
+        We preserve `processed_chunks/thumbs/` by default so the UI gallery can still
+        show completed thumbnails even when chunk videos are deleted.
+        """
+        try:
+            shutil.rmtree(input_chunks_dir, ignore_errors=True)
+        except Exception:
+            pass
+        try:
+            if not processed_chunks_dir.exists():
+                return
+            for child in processed_chunks_dir.iterdir():
+                if preserve_thumbs and child.is_dir() and child.name == "thumbs":
+                    continue
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def _largest_4n_plus_1_leq(n: int) -> int:
+        if n <= 0:
+            return 1
+        return max(1, ((int(n) - 1) // 4) * 4 + 1)
+
+    def _count_frames_in_chunk(chunk_path: Path) -> Optional[int]:
+        try:
+            p = Path(chunk_path)
+            if p.is_dir():
+                exts = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
+                return sum(1 for f in p.iterdir() if f.is_file() and f.suffix.lower() in exts)
+            if shutil.which("ffprobe") is not None:
+                proc = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        "v:0",
+                        "-count_frames",
+                        "-show_entries",
+                        "stream=nb_read_frames",
+                        "-of",
+                        "default=noprint_wrappers=1:nokey=1",
+                        str(p),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                if proc.returncode == 0:
+                    raw = (proc.stdout or "").strip()
+                    if raw.isdigit():
+                        val = int(raw)
+                        if val > 0:
+                            return val
+            try:
+                cap = cv2.VideoCapture(str(p))
+                if cap.isOpened():
+                    val = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    cap.release()
+                    if val > 0:
+                        return val
+            except Exception:
+                return None
+        except Exception:
+            return None
+        return None
 
     # If resuming, load existing completed chunks and skip them
     if resuming and existing_chunks:
@@ -996,8 +1286,15 @@ def chunk_and_process(
                 "resumed": True,
             })
         on_progress(f"✅ Loaded {len(existing_chunks)} completed chunks from previous run - skipping to chunk {start_chunk_idx + 1}\n")
-        if progress_tracker:
-            progress_tracker(len(existing_chunks) / len(chunk_paths), desc=f"Resumed {len(existing_chunks)} chunks")
+        for i, chunk_path in enumerate(existing_chunks, 1):
+            _notify_progress(
+                i / max(1, len(chunk_paths)),
+                desc=f"Completed chunk {i}/{len(chunk_paths)} (resumed)",
+                chunk_index=i,
+                chunk_total=len(chunk_paths),
+                chunk_output=str(chunk_path),
+                resumed=True,
+            )
 
     for idx, chunk in enumerate(chunk_paths[start_chunk_idx:], start_chunk_idx + 1):
         # Respect external cancellation
@@ -1006,7 +1303,7 @@ def chunk_and_process(
                 # If we already have processed chunks, return partial output immediately
                 if allow_partial and output_chunks:
                     if output_format == "png":
-                        partial_target = partial_png_target or collision_safe_dir(work / "partial_chunks")
+                        partial_target = partial_png_target or collision_safe_dir(work_root / "partial_chunks")
                         partial_target.mkdir(parents=True, exist_ok=True)
                         for i, outp in enumerate(output_chunks, 1):
                             dest = partial_target / f"chunk_{i:04d}"
@@ -1029,10 +1326,10 @@ def chunk_and_process(
                         except Exception:
                             pass
                         if per_chunk_cleanup:
-                            shutil.rmtree(work, ignore_errors=True)
+                            _cleanup_chunk_dirs(preserve_thumbs=True)
                         return 1, log_blob, str(partial_target), len(chunk_paths)
                     else:
-                        partial_target = partial_video_target or collision_safe_path(work / "partial_concat.mp4")
+                        partial_target = partial_video_target or collision_safe_path(work_root / "partial_concat.mp4")
                         # Use blending concat if overlap specified
                         overlap_frames_for_blend = int(chunk_overlap * 30.0) if chunk_overlap > 0 else 0
                         ok = concat_videos_with_blending(
@@ -1041,6 +1338,20 @@ def chunk_and_process(
                             overlap_frames=overlap_frames_for_blend,
                             on_progress=on_progress
                         )
+                        if ok:
+                            # Best-effort: attach audio to the partial output (important when blending is used).
+                            try:
+                                _changed, _final, _err = ensure_audio_on_video(
+                                    partial_target,
+                                    Path(audio_source_for_mux),
+                                    audio_codec=audio_codec,
+                                    audio_bitrate=audio_bitrate,
+                                    on_progress=on_progress,
+                                )
+                                if _final:
+                                    partial_target = Path(_final)
+                            except Exception:
+                                pass
                         log_blob = f"Chunking canceled at chunk {idx}; partial output saved: {partial_target}"
                         try:
                             emit_metadata(
@@ -1056,23 +1367,49 @@ def chunk_and_process(
                         except Exception:
                             pass
                         if per_chunk_cleanup:
-                            shutil.rmtree(work, ignore_errors=True)
+                            _cleanup_chunk_dirs(preserve_thumbs=True)
                         if ok:
                             return 1, log_blob, str(partial_target), len(chunk_paths)
                 return 1, "Canceled before processing current chunk", "", len(chunk_paths)
         except Exception:
             pass
-        # Only update progress when chunk completes (not during processing to avoid UI spam)
+        # Emit in-progress state before running the chunk so UI can show "processing chunk X/Y".
+        _notify_progress(
+            max(0.0, (idx - 1) / max(1, len(chunk_paths))),
+            desc=f"Processing chunk {idx}/{len(chunk_paths)}",
+            chunk_index=idx,
+            chunk_total=len(chunk_paths),
+            chunk_input=str(chunk),
+            phase="processing",
+        )
         chunk_settings = settings.copy()
         chunk_settings["input_path"] = str(chunk)
         # Some pipelines (e.g., FlashVSR+) support preprocessing via `_effective_input_path`.
         # Ensure per-chunk runs always point to the chunk itself.
         chunk_settings["_effective_input_path"] = str(chunk)
-        # Direct chunk outputs to temp; choose dir for PNG exports
+        # Direct per-chunk outputs to the run folder (processed_chunks/).
         if output_format == "png":
-            chunk_settings["output_override"] = str(work / f"{chunk.stem}_out")
+            chunk_settings["output_override"] = str(processed_chunks_dir / f"{chunk.stem}_upscaled")
         else:
-            chunk_settings["output_override"] = str(work / f"{chunk.stem}_out.mp4")
+            chunk_settings["output_override"] = str(processed_chunks_dir / f"{chunk.stem}_upscaled.mp4")
+
+        # Safety: SeedVR2 batch_size can exceed very short chunk lengths (e.g., user batch_size=29, chunk=14 frames).
+        # Clamp per-chunk batch_size to the largest valid 4n+1 <= frame_count to avoid runtime errors.
+        if model_type == "seedvr2":
+            try:
+                user_bs = int(chunk_settings.get("batch_size") or 0)
+            except Exception:
+                user_bs = 0
+            if user_bs > 0:
+                frame_count = _count_frames_in_chunk(Path(chunk))
+                if frame_count and frame_count > 0 and user_bs > int(frame_count):
+                    adj = _largest_4n_plus_1_leq(int(frame_count))
+                    if adj != user_bs:
+                        chunk_settings["batch_size"] = adj
+                        try:
+                            on_progress(f"Adjusting SeedVR2 batch_size {user_bs}->{adj} for short chunk ({frame_count} frames)\n")
+                        except Exception:
+                            pass
         
         # Use provided processing function or select based on model type
         if process_func:
@@ -1092,15 +1429,12 @@ def chunk_and_process(
             # Fallback to seedvr2 for backward compatibility
             res = runner.run_seedvr2(chunk_settings, on_progress=None, preview_only=False)
 
-        # Update progress only after chunk completion
-        if progress_tracker:
-            progress_tracker(idx / len(chunk_paths), desc=f"Completed chunk {idx}/{len(chunk_paths)}")
         if res.returncode != 0 or getattr(runner, "is_canceled", lambda: False)():
             on_progress(f"Chunk {idx} failed with code {res.returncode}\n")
             if allow_partial and output_chunks:
                 # Attempt to stitch already processed chunks
                 if output_format == "png":
-                    partial_target = partial_png_target or collision_safe_dir(work / "partial_chunks")
+                    partial_target = partial_png_target or collision_safe_dir(work_root / "partial_chunks")
                     partial_target.mkdir(parents=True, exist_ok=True)
                     for i, outp in enumerate(output_chunks, 1):
                         dest = partial_target / f"chunk_{i:04d}"
@@ -1123,10 +1457,10 @@ def chunk_and_process(
                     except Exception:
                         pass
                     if per_chunk_cleanup:
-                        shutil.rmtree(work, ignore_errors=True)
+                        _cleanup_chunk_dirs(preserve_thumbs=True)
                     return res.returncode, log_blob, str(partial_target), len(chunk_paths)
                 else:
-                    partial_target = partial_video_target or collision_safe_path(work / "partial_concat.mp4")
+                    partial_target = partial_video_target or collision_safe_path(work_root / "partial_concat.mp4")
                     # Use blending concat if overlap specified
                     overlap_frames_for_blend = int(chunk_overlap * 30.0) if chunk_overlap > 0 else 0
                     ok = concat_videos_with_blending(
@@ -1136,6 +1470,19 @@ def chunk_and_process(
                         on_progress=on_progress
                     )
                     if ok:
+                        # Best-effort: ensure partial output has audio (especially important for blended concat).
+                        try:
+                            _changed, _final, _err = ensure_audio_on_video(
+                                partial_target,
+                                Path(audio_source_for_mux),
+                                audio_codec=audio_codec,
+                                audio_bitrate=audio_bitrate,
+                                on_progress=on_progress,
+                            )
+                            if _final:
+                                partial_target = Path(_final)
+                        except Exception:
+                            pass
                         on_progress(f"Partial output stitched to {partial_target}\n")
                         meta = {
                             "partial": True,
@@ -1160,16 +1507,43 @@ def chunk_and_process(
                         except Exception:
                             pass
                         if per_chunk_cleanup:
-                            shutil.rmtree(work, ignore_errors=True)
+                            _cleanup_chunk_dirs(preserve_thumbs=True)
                         return res.returncode, log_blob, str(partial_target), len(chunk_paths)
             return res.returncode, res.log, res.output_path or "", len(chunk_paths)
-        if res.output_path and Path(res.output_path).exists():
-            output_chunks.append(Path(res.output_path))
+        outp: Optional[Path] = Path(res.output_path) if res.output_path else None
+        if outp and outp.exists():
+            # NEW: Attach audio to each processed chunk for robustness and better user inspection.
+            # Uses the corresponding *input* chunk file as the audio source (time-aligned).
+            try:
+                if output_format != "png" and Path(chunk).is_file() and outp.is_file():
+                    _changed, _final, _err = ensure_audio_on_video(
+                        outp,
+                        Path(chunk),
+                        audio_codec=audio_codec,
+                        audio_bitrate=audio_bitrate,
+                        on_progress=None,
+                    )
+                    if _final:
+                        outp = Path(_final)
+            except Exception:
+                pass
+            output_chunks.append(outp)
+        # Update progress only after successful chunk completion, include paths for UI preview.
+        _notify_progress(
+            idx / max(1, len(chunk_paths)),
+            desc=f"Completed chunk {idx}/{len(chunk_paths)}",
+            chunk_index=idx,
+            chunk_total=len(chunk_paths),
+            chunk_input=str(chunk),
+            chunk_output=str(outp) if outp else None,
+            output_format=str(output_format),
+            phase="completed",
+        )
         chunk_logs.append(
             {
                 "chunk_index": idx,
                 "input": str(chunk),
-                "output": res.output_path,
+                "output": str(outp) if outp else (res.output_path or None),
                 "returncode": res.returncode,
             }
         )
@@ -1180,12 +1554,12 @@ def chunk_and_process(
             try:
                 chunk_path = Path(chunk)
                 if chunk_path.is_file():
-                    work_root = work.resolve()
+                    in_root = input_chunks_dir.resolve()
                     try:
                         parent_resolved = chunk_path.resolve().parent
                     except Exception:
                         parent_resolved = chunk_path.parent
-                    if parent_resolved == work_root:
+                    if parent_resolved == in_root:
                         chunk_path.unlink(missing_ok=True)
             except Exception:
                 pass
@@ -1212,7 +1586,7 @@ def chunk_and_process(
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(outp, dest)
         if per_chunk_cleanup:
-            shutil.rmtree(work, ignore_errors=True)
+            _cleanup_chunk_dirs(preserve_thumbs=True)
         log_blob = "Chunked processing complete (PNG)\n" + "\n".join([str(c) for c in chunk_logs])
         try:
             emit_metadata(
@@ -1256,8 +1630,24 @@ def chunk_and_process(
     if not ok:
         return 1, "Concat failed", str(final_path), len(chunk_paths)
     on_progress(f"Chunks concatenated with blending to {final_path}\n")
+
+    # Best-effort: ensure the final output has audio. This is especially important
+    # when overlap blending is used (blended concat produces video-only output).
+    try:
+        _changed, _final, _err = ensure_audio_on_video(
+            Path(final_path),
+            Path(audio_source_for_mux),
+            audio_codec=audio_codec,
+            audio_bitrate=audio_bitrate,
+            force_replace=True,
+            on_progress=on_progress,
+        )
+        if _final:
+            final_path = Path(_final)
+    except Exception:
+        pass
     if per_chunk_cleanup:
-        shutil.rmtree(work, ignore_errors=True)
+        _cleanup_chunk_dirs(preserve_thumbs=True)
     # Write chunk metadata
     meta_path = final_path.parent / f"{final_path.stem}_chunk_metadata.json"
     try:

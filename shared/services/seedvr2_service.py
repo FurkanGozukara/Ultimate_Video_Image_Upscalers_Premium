@@ -32,6 +32,8 @@ from shared.path_utils import (
 )
 from shared.resolution_calculator import estimate_seedvr2_upscale_plan_from_dims
 from shared.chunking import chunk_and_process, check_resume_available
+from shared.output_run_manager import prepare_single_video_run, downscaled_video_path, numbered_single_image_output_path
+from shared.ffmpeg_utils import scale_video
 from shared.face_restore import restore_image, restore_video
 from shared.models.seedvr2_meta import get_seedvr2_model_names, model_meta_map
 from shared.logging_utils import RunLogger
@@ -241,7 +243,7 @@ def seedvr2_defaults(model_name: Optional[str] = None, base_dir: Optional[Path] 
 
 
 """
-📋 PRESET SERIALIZATION ORDER & ROBUSTNESS DESIGN
+ PRESET SERIALIZATION ORDER & ROBUSTNESS DESIGN
 ==================================================
 
 CURRENT APPROACH: Manual Synchronization (Option C)
@@ -250,7 +252,7 @@ CURRENT APPROACH: Manual Synchronization (Option C)
 This list defines the order of parameters for preset save/load.
 MUST match inputs_list order in ui/seedvr2_tab.py.
 
-⚠️ MANUAL SYNCHRONIZATION REQUIRED:
+ MANUAL SYNCHRONIZATION REQUIRED:
 Adding a new control requires updates across 3 locations:
 
 1. **seedvr2_defaults()** (this file, lines ~108-194)
@@ -265,15 +267,15 @@ Adding a new control requires updates across 3 locations:
    - Add Gradio component at SAME POSITION as SEEDVR2_ORDER
    - Component values align with ORDER by index
 
-✅ BACKWARD COMPATIBILITY GUARANTEE:
+ BACKWARD COMPATIBILITY GUARANTEE:
 ------------------------------------
 Old presets automatically work with new features via PresetManager.merge_config():
-- Keys in preset → loaded values
-- Keys NOT in preset → current defaults (new controls get default values)
+- Keys in preset  loaded values
+- Keys NOT in preset  current defaults (new controls get default values)
 - NO migration scripts needed when adding features
 - Graceful degradation for removed controls (ignored keys are harmless)
 
-🔒 RUNTIME VALIDATION & SAFETY:
+ RUNTIME VALIDATION & SAFETY:
 --------------------------------
 save_preset() callback validates len(inputs_list) == len(SEEDVR2_ORDER) at runtime.
 Catches integration bugs immediately with detailed error message.
@@ -282,7 +284,7 @@ If mismatch detected:
 - Error shown in UI with exact counts and missing keys
 - Development-time validation in seedvr2_tab.py logs warnings on load
 
-🛡️ ROBUSTNESS FEATURES IMPLEMENTED:
+ ROBUSTNESS FEATURES IMPLEMENTED:
 ------------------------------------
 1. **Type Validation**: merge_config() preserves types (int/float/str/bool auto-converted)
 2. **Tab-Specific Constraints**: validate_preset_constraints() enforces model rules:
@@ -291,11 +293,11 @@ If mismatch detected:
    - RIFE: single GPU enforcement, FPS multiplier limits
    - FlashVSR+: tile constraints, precision compatibility
 3. **Model Metadata Integration**: Model-specific defaults and constraints from metadata registry
-4. **Collision-Safe Storage**: Presets use sanitized names, atomic writes (tmp → rename)
+4. **Collision-Safe Storage**: Presets use sanitized names, atomic writes (tmp  rename)
 5. **Last-Used Tracking**: Auto-restore last preset per model on tab load
 6. **Missing Preset Warnings**: Non-blocking warnings if last-used preset file is missing
 
-📋 ALTERNATIVE APPROACHES EVALUATED:
+ ALTERNATIVE APPROACHES EVALUATED:
 ------------------------------------
 
 **Option A: Auto-Serialization** (preset_auto_serializer module exists but unused)
@@ -323,7 +325,7 @@ Cons:
   - Significant refactoring effort across all 7 tabs
 Status: Not implemented (would be major rewrite)
 
-**Option C: Current Manual Approach** ✅ CHOSEN
+**Option C: Current Manual Approach**  CHOSEN
 Pros:
   + Proven stable and predictable behavior
   + Easy to debug when things break (explicit ordering)
@@ -342,7 +344,7 @@ RATIONALE for Option C:
 - Refactoring to A/B is high-risk, high-effort for unclear benefit
 - Explicit control valuable for complex UIs with custom validation
 
-🎯 EASE OF INTEGRATION (Adding New Controls):
+ EASE OF INTEGRATION (Adding New Controls):
 ----------------------------------------------
 **Step-by-Step Process:**
 
@@ -371,16 +373,16 @@ RATIONALE for Option C:
 **Error Rate**: Low (runtime validation catches mistakes)
 **Maintenance Cost**: Acceptable for current scale
 
-✅ ROBUSTNESS ASSESSMENT:
+ ROBUSTNESS ASSESSMENT:
 -------------------------
 The current preset system IS robust and easy to manage:
-- ✅ Auto-merge handles feature additions seamlessly
-- ✅ Runtime validation prevents corruption
-- ✅ Model-specific constraints enforced automatically
-- ✅ Type safety via merge_config() type preservation
-- ✅ Collision-safe storage with atomic writes
-- ⚠️ Manual sync required but validated at runtime
-- ⚠️ Developer discipline needed (mitigated by validation)
+-  Auto-merge handles feature additions seamlessly
+-  Runtime validation prevents corruption
+-  Model-specific constraints enforced automatically
+-  Type safety via merge_config() type preservation
+-  Collision-safe storage with atomic writes
+-  Manual sync required but validated at runtime
+-  Developer discipline needed (mitigated by validation)
 
 CONCLUSION: Current approach meets "extremely robust and easy to manage" requirement
 given the scale and complexity. Alternative approaches would add complexity without
@@ -470,7 +472,7 @@ def _migrate_preset_values(cfg: Dict[str, Any], defaults: Dict[str, Any], silent
     Migrate old preset values to new ones for backward compatibility.
     
     This function modifies cfg in-place and handles:
-    - Renamed values (e.g., flash_attn → flash_attn_2)
+    - Renamed values (e.g., flash_attn  flash_attn_2)
     - Deprecated values (replace with defaults)
     - Type conversions (if needed)
     
@@ -482,10 +484,10 @@ def _migrate_preset_values(cfg: Dict[str, Any], defaults: Dict[str, Any], silent
     # Attention mode migration: old values to new valid choices
     # Valid choices: ['sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', 'sageattn_3']
     attention_migrations = {
-        "flash_attn": "flash_attn_2",  # Old generic name → v2
+        "flash_attn": "flash_attn_2",  # Old generic name  v2
         "flash_attention": "flash_attn_2",  # Alternative old name
         "flash": "flash_attn_2",  # Short form
-        "sageattn": "sageattn_2",  # Old generic name → v2
+        "sageattn": "sageattn_2",  # Old generic name  v2
         "sage": "sageattn_2",  # Short form
     }
     
@@ -495,9 +497,9 @@ def _migrate_preset_values(cfg: Dict[str, Any], defaults: Dict[str, Any], silent
         new_val = attention_migrations[old_val]
         cfg["attention_mode"] = new_val
         if not silent:
-            error_logger.info(f"Migrated attention_mode: '{old_val}' → '{new_val}'")
+            error_logger.info(f"Migrated attention_mode: '{old_val}'  '{new_val}'")
     elif current_attention and current_attention not in ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"]:
-        # Unknown/invalid value → fallback to default
+        # Unknown/invalid value  fallback to default
         default_attention = defaults.get("attention_mode", "sdpa")
         error_logger.warning(f"Unknown attention_mode '{current_attention}', falling back to default '{default_attention}'")
         cfg["attention_mode"] = default_attention
@@ -509,7 +511,7 @@ def _migrate_preset_values(cfg: Dict[str, Any], defaults: Dict[str, Any], silent
         # Old presets might have numeric values or missing values
         default_backend = defaults.get("video_backend", "opencv")
         if current_backend not in ["", None]:
-            error_logger.info(f"Migrated video_backend: '{current_backend}' → '{default_backend}'")
+            error_logger.info(f"Migrated video_backend: '{current_backend}'  '{default_backend}'")
         cfg["video_backend"] = default_backend
     
     # Use_10bit migration (added in v2.5.22)
@@ -520,7 +522,7 @@ def _migrate_preset_values(cfg: Dict[str, Any], defaults: Dict[str, Any], silent
         default_10bit = defaults.get("use_10bit", False)
         cfg["use_10bit"] = bool(current_10bit) if current_10bit else default_10bit
         if current_10bit not in [None, ""]:
-            error_logger.info(f"Migrated use_10bit: '{current_10bit}' → '{cfg['use_10bit']}'")
+            error_logger.info(f"Migrated use_10bit: '{current_10bit}'  '{cfg['use_10bit']}'")
     
     # Add more migrations here as needed for other settings
     # Example:
@@ -572,10 +574,12 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], s
                     cfg["resolution"] = model_max_res
                     cfg["_resolution_clamped_reason"] = f"Model max resolution: {model_max_res}"
             
-            # Set preferred attention mode if not explicitly set by user
+            # Set preferred attention mode if not explicitly set by user.
+            # Normalize legacy names (e.g., flash_attn -> flash_attn_2) so CLI args stay valid.
             preferred_attention = getattr(model_meta, 'preferred_attention', None)
             if preferred_attention and cfg.get("attention_mode") == _get_default_attention_mode():
                 cfg["attention_mode"] = preferred_attention
+                _migrate_preset_values(cfg, defaults, silent=True)
 
     # Apply resolution tab settings from shared state if available
     if state:
@@ -740,7 +744,7 @@ def _validate_preset_completeness(components: List[gr.components.Component]) -> 
     """
     if len(components) != len(SEEDVR2_ORDER):
         error_msg = (
-            f"⚠️ PRESET MISMATCH: inputs_list has {len(components)} components "
+            f" PRESET MISMATCH: inputs_list has {len(components)} components "
             f"but SEEDVR2_ORDER has {len(SEEDVR2_ORDER)} keys.\n"
             f"This will cause preset save/load errors.\n"
             f"Expected keys: {SEEDVR2_ORDER}\n"
@@ -822,19 +826,19 @@ def _process_single_file(
     chunk_info_msg = "No chunking performed."
     chunk_summary = "Single pass (no chunking)."
     chunk_progress_msg = ""
-    status = "⚠️ Processing exited unexpectedly"
+    status = "Processing exited unexpectedly"
 
     # CONSOLE LOGGING: Print startup info so users can see what's happening
     print("\n" + "=" * 70, flush=True)
-    print("📦 SEEDVR2 SERVICE - STARTING PROCESSING", flush=True)
+    print("SEEDVR2 SERVICE - STARTING PROCESSING", flush=True)
     print("=" * 70, flush=True)
-    print(f"📁 Input Path: {settings.get('input_path', 'Not set')}", flush=True)
-    print(f"🧠 Model: {settings.get('dit_model', 'Not set')}", flush=True)
-    print(f"📐 Target Resolution: {settings.get('resolution', 'Auto')}p", flush=True)
-    print(f"📊 Batch Size: {settings.get('batch_size', 'Default')}", flush=True)
-    print(f"🖥️ CUDA Device: {settings.get('cuda_device', 'Default (0)')}", flush=True)
-    print(f"👤 Face Restore: {'Yes' if face_apply else 'No'}", flush=True)
-    print(f"👁️ Preview Only: {'Yes' if preview_only else 'No'}", flush=True)
+    print(f"Input Path: {settings.get('input_path', 'Not set')}", flush=True)
+    print(f"Model: {settings.get('dit_model', 'Not set')}", flush=True)
+    print(f"Target Resolution: {settings.get('resolution', 'Auto')}p", flush=True)
+    print(f"Batch Size: {settings.get('batch_size', 'Default')}", flush=True)
+    print(f"CUDA Device: {settings.get('cuda_device', 'Default (0)')}", flush=True)
+    print(f"Face Restore: {'Yes' if face_apply else 'No'}", flush=True)
+    print(f"Preview Only: {'Yes' if preview_only else 'No'}", flush=True)
     print("-" * 70, flush=True)
 
     try:
@@ -847,7 +851,7 @@ def _process_single_file(
                 from shared.frame_utils import extract_first_frame
                 
                 if progress_cb:
-                    progress_cb("🎬 Extracting first frame for preview...\n")
+                    progress_cb("Extracting first frame for preview...\n")
                 
                 success, frame_path, error = extract_first_frame(
                     settings["input_path"],
@@ -855,7 +859,15 @@ def _process_single_file(
                 )
                 
                 if not success or not frame_path:
-                    return f"❌ Frame extraction failed: {error}", error, None, None, "Preview failed", "Preview failed"
+                    return (
+                        f"Frame extraction failed: {error}",
+                        error or "",
+                        None,
+                        None,
+                        "Preview failed",
+                        "Preview failed",
+                        "Preview failed",
+                    )
                 
                 # Process the extracted frame as an image
                 preview_settings = settings.copy()
@@ -864,7 +876,7 @@ def _process_single_file(
                 preview_settings["load_cap"] = 1
                 
                 if progress_cb:
-                    progress_cb("🎨 Upscaling first frame...\n")
+                    progress_cb("Upscaling first frame...\n")
                 
                 result = runner.run_seedvr2(
                     preview_settings,
@@ -874,13 +886,13 @@ def _process_single_file(
                 
                 if result.output_path and Path(result.output_path).exists():
                     output_image = result.output_path
-                    status = "✅ First-frame preview complete"
+                    status = "First-frame preview complete"
                     local_logs.append("Preview mode: Processed first frame only")
                     chunk_info_msg = "Preview: First frame extracted and upscaled"
                     chunk_summary = f"Preview output: {output_image}"
                     chunk_progress_msg = "Preview mode: 1/1 frames"
                 else:
-                    status = "❌ Preview upscaling failed"
+                    status = "Preview upscaling failed"
                     local_logs.append(result.log)
                     chunk_progress_msg = "Preview failed"
                     
@@ -892,8 +904,32 @@ def _process_single_file(
                 settings["output_format"] = "png"
 
         # -----------------------------------------------------------------
-        # ✅ Upscale-x sizing (compute SeedVR2 CLI params + optional pre-downscale)
+        #  Upscale-x sizing (compute SeedVR2 CLI params + optional pre-downscale)
         # -----------------------------------------------------------------
+        # Single-image outputs: enforce sequential numbering in output root
+        # (0001_<orig_stem>.png, 0002_<orig_stem>.png, ...) to avoid overwrites across app instances.
+        try:
+            if (not preview_only) and detect_input_type(settings["input_path"]) == "image":
+                override_raw = (settings.get("output_override") or "").strip()
+                orig_name = settings.get("_original_filename") or Path(settings["input_path"]).name
+                if override_raw:
+                    override_path = Path(normalize_path(override_raw))
+                    if override_path.suffix:
+                        # Explicit file path provided by the user -> honor as-is.
+                        settings["output_override"] = str(override_path)
+                    else:
+                        # Directory override -> create numbered file inside that directory.
+                        settings["output_override"] = str(
+                            numbered_single_image_output_path(Path(override_path), str(orig_name), ext=".png")
+                        )
+                else:
+                    # Default outputs folder -> numbered output file.
+                    settings["output_override"] = str(
+                        numbered_single_image_output_path(Path(output_dir), str(orig_name), ext=".png")
+                    )
+        except Exception:
+            pass
+
         try:
             enable_max_target = bool(seed_controls.get("enable_max_target", True))
             max_edge = int(settings.get("max_resolution", 0) or 0)
@@ -932,33 +968,24 @@ def _process_single_file(
 
                     if progress_cb:
                         progress_cb(
-                            f"🧩 Preprocessing input: {w}×{h} → {plan.preprocess_width}×{plan.preprocess_height} (×{plan.preprocess_scale:.3f})\n"
+                            f" Preprocessing input: {w}{h}  {plan.preprocess_width}{plan.preprocess_height} ({plan.preprocess_scale:.3f})\n"
                         )
 
                     pre_out: Optional[Path] = None
                     if in_type == "video":
-                        pre_out = collision_safe_path(
-                            temp_root / f"{Path(in_path).stem}_pre{plan.preprocess_width}x{plan.preprocess_height}.mp4"
+                        # Save the downscaled input into the user-visible output folder (run dir).
+                        original_name = settings.get("_original_filename") or Path(in_path).name
+                        pre_out = downscaled_video_path(output_dir, str(original_name))
+                        ok, _err = scale_video(
+                            Path(in_path),
+                            Path(pre_out),
+                            int(plan.preprocess_width),
+                            int(plan.preprocess_height),
+                            lossless=True,
+                            audio_copy_first=True,
+                            on_progress=(lambda x: progress_cb(x) if progress_cb else None),
                         )
-                        cmd = [
-                            "ffmpeg",
-                            "-y",
-                            "-i",
-                            str(in_path),
-                            "-vf",
-                            f"scale={plan.preprocess_width}:{plan.preprocess_height}:flags=lanczos",
-                            "-c:v",
-                            "libx264",
-                            "-preset",
-                            "veryfast",
-                            "-crf",
-                            "0",
-                            "-c:a",
-                            "copy",
-                            str(pre_out),
-                        ]
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        if not pre_out.exists():
+                        if (not ok) or (not Path(pre_out).exists()):
                             pre_out = None
                     elif in_type == "image":
                         try:
@@ -986,10 +1013,10 @@ def _process_single_file(
                         settings["_preprocessed_input_path"] = str(pre_out)
                         settings["input_path"] = str(pre_out)
                         if progress_cb:
-                            progress_cb(f"✅ Preprocess complete: {pre_out.name}\n")
+                            progress_cb(f"Preprocess complete: {pre_out.name}\n")
         except Exception as e:
             if progress_cb:
-                progress_cb(f"⚠️ Preprocess sizing skipped: {str(e)[:120]}\n")
+                progress_cb(f"Preprocess sizing skipped: {str(e)[:120]}\n")
 
         # Model loading check
         model_manager = get_model_manager()
@@ -1002,15 +1029,23 @@ def _process_single_file(
             if progress_cb:
                 progress_cb(f"Loading model: {dit_model}...\n")
             if not runner.ensure_seedvr2_model_loaded(settings, lambda x: progress_cb(x) if progress_cb else None):
-                return "❌ Model load failed", "", None, None, "Model load failed", "Model load failed"
+                return (
+                    "Model load failed",
+                    "",
+                    None,
+                    None,
+                    "Model load failed",
+                    "Model load failed",
+                    "Model load failed",
+                )
             if progress_cb:
                 progress_cb("Model loaded successfully!\n")
 
-            # 🎬 CHUNKING SYSTEM ARCHITECTURE - Two Complementary Methods:
+            #  CHUNKING SYSTEM ARCHITECTURE - Two Complementary Methods:
         # 
         # METHOD 1: PySceneDetect Chunking (PREFERRED, UNIVERSAL)
         # --------------------------------------------------------
-        # - Controlled by: Resolution & Scene Split tab → chunk_size_sec setting in shared state
+        # - Controlled by: Resolution & Scene Split tab  chunk_size_sec setting in shared state
         # - Settings: chunk_size_sec, chunk_overlap_sec, scene_threshold, min_scene_len
         # - How it works: Externally splits video into scenes using PySceneDetect,
         #   processes each scene separately, then concatenates with blending
@@ -1019,7 +1054,7 @@ def _process_single_file(
         # 
         # METHOD 2: SeedVR2 Native Streaming (SEEDVR2-SPECIFIC OPTIMIZATION)
         # --------------------------------------------------------------------
-        # - Controlled by: SeedVR2 tab → "Streaming Chunk Size (frames)" control
+        # - Controlled by: SeedVR2 tab  "Streaming Chunk Size (frames)" control
         # - Settings: chunk_size (frames), temporal_overlap
         # - How it works: CLI-internal memory-bounded processing, streams frames through model
         # - Works with: ONLY SeedVR2 (built into the CLI via --chunk_size flag)
@@ -1046,81 +1081,121 @@ def _process_single_file(
             # Process with external PySceneDetect chunking
             # This splits video into scenes, processes each, then concatenates
             completed_chunks = 0
+            processing_chunk_idx = 0
             total_chunks_estimate = 1
-            chunk_progress_updates = []
-            chunk_thumbnail_list = []  # Store (path, caption) tuples for gallery
+            chunk_progress_updates: List[str] = []
+            chunk_gallery_items: List[Any] = []
+            chunk_media_by_index: Dict[int, Any] = {}
 
-            def chunk_progress_callback(progress_val, desc=""):
-                nonlocal completed_chunks, total_chunks_estimate, chunk_thumbnail_list
-                
-                # Extract total chunks from description if available
+            def chunk_progress_callback(progress_val, desc="", **info):
+                nonlocal completed_chunks, processing_chunk_idx, total_chunks_estimate
+                nonlocal chunk_progress_updates, chunk_gallery_items, chunk_media_by_index
+
                 import re
-                total_match = re.search(r'(\d+)/(\d+)', desc)
-                if total_match:
-                    new_completed = int(total_match.group(1))
-                    total_chunks_estimate = int(total_match.group(2))
-                    
-                    # NEW chunk completed - generate thumbnail
-                    if new_completed > completed_chunks:
-                        completed_chunks = new_completed
-                        
-                        # Generate thumbnail for newly completed chunk
+
+                chunk_idx = info.get("chunk_index")
+                chunk_total = info.get("chunk_total")
+                phase = str(info.get("phase") or "").strip().lower()
+                desc_text = str(desc or "").strip()
+                desc_lc = desc_text.lower()
+
+                if chunk_total:
+                    try:
+                        total_chunks_estimate = max(1, int(chunk_total))
+                    except Exception:
+                        pass
+                if chunk_idx is None:
+                    m = re.search(r"(\d+)/(\d+)", desc_text)
+                    if m:
                         try:
-                            temp_path = Path(global_settings["temp_dir"])
-                            chunk_work_dir = temp_path / "chunks" / "work"
-                            
-                            if chunk_work_dir.exists():
-                                # Find chunk outputs (videos or PNG dirs)
-                                chunk_videos = sorted(chunk_work_dir.glob("chunk_*.mp4"))
-                                chunk_png_dirs = sorted([d for d in chunk_work_dir.glob("chunk_*") if d.is_dir()])
-                                
-                                target = None
-                                if chunk_videos and len(chunk_videos) >= completed_chunks:
-                                    target = chunk_videos[completed_chunks - 1]
-                                elif chunk_png_dirs and len(chunk_png_dirs) >= completed_chunks:
-                                    png_dir = chunk_png_dirs[completed_chunks - 1]
-                                    pngs = sorted(png_dir.glob("*.png"))
-                                    if pngs:
-                                        target = pngs[0]
-                                
-                                if target:
-                                    from shared.frame_utils import extract_video_thumbnail
-                                    import PIL.Image
-                                    
-                                    thumb_dir = temp_path / "chunk_thumbs"
-                                    thumb_dir.mkdir(parents=True, exist_ok=True)
-                                    thumb_out = thumb_dir / f"chunk_{completed_chunks:04d}.jpg"
-                                    
-                                    if target.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']:
-                                        # Video: extract with ffmpeg
-                                        success, thumb_path, _ = extract_video_thumbnail(
-                                            str(target),
-                                            output_path=str(thumb_out),
-                                            timestamp=0.5,
-                                            width=320
-                                        )
-                                        if success:
-                                            chunk_thumbnail_list.append((thumb_path, f"Chunk {completed_chunks}"))
-                                            seed_controls["chunk_thumbnails"] = list(chunk_thumbnail_list)
-                                    else:
-                                        # Image: resize with PIL
-                                        img = PIL.Image.open(target)
-                                        img.thumbnail((320, 320), PIL.Image.Resampling.LANCZOS)
-                                        img.convert('RGB').save(thumb_out, "JPEG", quality=85)
-                                        chunk_thumbnail_list.append((str(thumb_out), f"Chunk {completed_chunks}"))
-                                        seed_controls["chunk_thumbnails"] = list(chunk_thumbnail_list)
+                            chunk_idx = int(m.group(1))
+                            total_chunks_estimate = max(1, int(m.group(2)))
                         except Exception:
-                            pass  # Silent fail
-                    else:
-                        completed_chunks = new_completed
-                        
-                elif "Completed chunk" in desc or "chunk" in desc.lower():
-                    completed_chunks += 1
-                
-                chunk_progress_updates.append(f"[Chunk {completed_chunks}/{total_chunks_estimate}] {desc}")
-                
+                            chunk_idx = None
+
+                is_processing_event = phase == "processing" or desc_lc.startswith("processing chunk")
+                is_completed_event = (
+                    phase == "completed"
+                    or "completed chunk" in desc_lc
+                    or "finished chunk" in desc_lc
+                    or "chunk complete" in desc_lc
+                )
+
+                if chunk_idx is not None:
+                    try:
+                        idx_int = int(chunk_idx)
+                        if is_processing_event:
+                            processing_chunk_idx = max(1, idx_int)
+                        if is_completed_event:
+                            completed_chunks = max(int(completed_chunks), idx_int)
+                            processing_chunk_idx = max(processing_chunk_idx, idx_int)
+                    except Exception:
+                        pass
+                elif is_completed_event:
+                    completed_chunks = min(total_chunks_estimate, completed_chunks + 1)
+                    processing_chunk_idx = max(processing_chunk_idx, completed_chunks)
+
+                try:
+                    idx_int = int(chunk_idx or completed_chunks or 0)
+                except Exception:
+                    idx_int = 0
+
+                try:
+                    chunk_output = info.get("chunk_output")
+                    target_path = Path(chunk_output) if chunk_output else None
+                    if target_path and not target_path.exists():
+                        target_path = None
+
+                    processed_dir = Path(seed_controls.get("processed_chunks_dir") or (Path(output_dir) / "processed_chunks"))
+                    if target_path is None and idx_int > 0:
+                        cand_mp4 = processed_dir / f"chunk_{idx_int:04d}_upscaled.mp4"
+                        cand_dir = processed_dir / f"chunk_{idx_int:04d}_upscaled"
+                        if cand_mp4.exists():
+                            target_path = cand_mp4
+                        elif cand_dir.exists() and cand_dir.is_dir():
+                            target_path = cand_dir
+
+                    if idx_int > 0 and target_path and idx_int not in chunk_media_by_index:
+                        gallery_item: Optional[Any] = None
+                        if target_path.is_file():
+                            gallery_item = str(target_path)
+                        elif target_path.is_dir():
+                            video_candidates: List[Path] = []
+                            for ext in sorted(SEEDVR2_VIDEO_EXTS):
+                                video_candidates.extend(sorted(target_path.glob(f"*{ext}")))
+                            if video_candidates:
+                                gallery_item = str(video_candidates[0])
+                            else:
+                                image_candidates: List[Path] = []
+                                for ext in sorted(SEEDVR2_IMAGE_EXTS):
+                                    image_candidates.extend(sorted(target_path.glob(f"*{ext}")))
+                                if image_candidates:
+                                    gallery_item = str(image_candidates[0])
+
+                        if gallery_item:
+                            chunk_media_by_index[idx_int] = gallery_item
+                            chunk_gallery_items = [chunk_media_by_index[i] for i in sorted(chunk_media_by_index)]
+                            seed_controls["chunk_gallery_items"] = list(chunk_gallery_items)
+                            # Backward-compatible key for older readers.
+                            seed_controls["chunk_thumbnails"] = list(chunk_gallery_items)
+                except Exception:
+                    pass
+
+                pct = max(0.0, min(100.0, float(progress_val or 0.0) * 100.0))
+                if is_processing_event:
+                    label = f"Processing chunk {max(1, processing_chunk_idx)}/{total_chunks_estimate} ({pct:.1f}%)"
+                elif is_completed_event:
+                    label = f"Completed chunk {completed_chunks}/{total_chunks_estimate} ({pct:.1f}%)"
+                else:
+                    label = f"Progress {pct:.1f}%"
+
+                line = f"{label} | {desc_text}" if desc_text and desc_text.lower() not in label.lower() else label
+                chunk_progress_updates.append(line)
+                if len(chunk_progress_updates) > 200:
+                    chunk_progress_updates = chunk_progress_updates[-200:]
+
                 if progress_cb:
-                    progress_cb(f"Chunk {completed_chunks}/{total_chunks_estimate}: {desc}\n")
+                    progress_cb(f"{line}\n")
 
             # Get ALL chunking params from Resolution tab (via seed_controls)
             # PySceneDetect parameters now managed centrally in Resolution tab
@@ -1133,20 +1208,20 @@ def _process_single_file(
                 settings,
                 scene_threshold=scene_threshold,
                 min_scene_len=min_scene_len,
-                temp_dir=Path(global_settings["temp_dir"]),
+                work_dir=Path(output_dir),
                 on_progress=lambda msg: progress_cb(msg) if progress_cb else None,
                 chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
                 chunk_overlap=0.0 if auto_chunk else float(seed_controls.get("chunk_overlap_sec", 0) or 0),
                 per_chunk_cleanup=bool(seed_controls.get("per_chunk_cleanup", False)),
                 resume_from_partial=bool(settings.get("resume_chunking", False)),
                 allow_partial=True,
-                global_output_dir=str(runner.output_dir) if hasattr(runner, "output_dir") else None,
+                global_output_dir=str(output_dir),
                 progress_tracker=chunk_progress_callback,
                 process_func=None,  # Use default model_type routing
                 model_type="seedvr2",  # Explicitly specify SeedVR2 processing
             )
 
-            status = "✅ Chunked upscale complete" if rc == 0 else f"⚠️ Chunked upscale ended early ({rc})"
+            status = "Chunked upscale complete" if rc == 0 else f"Chunked upscale ended early ({rc})"
             output_path = final_out if final_out else None
             output_video = output_path if output_path and output_path.lower().endswith(".mp4") else None
             output_image = None
@@ -1159,40 +1234,31 @@ def _process_single_file(
             mode_label = "Auto (PySceneDetect scenes)" if auto_chunk else f"Static ({chunk_size_sec:g}s)"
             chunk_summary = f"{mode_label}: processed {chunk_count} chunks{native_streaming_info}. Final: {output_path}"
             
-            # Build detailed chunk info with live progress updates
-            chunk_progress_detailed = "\n".join(chunk_progress_updates[-10:]) if chunk_progress_updates else "Chunking in progress..."
-            chunk_info_msg = f"**Chunks Completed:** {completed_chunks}/{total_chunks_estimate}\n**Native Streaming:** {'Yes' if settings.get('chunk_size', 0) > 0 else 'No'}\n**Latest Progress:**\n{chunk_progress_detailed}"
-            chunk_progress_msg = f"Chunks: {completed_chunks}/{total_chunks_estimate}"
+            latest_line = chunk_progress_updates[-1] if chunk_progress_updates else "Chunking in progress..."
+            active_chunk = processing_chunk_idx if processing_chunk_idx > 0 else max(1, completed_chunks)
+            chunk_info_msg = (
+                f"Chunks completed: {completed_chunks}/{total_chunks_estimate}\n"
+                f"Current chunk: {active_chunk}/{total_chunks_estimate}\n"
+                f"Latest: {latest_line}"
+            )
+            chunk_progress_msg = "\n".join(chunk_progress_updates[-12:]) if chunk_progress_updates else "Chunking in progress..."
             
-            # Generate thumbnails for completed chunks (if not already generated during processing)
-            if chunk_count > 0 and not chunk_thumbnail_list:
+            # Final fallback: discover processed chunk outputs if callback data was sparse.
+            if chunk_count > 0 and not chunk_gallery_items:
                 try:
-                    temp_path = Path(global_settings["temp_dir"])
-                    chunk_work_dir = temp_path / "chunks" / "work"
-                    
-                    if chunk_work_dir.exists():
-                        # Find all chunk video files
-                        chunk_video_files = sorted(chunk_work_dir.glob("chunk_*.mp4"))
-                        
-                        if chunk_video_files:
-                            from shared.frame_utils import extract_multiple_thumbnails
-                            
-                            # Extract thumbnails from all chunks
-                            chunk_thumbnail_list = extract_multiple_thumbnails(
-                                [str(f) for f in chunk_video_files],
-                                output_dir=str(temp_path / "chunk_thumbs"),
-                                width=320
-                            )
-                            
-                            # Store in state for UI display
-                            if chunk_thumbnail_list:
-                                seed_controls["chunk_thumbnails"] = chunk_thumbnail_list
-                                if progress_cb:
-                                    progress_cb(f"✅ Generated {len(chunk_thumbnail_list)} chunk thumbnails\n")
+                    processed_dir = Path(seed_controls.get("processed_chunks_dir") or (Path(output_dir) / "processed_chunks"))
+                    chunk_video_files = sorted(processed_dir.glob("chunk_*_upscaled.mp4"))
+                    if not chunk_video_files:
+                        chunk_video_files = sorted(processed_dir.glob("chunk_*_out.mp4"))
+
+                    if chunk_video_files:
+                        chunk_gallery_items = [str(f) for f in chunk_video_files]
+                        seed_controls["chunk_gallery_items"] = list(chunk_gallery_items)
+                        seed_controls["chunk_thumbnails"] = list(chunk_gallery_items)
                 except Exception as e:
-                    # Don't fail processing if thumbnail generation fails
+                    # Don't fail processing if fallback discovery fails.
                     if progress_cb:
-                        progress_cb(f"⚠️ Thumbnail generation failed: {str(e)}\n")
+                        progress_cb(f"Chunk output discovery failed: {str(e)}\n")
             
             result = RunResult(rc, output_path, clog)
         else:
@@ -1209,12 +1275,12 @@ def _process_single_file(
             # Add informative message if native streaming is being used
             native_chunk_size = settings.get("chunk_size", 0)
             if native_chunk_size > 0:
-                status = "✅ Upscale complete (SeedVR2 native streaming)" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
+                status = "Upscale complete (SeedVR2 native streaming)" if result.returncode == 0 else f"Upscale exited with code {result.returncode}"
                 chunk_summary = f"SeedVR2 native streaming: {native_chunk_size} frames/chunk (CLI-internal, memory-efficient)"
                 chunk_info_msg = f"Native streaming enabled: {native_chunk_size} frames/chunk\nTemporal overlap: {settings.get('temporal_overlap', 0)}\nMemory-bounded processing for long videos."
                 chunk_progress_msg = "Native streaming: CLI-internal chunking"
             else:
-                status = "✅ Upscale complete" if result.returncode == 0 else f"⚠️ Upscale exited with code {result.returncode}"
+                status = "Upscale complete" if result.returncode == 0 else f"Upscale exited with code {result.returncode}"
                 chunk_summary = "Single pass (entire video loaded at once)"
                 chunk_info_msg = "Single-pass processing (entire video in memory)"
                 chunk_progress_msg = "Single pass: no chunking"
@@ -1226,10 +1292,8 @@ def _process_single_file(
 
             # Save preprocessed input (if we created one) alongside outputs
             pre_in = settings.get("_preprocessed_input_path")
-            if pre_in:
-                saved_pre = _save_preprocessed_artifact(Path(pre_in), result.output_path)
-                if saved_pre:
-                    local_logs.append(f"🧩 Preprocessed input saved: {saved_pre}")
+            if pre_in and Path(pre_in).exists():
+                local_logs.append(f"Downscaled input saved: {pre_in}")
 
             # Update state - track both directory AND file path for pinned comparison
             try:
@@ -1278,9 +1342,33 @@ def _process_single_file(
             try:
                 adjusted = ffmpeg_set_fps(Path(output_video), float(fps_val))
                 output_video = str(adjusted)
-                local_logs.append(f"✅ FPS overridden to {fps_val}: {adjusted}")
+                local_logs.append(f"FPS overridden to {fps_val}: {adjusted}")
             except Exception as e:
-                local_logs.append(f"⚠️ FPS override failed: {str(e)}")
+                local_logs.append(f"FPS override failed: {str(e)}")
+
+        # Preserve audio (SeedVR2/face-restore pipelines often produce video-only outputs).
+        if output_video and Path(output_video).exists():
+            try:
+                from shared.audio_utils import ensure_audio_on_video
+
+                audio_src = settings.get("_original_input_path_before_preprocess") or settings.get("input_path")
+                if audio_src and Path(audio_src).exists():
+                    audio_codec = str(settings.get("audio_codec") or seed_controls.get("audio_codec_val") or "copy")
+                    audio_bitrate = settings.get("audio_bitrate") or seed_controls.get("audio_bitrate_val") or None
+                    _changed, _final, _err = ensure_audio_on_video(
+                        Path(output_video),
+                        Path(audio_src),
+                        audio_codec=audio_codec,
+                        audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                        force_replace=True,
+                        on_progress=(lambda x: progress_cb(x) if progress_cb else None),
+                    )
+                    if _err:
+                        local_logs.append(f"Audio mux: {_err}")
+                    if _final and str(_final) != str(output_video):
+                        output_video = str(_final)
+            except Exception as e:
+                local_logs.append(f"Audio mux failed: {str(e)}")
 
         # Generate comparison video if enabled
         comparison_mode = seed_controls.get("comparison_mode_val", "slider")
@@ -1301,9 +1389,9 @@ def _process_single_file(
                     )
                 
                 if success:
-                    local_logs.append(f"✅ Comparison video created: {comp_path}")
+                    local_logs.append(f"Comparison video created: {comp_path}")
                 else:
-                    local_logs.append(f"⚠️ Comparison video failed: {err}")
+                    local_logs.append(f"Comparison video failed: {err}")
 
     except Exception as e:
         import traceback
@@ -1312,17 +1400,17 @@ def _process_single_file(
         
         # CONSOLE LOGGING: Print error details so users can see what went wrong
         print("\n" + "=" * 70, flush=True)
-        print("❌ SEEDVR2 PROCESSING FAILED", flush=True)
+        print("SEEDVR2 PROCESSING FAILED", flush=True)
         print("=" * 70, flush=True)
         print(f"Error: {error_msg}", flush=True)
         print("-" * 70, flush=True)
-        print("📋 FULL TRACEBACK:", flush=True)
+        print("FULL TRACEBACK:", flush=True)
         print(traceback_str, flush=True)
         print("=" * 70, flush=True)
         
-        local_logs.append(f"❌ {error_msg}")
+        local_logs.append(error_msg)
         local_logs.append(f"Traceback:\n{traceback_str}")
-        status = "❌ Processing failed"
+        status = "Processing failed"
         chunk_summary = "Failed"
         chunk_info_msg = f"Error: {error_msg}"
         chunk_progress_msg = "Error occurred"
@@ -1342,7 +1430,7 @@ def comparison_html_slider():
         'value': """
         <div style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
             <p style="color: #495057; font-size: 14px; margin: 0;">
-                📊 <strong>Comparison View:</strong> Process a video or image to see before/after comparison.<br>
+                 <strong>Comparison View:</strong> Process a video or image to see before/after comparison.<br>
                 Videos use interactive HTML5 slider with fullscreen support. Images use Gradio's ImageSlider.
             </p>
         </div>
@@ -1397,18 +1485,18 @@ def build_seedvr2_callbacks(
         if not preset_name.strip() and current_preset_selection and current_preset_selection.strip():
             preset_name = current_preset_selection.strip()
         elif not preset_name.strip():
-            return gr.update(), gr.update(value="⚠️ Enter a preset name or select an existing preset to overwrite"), *list(args)
+            return gr.update(), gr.update(value=" Enter a preset name or select an existing preset to overwrite"), *list(args)
 
         try:
             # Validate component count matches ORDER
             if len(args) != len(SEEDVR2_ORDER):
                 error_msg = (
-                    f"⚠️ Preset schema mismatch: received {len(args)} values but expected {len(SEEDVR2_ORDER)}. "
+                    f" Preset schema mismatch: received {len(args)} values but expected {len(SEEDVR2_ORDER)}. "
                     f"This indicates inputs_list in seedvr2_tab.py is out of sync with SEEDVR2_ORDER. "
                     f"Preset saving aborted to prevent corruption."
                 )
                 error_logger.error(error_msg)
-                return gr.update(), gr.update(value=f"❌ {error_msg[:200]}..."), *list(args)
+                return gr.update(), gr.update(value=f" {error_msg[:200]}..."), *list(args)
             
             payload = _seedvr2_dict_from_args(list(args))
             validated_payload = _enforce_seedvr2_guardrails(payload, defaults, state=None)
@@ -1423,11 +1511,11 @@ def build_seedvr2_callbacks(
             current_map = dict(zip(SEEDVR2_ORDER, list(args)))
             loaded_vals = _apply_preset_to_values(validated_payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}'"), *loaded_vals
+            return dropdown, gr.update(value=f" Saved preset '{preset_name}'"), *loaded_vals
         except Exception as e:
             import traceback
             error_logger.error(f"Error saving preset: {str(e)}\n{traceback.format_exc()}")
-            return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f" Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
         """
@@ -1448,12 +1536,12 @@ def build_seedvr2_callbacks(
             values = _apply_preset_to_values(preset or {}, defaults, preset_manager, current=current_map)
             
             # Return values + status message (status is second-to-last, before shared_state)
-            status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
+            status_msg = f" Loaded preset '{preset_name}'" if preset else " Preset not found"
             return (*values, gr.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
             # Return current values + error status
-            return (*current_values, gr.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values, gr.update(value=f" Error: {str(e)}"))
 
     def safe_defaults():
         """Get safe default values."""
@@ -1461,124 +1549,123 @@ def build_seedvr2_callbacks(
 
     def check_resume_status(global_settings, output_format):
         """Check chunking resume status."""
-        temp_dir_path = Path(global_settings["temp_dir"])
-        available, message = check_resume_available(temp_dir_path, output_format or "mp4")
-        if available:
-            return gr.update(value=f"✅ {message}", visible=True)
-        else:
-            return gr.update(value=f"ℹ️ {message}", visible=True)
+        out_root = Path(global_settings.get("output_dir", output_dir))
+        fmt = output_format or "mp4"
+
+        # Search newest run folders first (0001, 0002, ...). This enables resuming even after restart.
+        candidates: List[Path] = []
+        try:
+            for d in out_root.iterdir():
+                if d.is_dir() and d.name.isdigit() and len(d.name) == 4:
+                    candidates.append(d)
+        except Exception:
+            candidates = []
+
+        candidates.sort(key=lambda p: int(p.name), reverse=True)
+        for run_dir in candidates:
+            try:
+                available, message = check_resume_available(run_dir, fmt)
+                if available:
+                    return gr.update(value=f" {run_dir.name}: {message}", visible=True)
+            except Exception:
+                continue
+
+        return gr.update(value=" No partial chunking session found to resume in the outputs folder.", visible=True)
 
     def cancel():
         """
-        Cancel current processing and properly compile any partial outputs if available.
-        
-        ENHANCED: Uses proper merge pipeline with scene overlap handling when possible,
-        falls back to simple concat or latest-file recovery for edge cases.
-        
-        BATCH SUPPORT: Also handles partial batch outputs by collecting completed files.
+        Cancel current processing and compile any partial outputs if available.
+
+        Priority:
+        1) Current/recent output run directories (new architecture)
+        2) Recently completed batch outputs in outputs root
+        3) Legacy temp-folder fallback (backward compatibility)
         """
         canceled = runner.cancel()
         if not canceled:
             return gr.update(value="No active process to cancel"), ""
 
-        # Check multiple locations for partial outputs:
-        # 1. External chunked processing (PySceneDetect chunks) - PREFERRED (uses proper merge)
-        # 2. Batch processing outputs - collect completed files
-        # 3. Single-pass outputs in temp directory - FALLBACK (best-effort copy)
-        
-        compiled_output = None
+        compiled_output: Optional[str] = None
         merge_method = "none"
-        temp_base = Path(global_settings["temp_dir"])
-        temp_chunks_dir = temp_base / "chunks"
-        
-        # Try to find and properly merge chunk-based partial outputs
-        if temp_chunks_dir.exists():
-            try:
-                from shared.chunking import detect_resume_state, concat_videos
-                from shared.path_utils import collision_safe_path
+        recent_outputs: List[Path] = []
+        live_output_root = Path(global_settings.get("output_dir", output_dir))
 
-                partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
-                partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
+        state_snapshot = {}
+        try:
+            state_snapshot = shared_state.value if isinstance(shared_state.value, dict) else {}
+        except Exception:
+            state_snapshot = {}
+        seed_state = state_snapshot.get("seed_controls", {}) if isinstance(state_snapshot, dict) else {}
+        last_run_dir = seed_state.get("last_run_dir")
+        audio_source = (
+            seed_state.get("last_input_path")
+            or seed_state.get("_original_input_path_before_preprocess")
+            or None
+        )
+        audio_codec = str(seed_state.get("audio_codec_val") or "copy")
+        audio_bitrate = seed_state.get("audio_bitrate_val") or None
 
-                # Try to compile video chunks with PROPER BLENDING if overlap detected
-                if completed_chunks and len(completed_chunks) > 0:
-                    partial_target = collision_safe_path(temp_chunks_dir / "cancelled_partial.mp4")
+        # Preferred: salvage from run directories in outputs.
+        try:
+            from shared.chunking import salvage_partial_from_run_dir
+            from shared.output_run_manager import recent_output_run_dirs
 
-                    # Cancellation salvage should preserve quality/audio whenever possible.
-                    # Auto chunking forces overlap=0, so simple concat is the correct default.
-                    success = concat_videos(completed_chunks, partial_target)
-                    merge_method = "simple"
-                    
-                    if success and partial_target.exists():
-                        # Copy to outputs folder with collision-safe naming
-                        final_output = Path(output_dir) / f"cancelled_partial_upscaled.mp4"
-                        final_output = collision_safe_path(final_output)
-                        shutil.copy2(partial_target, final_output)
-                        compiled_output = str(final_output)
+            run_dirs = recent_output_run_dirs(
+                live_output_root,
+                last_run_dir=str(last_run_dir) if last_run_dir else None,
+                limit=30,
+            )
+            for run_dir in run_dirs:
+                partial_path, method = salvage_partial_from_run_dir(
+                    run_dir,
+                    partial_basename="cancelled_partial",
+                    audio_source=str(audio_source) if audio_source else None,
+                    audio_codec=audio_codec,
+                    audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                )
+                if partial_path and Path(partial_path).exists():
+                    compiled_output = str(partial_path)
+                    merge_method = method
+                    break
+        except Exception as e:
+            error_logger.warning(f"Output-run salvage failed during cancel: {e}")
 
-                # Or compile PNG chunks (directory-based)
-                elif completed_png_chunks and len(completed_png_chunks) > 0:
-                    partial_target = collision_safe_path(temp_chunks_dir / "cancelled_partial_png")
-                    partial_target.mkdir(parents=True, exist_ok=True)
-
-                    for i, chunk_path in enumerate(completed_png_chunks, 1):
-                        dest = partial_target / f"chunk_{i:04d}"
-                        if Path(chunk_path).is_dir():
-                            shutil.copytree(chunk_path, dest, dirs_exist_ok=True)
-                        else:
-                            shutil.copy2(chunk_path, dest)
-
-                    compiled_output = str(partial_target)
-                    merge_method = "png_collection"
-
-            except Exception as e:
-                # Log error but continue to fallback
-                error_logger.warning(f"Proper chunk merge failed during cancel: {e}")
-        
-        # Check for batch partial outputs (completed files in output_dir)
+        # Batch fallback: recently created outputs.
         if not compiled_output:
             try:
-                # Look for recently created upscaled files (from batch jobs that completed before cancel)
-                batch_outputs = []
-                for ext in [".mp4", ".avi", ".mov", ".mkv", ".png", ".jpg", ".jpeg"]:
-                    batch_outputs.extend(list(Path(output_dir).glob(f"*_upscaled{ext}")))
-                
-                # Filter to files modified in last 24 hours (current session)
+                batch_outputs: List[Path] = []
+                for ext in [".mp4", ".avi", ".mov", ".mkv", ".png", ".jpg", ".jpeg", ".webp"]:
+                    batch_outputs.extend(list(live_output_root.rglob(f"*_upscaled{ext}")))
+
                 import time
+
                 current_time = time.time()
                 recent_outputs = [
-                    f for f in batch_outputs 
-                    if current_time - f.stat().st_mtime < 86400  # 24 hours
+                    f for f in batch_outputs if f.is_file() and (current_time - f.stat().st_mtime < 86400)
                 ]
-                
                 if recent_outputs:
-                    compiled_output = str(Path(output_dir))
+                    compiled_output = str(live_output_root)
                     merge_method = "batch_partial"
-                    
             except Exception as e:
                 error_logger.warning(f"Batch partial recovery failed: {e}")
-        
-        # FALLBACK: Check for single-pass partial outputs in temp directory
+
+        # Legacy fallback: check temp files from older flow.
         if not compiled_output:
             try:
-                # Look for any mp4/png files created in temp during processing
-                temp_files = []
+                temp_base = Path(global_settings.get("temp_dir", temp_dir))
+                temp_files: List[Path] = []
                 for ext in [".mp4", ".avi", ".mov", ".mkv"]:
                     temp_files.extend(list(temp_base.glob(f"*{ext}")))
                 for ext in [".png", ".jpg", ".jpeg"]:
                     temp_files.extend(list(temp_base.glob(f"*{ext}")))
-                
-                # Sort by modification time (most recent first)
+
                 temp_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                
                 if temp_files:
-                    # Copy most recent partial output to outputs folder
                     most_recent = temp_files[0]
                     from shared.path_utils import collision_safe_path
-                    
-                    final_output = Path(output_dir) / f"cancelled_partial_{most_recent.name}"
+
+                    final_output = live_output_root / f"cancelled_partial_{most_recent.name}"
                     final_output = collision_safe_path(final_output)
-                    
                     if most_recent.is_file():
                         shutil.copy2(most_recent, final_output)
                         compiled_output = str(final_output)
@@ -1587,29 +1674,26 @@ def build_seedvr2_callbacks(
                         shutil.copytree(most_recent, final_output, dirs_exist_ok=True)
                         compiled_output = str(final_output)
                         merge_method = "latest_dir"
-                        
             except Exception as e:
                 error_logger.warning(f"Fallback recovery failed during cancel: {e}")
 
         if compiled_output:
             merge_info = {
-                "blended": "Chunks merged with proper frame blending (scene overlap handled)",
                 "simple": "Chunks concatenated (no overlap detected)",
                 "png_collection": "PNG frames collected from chunks",
                 "batch_partial": f"Batch processing cancelled - {len(recent_outputs)} completed files saved in output folder",
-                "latest_file": "⚠️ Best-effort: Latest temp file copied (no proper merge)",
-                "latest_dir": "⚠️ Best-effort: Latest temp directory copied (no proper merge)"
+                "latest_file": "Best-effort: Latest temp file copied (no proper merge)",
+                "latest_dir": "Best-effort: Latest temp directory copied (no proper merge)",
             }.get(merge_method, "Unknown merge method")
-            
             return (
-                gr.update(value=f"⏹️ Cancelled - Partial output saved: {Path(compiled_output).name}\n**Merge method:** {merge_info}"),
-                f"Partial results saved to: {compiled_output}\n\nMerge method: {merge_info}"
+                gr.update(value=f"Cancelled - Partial output saved: {Path(compiled_output).name}\nMerge method: {merge_info}"),
+                f"Partial results saved to: {compiled_output}\n\nMerge method: {merge_info}",
             )
-        else:
-            return (
-                gr.update(value="⏹️ Cancelled - No partial outputs found"),
-                "Processing was cancelled. No recoverable partial outputs were found in temp directories."
-            )
+
+        return (
+            gr.update(value="Cancelled - No partial outputs found"),
+            "Processing was cancelled. No recoverable partial outputs were found in output runs or temp fallback.",
+        )
 
     def open_outputs_folder_seedvr2(state: Dict[str, Any]):
         """Open outputs folder - delegates to shared utility (no code duplication)"""
@@ -1638,8 +1722,8 @@ def build_seedvr2_callbacks(
             status_lines = []
             for model_id, info in loaded_models.items():
                 state = info["state"]
-                marker = "✅" if state == "loaded" else "⏳" if state == "loading" else "❌"
-                current_marker = " ← current" if model_id == current_model else ""
+                marker = "" if state == "loaded" else "" if state == "loading" else ""
+                current_marker = "  current" if model_id == current_model else ""
                 status_lines.append(f"{marker} {info['model_name']} ({state}){current_marker}")
 
             return "\n".join(status_lines)
@@ -1661,7 +1745,7 @@ def build_seedvr2_callbacks(
 
         dims = get_media_dimensions(str(p))
         if not dims:
-            return gr.update(value="⚠️ Could not determine input dimensions."), state
+            return gr.update(value=" Could not determine input dimensions."), state
 
         w, h = dims
         input_short = min(w, h)
@@ -1694,9 +1778,9 @@ def build_seedvr2_callbacks(
         out_long = max(out_w, out_h)
 
         list_items: List[str] = []
-        list_items.append(f"📐 <strong>Input:</strong> {w}×{h} (short side: {input_short}px)")
+        list_items.append(f" <strong>Input:</strong> {w}{h} (short side: {input_short}px)")
 
-        target_line = f"🎯 <strong>Target setting:</strong> upscale {scale_x:g}x"
+        target_line = f" <strong>Target setting:</strong> upscale {scale_x:g}x"
         if max_edge and max_edge > 0:
             target_line += f", max edge {max_edge}px"
         if max_edge and max_edge > 0 and plan.cap_ratio < 0.999999:
@@ -1705,35 +1789,35 @@ def build_seedvr2_callbacks(
 
         if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
             list_items.append(
-                f"🧩 <strong>Preprocess:</strong> {w}×{h} → {plan.preprocess_width}×{plan.preprocess_height} (×{plan.preprocess_scale:.3f})"
+                f" <strong>Preprocess:</strong> {w}{h}  {plan.preprocess_width}{plan.preprocess_height} ({plan.preprocess_scale:.3f})"
             )
 
         resized_short = min(plan.resize_width, plan.resize_height)
-        list_items.append(f"🧩 <strong>Resize result:</strong> {plan.resize_width}×{plan.resize_height} (short side: {resized_short}px)")
+        list_items.append(f" <strong>Resize result:</strong> {plan.resize_width}{plan.resize_height} (short side: {resized_short}px)")
 
         if plan.padded_width and plan.padded_height:
-            list_items.append(f"🧱 <strong>Padded for model (÷16):</strong> {plan.padded_width}×{plan.padded_height} (padding trimmed after processing)")
+            list_items.append(f" <strong>Padded for model (16):</strong> {plan.padded_width}{plan.padded_height} (padding trimmed after processing)")
 
-        list_items.append(f"✅ <strong>Final saved output:</strong> {out_w}×{out_h} (trimmed to even numbers)")
+        list_items.append(f" <strong>Final saved output:</strong> {out_w}{out_h} (trimmed to even numbers)")
 
         if out_short < input_short:
-            list_items.append(f"📉 <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)")
-            list_items.append("💡 <strong>Tip:</strong> Set Upscale x ≥ 1.0 and/or increase Max Resolution to avoid downscaling.")
+            list_items.append(f" <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)")
+            list_items.append(" <strong>Tip:</strong> Set Upscale x  1.0 and/or increase Max Resolution to avoid downscaling.")
         elif out_short > input_short:
-            list_items.append(f"📈 <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)")
+            list_items.append(f" <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)")
         else:
-            list_items.append("➡️ <strong>Mode:</strong> Keep size (output short side matches input short side)")
+            list_items.append(" <strong>Mode:</strong> Keep size (output short side matches input short side)")
 
         if max_edge and max_edge > 0 and plan.cap_ratio < 0.999999:
             requested_long = int(round(input_long * scale_x))
-            list_items.append(f"⚠️ <strong>Max edge clamp:</strong> requested long side ~{requested_long}px → capped to ~{out_long}px (ratio {plan.cap_ratio:.3f})")
+            list_items.append(f" <strong>Max edge clamp:</strong> requested long side ~{requested_long}px  capped to ~{out_long}px (ratio {plan.cap_ratio:.3f})")
 
         if plan.seedvr2_resolution is not None:
-            list_items.append(f"🔧 <strong>SeedVR2 CLI:</strong> --resolution {plan.seedvr2_resolution} --max_resolution {max_edge if max_edge > 0 else 0}")
+            list_items.append(f" <strong>SeedVR2 CLI:</strong> --resolution {plan.seedvr2_resolution} --max_resolution {max_edge if max_edge > 0 else 0}")
 
         if plan.notes:
             for n in plan.notes:
-                list_items.append(f"ℹ️ {n}")
+                list_items.append(f" {n}")
 
         # Chunking info (Resolution tab global settings)
         if detect_input_type(str(p)) == "video":
@@ -1759,16 +1843,16 @@ def build_seedvr2_callbacks(
 
                 if cached_valid and cached_scene_count > 0:
                     list_items.append(
-                        "🎬 <strong>Auto Chunk:</strong> detected "
+                        " <strong>Auto Chunk:</strong> detected "
                         f"<strong>{cached_scene_count}</strong> scenes "
                         f"(threshold={scene_threshold:g}, min_len={min_scene_len:g}s)."
                     )
                 elif cached_valid and cached_scene_count <= 0:
                     err = str(scan.get("error") or "").strip()
                     if err:
-                        list_items.append(f"🎬 <strong>Auto Chunk:</strong> scene scan failed (cached). ({err})")
+                        list_items.append(f" <strong>Auto Chunk:</strong> scene scan failed (cached). ({err})")
                     else:
-                        list_items.append("🎬 <strong>Auto Chunk:</strong> scene scan failed (cached).")
+                        list_items.append(" <strong>Auto Chunk:</strong> scene scan failed (cached).")
                 else:
                     if auto_detect_scenes:
                         try:
@@ -1791,12 +1875,12 @@ def build_seedvr2_callbacks(
 
                             if scene_count > 0:
                                 list_items.append(
-                                    "🎬 <strong>Auto Chunk:</strong> detected "
+                                    " <strong>Auto Chunk:</strong> detected "
                                     f"<strong>{scene_count}</strong> scenes "
                                     f"(threshold={scene_threshold:g}, min_len={min_scene_len:g}s)."
                                 )
                             else:
-                                list_items.append("🎬 <strong>Auto Chunk:</strong> scene scan failed.")
+                                list_items.append(" <strong>Auto Chunk:</strong> scene scan failed.")
                         except Exception as e:
                             seed_controls["last_scene_scan"] = {
                                 "input_path": str(p),
@@ -1807,11 +1891,11 @@ def build_seedvr2_callbacks(
                                 "error": str(e),
                             }
                             state["seed_controls"] = seed_controls
-                            list_items.append(f"🎬 <strong>Auto Chunk:</strong> scene scan failed. ({str(e)})")
+                            list_items.append(f" <strong>Auto Chunk:</strong> scene scan failed. ({str(e)})")
                     else:
                         list_items.append(
-                            "🎬 <strong>Auto Chunk:</strong> auto scene detection is disabled. "
-                            "Enable it in the Resolution tab or use the <strong>📊 Estimate Chunks</strong> button."
+                            " <strong>Auto Chunk:</strong> auto scene detection is disabled. "
+                            "Enable it in the Resolution tab or use the <strong> Estimate Chunks</strong> button."
                         )
             else:
                 chunk_size = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
@@ -1823,7 +1907,7 @@ def build_seedvr2_callbacks(
 
                         est_chunks = math.ceil(dur / max(0.001, chunk_size - chunk_overlap))
                         list_items.append(
-                            f"🧩 <strong>Chunk estimate:</strong> ~{est_chunks} chunks for {dur:.1f}s "
+                            f" <strong>Chunk estimate:</strong> ~{est_chunks} chunks for {dur:.1f}s "
                             f"(size {chunk_size:g}s, overlap {chunk_overlap:g}s)."
                         )
 
@@ -1838,6 +1922,37 @@ def build_seedvr2_callbacks(
             # Clear any previous VRAM OOM banner at the start of a new run.
             clear_vram_oom_alert(state)
             seed_controls = state.get("seed_controls", {})
+
+            video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
+            image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+            def _media_updates(video_path: Optional[str], image_path: Optional[str]) -> tuple[Any, Any]:
+                """
+                Return (output_video_update, output_image_update) for the merged output panel.
+                """
+                try:
+                    if video_path and not Path(video_path).is_dir():
+                        if Path(video_path).suffix.lower() in video_exts:
+                            return gr.update(value=video_path, visible=True), gr.update(value=None, visible=False)
+                    if image_path and not Path(image_path).is_dir():
+                        if Path(image_path).suffix.lower() in image_exts:
+                            return gr.update(value=None, visible=False), gr.update(value=image_path, visible=True)
+                except Exception:
+                    pass
+                return gr.update(value=None, visible=False), gr.update(value=None, visible=False)
+
+            def _processing_indicator(title: str = "Upscale in progress..."):
+                html = (
+                    '<div class="processing-banner">'
+                    '<div class="processing-spinner"></div>'
+                    '<div class="processing-col">'
+                    f'<div class="processing-text">{title}</div>'
+                    '<div class="processing-sub">Scroll down to see run logs and completed chunk previews.</div>'
+                    "</div></div>"
+                )
+                return gr.update(value=html, visible=True)
+
+            indicator_off = gr.update(value="", visible=False)
 
             # Parse settings
             settings = dict(zip(SEEDVR2_ORDER, list(args)))
@@ -1857,16 +1972,16 @@ def build_seedvr2_callbacks(
 
             if not settings["input_path"] or not Path(settings["input_path"]).exists():
                 yield (
-                    "❌ Input path missing or not found",  # status_box
+                    "Input path missing or not found",  # status_box
                     "",  # log_box
                     "",  # progress_indicator
-                    None,  # output_video
-                    None,  # output_image
+                    gr.update(value=None, visible=False),  # output_video
+                    gr.update(value=None, visible=False),  # output_image
                     "No chunks",  # chunk_info
                     "",  # resume_status
                     "",  # chunk_progress
-                    "No comparison",  # comparison_note
-                    None,  # image_slider
+                    gr.update(value="", visible=False),  # comparison_note
+                    gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
                     gr.update(visible=False),  # batch_gallery
@@ -1883,16 +1998,16 @@ def build_seedvr2_callbacks(
             cuda_warning = validate_cuda_device_spec(settings.get("cuda_device", ""))
             if cuda_warning:
                 yield (
-                    f"⚠️ {cuda_warning}",  # status_box
+                    f"{cuda_warning}",  # status_box
                     "",  # log_box
                     "",  # progress_indicator
-                    None,  # output_video
-                    None,  # output_image
+                    gr.update(value=None, visible=False),  # output_video
+                    gr.update(value=None, visible=False),  # output_image
                     "No chunks",  # chunk_info
                     "",  # resume_status
                     "",  # chunk_progress
-                    "No comparison",  # comparison_note
-                    None,  # image_slider
+                    gr.update(value="", visible=False),  # comparison_note
+                    gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
                     gr.update(visible=False),  # batch_gallery
@@ -1903,16 +2018,16 @@ def build_seedvr2_callbacks(
             # Check ffmpeg availability
             if not _ffmpeg_available():
                 yield (
-                    "❌ ffmpeg not found in PATH. Install ffmpeg and retry.",  # status_box
+                    "ffmpeg not found in PATH. Install ffmpeg and retry.",  # status_box
                     "",  # log_box
                     "",  # progress_indicator
-                    None,  # output_video
-                    None,  # output_image
+                    gr.update(value=None, visible=False),  # output_video
+                    gr.update(value=None, visible=False),  # output_image
                     "No chunks",  # chunk_info
                     "",  # resume_status
                     "",  # chunk_progress
-                    "No comparison",  # comparison_note
-                    None,  # image_slider
+                    gr.update(value="", visible=False),  # comparison_note
+                    gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
                     gr.update(visible=False),  # batch_gallery
@@ -1925,16 +2040,16 @@ def build_seedvr2_callbacks(
             has_space, space_warning = check_disk_space(output_path, required_mb=5000)
             if not has_space:
                 yield (
-                    space_warning or "❌ Insufficient disk space",  # status_box
+                    space_warning or "Insufficient disk space",  # status_box
                     f"Free up disk space before processing. Recommended: 5GB+ free",  # log_box
                     "",  # progress_indicator
-                    None,  # output_video
-                    None,  # output_image
+                    gr.update(value=None, visible=False),  # output_video
+                    gr.update(value=None, visible=False),  # output_image
                     "No chunks",  # chunk_info
                     "",  # resume_status
                     "",  # chunk_progress
-                    "No comparison",  # comparison_note
-                    None,  # image_slider
+                    gr.update(value="", visible=False),  # comparison_note
+                    gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
                     gr.update(visible=False),  # batch_gallery
@@ -1944,16 +2059,16 @@ def build_seedvr2_callbacks(
             elif space_warning:
                 # Low space but might work - show warning
                 yield (
-                    f"⚠️ {space_warning}",  # status_box
+                    f"{space_warning}",  # status_box
                     "Low disk space detected. Processing may fail if output is large.",  # log_box
                     "",  # progress_indicator
-                    None,  # output_video
-                    None,  # output_image
+                    gr.update(value=None, visible=False),  # output_video
+                    gr.update(value=None, visible=False),  # output_image
                     "Disk space warning",  # chunk_info
                     "",  # resume_status
                     "",  # chunk_progress
-                    "",  # comparison_note
-                    None,  # image_slider
+                    gr.update(value="", visible=False),  # comparison_note
+                    gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
                     gr.update(visible=False),  # batch_gallery
@@ -2005,6 +2120,12 @@ def build_seedvr2_callbacks(
                 settings["png_padding"] = int(seed_controls["png_padding_val"])
             if seed_controls.get("png_keep_basename_val") is not None:
                 settings["png_keep_basename"] = bool(seed_controls["png_keep_basename_val"])
+
+            # Apply audio mux preferences from Output tab (used by chunking + final output postprocessing)
+            if seed_controls.get("audio_codec_val") is not None:
+                settings["audio_codec"] = seed_controls.get("audio_codec_val") or "copy"
+            if seed_controls.get("audio_bitrate_val") is not None:
+                settings["audio_bitrate"] = seed_controls.get("audio_bitrate_val") or ""
             
             # Apply metadata and telemetry settings from Output tab
             if seed_controls.get("save_metadata_val") is not None:
@@ -2039,16 +2160,16 @@ def build_seedvr2_callbacks(
 
                 if not batch_input_path.exists():
                     yield (
-                        "❌ Batch input path does not exist",  # status_box
+                        "Batch input path does not exist",  # status_box
                         "",  # log_box
                         "",  # progress_indicator
-                        None,  # output_video
-                        None,  # output_image
+                        gr.update(value=None, visible=False),  # output_video
+                        gr.update(value=None, visible=False),  # output_image
                         "No chunks",  # chunk_info
                         "",  # resume_status
                         "",  # chunk_progress
-                        "No comparison",  # comparison_note
-                        None,  # image_slider
+                        gr.update(value="", visible=False),  # comparison_note
+                        gr.update(value=None, visible=False),  # image_slider
                         gr.update(value="", visible=False),  # video_comparison_html
                         gr.update(visible=False),  # chunk_gallery
                         gr.update(visible=False),  # batch_gallery
@@ -2072,16 +2193,16 @@ def build_seedvr2_callbacks(
 
                 if not batch_files:
                     yield (
-                        "❌ No supported files found in batch input",  # status_box
+                        "No supported files found in batch input",  # status_box
                         "",  # log_box
                         "",  # progress_indicator
-                        None,  # output_video
-                        None,  # output_image
+                        gr.update(value=None, visible=False),  # output_video
+                        gr.update(value=None, visible=False),  # output_image
                         "No chunks",  # chunk_info
                         "",  # resume_status
                         "",  # chunk_progress
-                        "No comparison",  # comparison_note
-                        None,  # image_slider
+                        gr.update(value="", visible=False),  # comparison_note
+                        gr.update(value=None, visible=False),  # image_slider
                         gr.update(value="", visible=False),  # video_comparison_html
                         gr.update(visible=False),  # chunk_gallery
                         gr.update(visible=False),  # batch_gallery
@@ -2106,17 +2227,17 @@ def build_seedvr2_callbacks(
                     
                     # Critical: Less than 5GB free
                     if temp_free_gb < 5.0:
-                        errors.append(f"❌ CRITICAL: Only {temp_free_gb:.1f}GB free in temp directory. Need at least 5GB for processing.")
+                        errors.append(f"CRITICAL: Only {temp_free_gb:.1f}GB free in temp directory. Need at least 5GB for processing.")
                     elif temp_free_gb < estimated_gb:
-                        warnings.append(f"⚠️ LOW TEMP SPACE: {temp_free_gb:.1f}GB free, estimated need: {estimated_gb:.1f}GB. May fail during processing.")
+                        warnings.append(f"LOW TEMP SPACE: {temp_free_gb:.1f}GB free, estimated need: {estimated_gb:.1f}GB. May fail during processing.")
                     
                     if output_free_gb < 5.0:
-                        errors.append(f"❌ CRITICAL: Only {output_free_gb:.1f}GB free in output directory. Need at least 5GB.")
+                        errors.append(f"CRITICAL: Only {output_free_gb:.1f}GB free in output directory. Need at least 5GB.")
                     elif output_free_gb < estimated_gb * 0.5:
-                        warnings.append(f"⚠️ LOW OUTPUT SPACE: {output_free_gb:.1f}GB free, estimated need: {estimated_gb * 0.5:.1f}GB")
+                        warnings.append(f"LOW OUTPUT SPACE: {output_free_gb:.1f}GB free, estimated need: {estimated_gb * 0.5:.1f}GB")
                     
                     if errors:
-                        error_msg = "🛑 INSUFFICIENT DISK SPACE - Cannot start batch processing:\n" + "\n".join(errors)
+                        error_msg = "INSUFFICIENT DISK SPACE - Cannot start batch processing:\n" + "\n".join(errors)
                         if warnings:
                             error_msg += "\n\nAdditional warnings:\n" + "\n".join(warnings)
                         
@@ -2124,13 +2245,13 @@ def build_seedvr2_callbacks(
                             error_msg,  # status_box
                             "",  # log_box
                             "",  # progress_indicator
-                            None,  # output_video
-                            None,  # output_image
+                            gr.update(value=None, visible=False),  # output_video
+                            gr.update(value=None, visible=False),  # output_image
                             f"Batch aborted: {len(batch_files)} files (insufficient disk space)",  # chunk_info
                             "",  # resume_status
                             "",  # chunk_progress
-                            "Insufficient disk space",  # comparison_note
-                            None,  # image_slider
+                            gr.update(value="", visible=False),  # comparison_note
+                            gr.update(value=None, visible=False),  # image_slider
                             gr.update(value="", visible=False),  # video_comparison_html
                             gr.update(visible=False),  # chunk_gallery
                             gr.update(visible=False),  # batch_gallery
@@ -2139,18 +2260,18 @@ def build_seedvr2_callbacks(
                         return
                     
                     if warnings:
-                        warning_msg = "⚠️ DISK SPACE WARNINGS:\n" + "\n".join(warnings) + "\n\nProceeding with batch processing..."
+                        warning_msg = "DISK SPACE WARNINGS:\n" + "\n".join(warnings) + "\n\nProceeding with batch processing..."
                         yield (
                             warning_msg,  # status_box
                             f"Starting batch: {len(batch_files)} files\nTemp: {temp_free_gb:.1f}GB free | Output: {output_free_gb:.1f}GB free",  # log_box
                             "",  # progress_indicator
-                            None,  # output_video
-                            None,  # output_image
+                            gr.update(value=None, visible=False),  # output_video
+                            gr.update(value=None, visible=False),  # output_image
                             f"Batch: {len(batch_files)} files queued",  # chunk_info
                             "",  # resume_status
                             "",  # chunk_progress
-                            "Disk space warnings",  # comparison_note
-                            None,  # image_slider
+                            gr.update(value="", visible=False),  # comparison_note
+                            gr.update(value=None, visible=False),  # image_slider
                             gr.update(value="", visible=False),  # video_comparison_html
                             gr.update(visible=False),  # chunk_gallery
                             gr.update(visible=False),  # batch_gallery
@@ -2163,16 +2284,16 @@ def build_seedvr2_callbacks(
                 # Continue with batch processing
                 if not batch_files:
                     yield (
-                        "❌ No supported files found after validation",  # status_box
+                        "No supported files found after validation",  # status_box
                         "",  # log_box
                         "",  # progress_indicator
-                        None,  # output_video
-                        None,  # output_image
+                        gr.update(value=None, visible=False),  # output_video
+                        gr.update(value=None, visible=False),  # output_image
                         "No chunks",  # chunk_info
                         "",  # resume_status
                         "",  # chunk_progress
-                        "No comparison",  # comparison_note
-                        None,  # image_slider
+                        gr.update(value="", visible=False),  # comparison_note
+                        gr.update(value=None, visible=False),  # image_slider
                         gr.update(value="", visible=False),  # video_comparison_html
                         gr.update(visible=False),  # chunk_gallery
                         gr.update(visible=False),  # batch_gallery
@@ -2232,27 +2353,69 @@ def build_seedvr2_callbacks(
                         single_settings = job.metadata["settings"].copy()
                         single_settings["input_path"] = job.input_path
                         single_settings["batch_enable"] = False  # Disable batch for individual processing
+                        single_settings["_original_filename"] = Path(job.input_path).name
 
-                        # Generate unique output path for this batch item to prevent collisions
+                        overwrite_existing = bool(seed_controls.get("overwrite_existing_batch_val", False))
+
                         input_file = Path(job.input_path)
                         batch_output_folder = Path(batch_output_path) if batch_output_path.exists() else output_dir
 
-                        # Determine output format
-                        out_fmt = single_settings.get("output_format", "auto")
-                        if out_fmt == "auto":
-                            out_fmt = "mp4" if input_file.suffix.lower() in [".mp4", ".avi", ".mov", ".mkv"] else "png"
+                        from shared.output_run_manager import batch_item_dir, prepare_batch_video_run_dir
+                        from shared.path_utils import resolve_output_location, sanitize_filename
 
-                        # Create unique output path with collision safety
-                        from shared.path_utils import collision_safe_path, collision_safe_dir
-
-                        if out_fmt == "png":
-                            output_name = f"{input_file.stem}_upscaled"
-                            unique_output = collision_safe_dir(batch_output_folder / output_name)
-                            single_settings["output_override"] = str(unique_output)
+                        is_video = input_file.suffix.lower() in SEEDVR2_VIDEO_EXTS
+                        if not is_video:
+                            # Batch images: write directly into the batch output folder using the original name.
+                            safe_name = sanitize_filename(input_file.name)
+                            target_path = batch_output_folder / safe_name
+                            if target_path.exists() and not overwrite_existing:
+                                job.status = "skipped"
+                                job.output_path = str(target_path)
+                                return True
+                            if overwrite_existing:
+                                try:
+                                    target_path.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                            single_settings["output_override"] = str(target_path)
+                            batch_work_dir = batch_output_folder
                         else:
-                            output_name = f"{input_file.stem}_upscaled.{out_fmt}"
-                            unique_output = collision_safe_path(batch_output_folder / output_name)
-                            single_settings["output_override"] = str(unique_output)
+                            # Batch videos: stable per-input folder under outputs/<input_stem>/ with chunk artifacts inside.
+                            item_out_dir = batch_item_dir(batch_output_folder, input_file.name)
+                            predicted_fmt = single_settings.get("output_format") or "auto"
+                            predicted_fmt = "png" if str(predicted_fmt).lower() == "png" else "mp4"
+                            predicted_output = resolve_output_location(
+                                input_path=str(input_file),
+                                output_format=str(predicted_fmt),
+                                global_output_dir=str(item_out_dir),
+                                batch_mode=False,
+                                png_padding=single_settings.get("png_padding"),
+                                png_keep_basename=bool(single_settings.get("png_keep_basename", True)),
+                                original_filename=input_file.name,
+                            )
+                            if Path(predicted_output).exists() and not overwrite_existing:
+                                job.status = "skipped"
+                                job.output_path = str(predicted_output)
+                                return True
+                            run_paths = prepare_batch_video_run_dir(
+                                batch_output_folder,
+                                input_file.name,
+                                input_path=str(input_file),
+                                model_label="SeedVR2",
+                                mode=str(getattr(runner, "get_mode", lambda: "subprocess")() or "subprocess"),
+                                overwrite_existing=overwrite_existing,
+                            )
+                            if not run_paths:
+                                if not overwrite_existing:
+                                    job.status = "skipped"
+                                    job.output_path = str(predicted_output)
+                                    return True
+                                job.error_message = f"Could not create batch output folder: {item_out_dir}"
+                                return False
+                            single_settings["_run_dir"] = str(run_paths.run_dir)
+                            single_settings["_processed_chunks_dir"] = str(run_paths.processed_chunks_dir)
+                            single_settings["output_override"] = str(run_paths.run_dir)
+                            batch_work_dir = run_paths.run_dir
 
                         # Run single-file processing (no per-file streaming in batch)
                         _status, logs, output_video, output_image, _chunk_info, _chunk_summary, _chunk_progress = _process_single_file(
@@ -2263,7 +2426,7 @@ def build_seedvr2_callbacks(
                             job.metadata["face_apply"],
                             job.metadata["face_strength"],
                             run_logger,
-                            output_dir,
+                            Path(batch_work_dir),
                             False,  # not preview
                             None,   # progress_cb
                         )
@@ -2328,7 +2491,7 @@ def build_seedvr2_callbacks(
                         metadata_path = metadata_dir / "batch_images_metadata.json"
                     else:
                         # Video batch or mixed batch: Batch summary + individual per-video metadata
-                        # Note: Individual video metadata already written by _process_single_file → run_logger.write_summary
+                        # Note: Individual video metadata already written by _process_single_file  run_logger.write_summary
                         batch_metadata = {
                             "batch_type": "videos" if video_count > 0 and image_count == 0 else "mixed",
                             "total_files": len(jobs),
@@ -2365,20 +2528,20 @@ def build_seedvr2_callbacks(
                     for j in [x for x in jobs if x.status == "failed"][:10]:
                         name = Path(j.input_path).name
                         err = (j.error_message or "").strip()
-                        err = (err[:180] + "…") if len(err) > 180 else err
-                        log_lines.append(f"❌ {name}: {err}" if err else f"❌ {name}")
+                        err = (err[:180] + "") if len(err) > 180 else err
+                        log_lines.append(f"{name}: {err}" if err else f"{name}")
 
                 yield (
-                    f"✅ {summary_msg}",  # status_box
+                    f"{summary_msg}",  # status_box
                     "\n".join(log_lines),  # log_box
                     "",  # progress_indicator
-                    None,  # output_video
-                    None,  # output_image
+                    gr.update(value=None, visible=False),  # output_video
+                    gr.update(value=None, visible=False),  # output_image
                     f"Batch: {completed} completed, {failed} failed",  # chunk_info
                     "",  # resume_status
                     "",  # chunk_progress
-                    f"Batch processing complete. {len(batch_outputs)} files saved.",  # comparison_note
-                    None,  # image_slider
+                    gr.update(value="", visible=False),  # comparison_note
+                    gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
                     gr.update(value=batch_outputs[:50], visible=True) if batch_outputs else gr.update(visible=False),  # batch_gallery
@@ -2388,44 +2551,49 @@ def build_seedvr2_callbacks(
 
             # Single file processing with streaming updates
             processing_complete = False
-            last_progress_update = 0
-            chunk_info = "Initializing..."  # Initialize before use
-
-            def progress_callback(message: str):
-                nonlocal last_progress_update
-                current_time = time.time()
-                # Throttle updates to every 0.5 seconds to avoid UI spam
-                if current_time - last_progress_update > 0.5:
-                    last_progress_update = current_time
-                    yield (
-                        f"⚙️ Processing: {message}",  # status_box
-                        f"Progress: {message}",  # log_box
-                        "",  # progress_indicator
-                        None,  # output_video
-                        None,  # output_image
-                        chunk_info or "Processing...",  # chunk_info
-                        "",  # resume_status
-                        "",  # chunk_progress
-                        f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px;">{message}</div>',  # comparison_note
-                        None,  # image_slider
-                        gr.update(value="", visible=False),  # video_comparison_html
-                        gr.update(visible=False),  # chunk_gallery
-                        gr.update(visible=False),  # batch_gallery
-                        state  # shared_state
-                    )
+            chunk_info = "Waiting for first progress update..."
 
             # Start processing with progress tracking
+            effective_output_dir = Path(global_settings.get("output_dir", output_dir))
+
+            # NEW: Per-run output folder for videos (0001/0002/...) to avoid collisions
+            # and to store chunk artifacts in user-visible locations.
+            if (not preview_only) and detect_input_type(settings["input_path"]) == "video":
+                try:
+                    run_paths, explicit_final = prepare_single_video_run(
+                        output_root_fallback=effective_output_dir,
+                        output_override_raw=settings.get("output_override"),
+                        input_path=settings["input_path"],
+                        original_filename=original_filename,
+                        model_label="SeedVR2",
+                        mode=str(getattr(runner, "get_mode", lambda: "subprocess")() or "subprocess"),
+                    )
+                    effective_output_dir = Path(run_paths.run_dir)
+                    # Store for UI (chunk gallery, resume helpers, user visibility)
+                    seed_controls["last_run_dir"] = str(effective_output_dir)
+                    seed_controls["processed_chunks_dir"] = str(run_paths.processed_chunks_dir)
+                    settings["_run_dir"] = str(effective_output_dir)
+                    settings["_processed_chunks_dir"] = str(run_paths.processed_chunks_dir)
+
+                    # Output override now targets the run folder (or an explicit file inside it)
+                    settings["_user_output_override_raw"] = settings.get("output_override") or ""
+                    settings["output_override"] = str(explicit_final) if explicit_final else str(effective_output_dir)
+                except Exception as e:
+                    # Fail open: fall back to global output dir if run folder creation fails.
+                    seed_controls["last_run_dir"] = str(effective_output_dir)
+                    settings["_run_dir"] = str(effective_output_dir)
+
             yield (
-                "⚙️ Starting processing...",  # status_box
-                "Initializing...",  # log_box
-                "",  # progress_indicator
-                None,  # output_video
-                None,  # output_image
-                "Initializing...",  # chunk_info
+                "Starting processing...",  # status_box
+                "Preparing run...",  # log_box
+                _processing_indicator("Upscale in progress..."),  # progress_indicator
+                gr.update(value=None, visible=False),  # output_video
+                gr.update(value=None, visible=False),  # output_image
+                "Waiting for first progress update...",  # chunk_info
                 "",  # resume_status
                 "",  # chunk_progress
-                "Starting processing...",  # comparison_note
-                None,  # image_slider
+                gr.update(value="", visible=False),  # comparison_note
+                gr.update(value=None, visible=False),  # image_slider
                 gr.update(value="", visible=False),  # video_comparison_html
                 gr.update(visible=False),  # chunk_gallery
                 gr.update(visible=False),  # batch_gallery
@@ -2445,7 +2613,7 @@ def build_seedvr2_callbacks(
                         face_apply,
                         face_strength,
                         run_logger,
-                        output_dir,
+                        effective_output_dir,
                         preview_only,
                         lambda msg: progress_queue.put(("progress", msg))
                     )
@@ -2459,161 +2627,165 @@ def build_seedvr2_callbacks(
             proc_thread.start()
 
             # Stream progress updates with gr.Progress integration and throttling
-            chunk_count = 0
+            completed_chunk_count = 0
+            active_chunk_idx = 0
             total_chunks_estimate = 1
             last_progress_value = 0.0
             last_ui_update_time = 0
-            ui_update_throttle = 0.5  # Only update UI every 0.5 seconds
+            ui_update_throttle = 0.25
             accumulated_messages = []
             
             while proc_thread.is_alive() or not progress_queue.empty():
                 try:
                     update_type, data = progress_queue.get(timeout=0.1)
-                    current_time = time.time()
-                    
-                    if update_type == "progress":
-                        # Always update gr.Progress for responsiveness
-                        if progress:
-                            import re
-                            
-                            # Try to extract chunk progress (e.g., "chunk 5/10", "Completed 3 chunks")
-                            chunk_match = re.search(r'(?:chunk|chunks|Completed)\s+(\d+)(?:/|/|\s+of\s+|\s+)(\d+)', data, re.IGNORECASE)
-                            if chunk_match:
-                                chunk_count = int(chunk_match.group(1))
-                                total_chunks_estimate = int(chunk_match.group(2))
-                                progress_value = chunk_count / total_chunks_estimate
-                                progress(progress_value, desc=f"Processing chunk {chunk_count}/{total_chunks_estimate}")
-                                last_progress_value = progress_value
-                            # Try to extract percentage (e.g., "50%", "Progress: 75%")
-                            elif '%' in data:
-                                pct_match = re.search(r'(\d+(?:\.\d+)?)%', data)
-                                if pct_match:
-                                    progress_value = float(pct_match.group(1)) / 100.0
-                                    progress(progress_value, desc=data[:100])
-                                    last_progress_value = progress_value
-                                else:
-                                    progress(last_progress_value, desc=data[:100])
-                            # Try to extract "N/M" pattern (e.g., "Processing 5/100 frames")
-                            elif re.search(r'(\d+)/(\d+)', data):
-                                nm_match = re.search(r'(\d+)/(\d+)', data)
-                                if nm_match:
-                                    current = int(nm_match.group(1))
-                                    total = int(nm_match.group(2))
-                                    if total > 0:
-                                        progress_value = current / total
-                                        progress(progress_value, desc=data[:100])
-                                        last_progress_value = progress_value
-                                    else:
-                                        progress(last_progress_value, desc=data[:100])
-                                else:
-                                    progress(last_progress_value, desc=data[:100])
+                    current_time = time.time()                    if update_type == "progress":
+                        message = str(data or "").strip()
+                        if not message:
+                            continue
+
+                        accumulated_messages.append(message)
+                        if len(accumulated_messages) > 200:
+                            accumulated_messages = accumulated_messages[-200:]
+
+                        import re
+
+                        chunk_match = re.search(r"(processing|completed)\s+chunk\s+(\d+)\s*/\s*(\d+)", message, re.IGNORECASE)
+                        pct_match = re.search(r"(\d+(?:\.\d+)?)\s*%", message)
+                        pct_value = float(pct_match.group(1)) if pct_match else None
+
+                        if chunk_match:
+                            phase = str(chunk_match.group(1) or "").lower()
+                            chunk_idx = int(chunk_match.group(2))
+                            total_chunks_estimate = max(1, int(chunk_match.group(3)))
+                            active_chunk_idx = chunk_idx
+                            if phase == "completed":
+                                completed_chunk_count = max(completed_chunk_count, chunk_idx)
+                            if pct_value is not None:
+                                last_progress_value = max(last_progress_value, min(0.999, pct_value / 100.0))
+                            elif phase == "completed":
+                                last_progress_value = max(last_progress_value, completed_chunk_count / max(1, total_chunks_estimate))
                             else:
-                                # Generic progress update - use last known value
-                                progress(last_progress_value, desc=data[:100] if data else "Processing...")
-                        
-                        # Accumulate messages for throttled UI updates
-                        accumulated_messages.append(data)
-                        
-                        # Only update UI on CHUNK COMPLETION (not in-progress chunk messages)
-                        # Requirement: "only update when last newer chunk is done"
-                        is_chunk_completion = (
-                            ("completed chunk" in data.lower() or 
-                             "finished chunk" in data.lower() or
-                             "chunk complete" in data.lower()) and
-                            (chunk_count > 0)  # Valid chunk count extracted
-                        )
-                        
-                        is_critical_event = (
-                            "error" in data.lower() or
-                            "failed" in data.lower() or
-                            "✅" in data or "❌" in data or
-                            "complete" in data.lower()
-                        )
-                        
-                        # STRICT THROTTLING: Only yield on chunk completion or critical events
-                        # Suppress intermediate frame-level progress to keep UI clean
-                        should_update_ui = is_chunk_completion or is_critical_event
-                        
-                        if should_update_ui:
-                            # Join recent messages (last 5)
-                            recent_messages = accumulated_messages[-5:]
-                            display_text = "\n".join(recent_messages[-3:])  # Show last 3 lines
-                            
-                            # Get current chunk thumbnails from state (updated by chunk_progress_callback)
-                            current_chunk_thumbs = state.get("chunk_thumbnails", [])
-                            chunk_gallery_update = gr.update(
-                                value=current_chunk_thumbs,
-                                visible=len(current_chunk_thumbs) > 0,
-                                columns=4
-                            ) if current_chunk_thumbs else gr.update(visible=False)
-                            
-                            yield (
-                                f"⚙️ Processing... ({len(current_chunk_thumbs)} chunks completed)",  # status_box
-                                f"Progress: {display_text}",  # log_box
-                                "",  # progress_indicator
-                                None,  # output_video
-                                None,  # output_image
-                                chunk_info or "Processing...",  # chunk_info
-                                "",  # resume_status
-                                "",  # chunk_progress
-                                f'<div style="background: #f0f8ff; padding: 10px; border-radius: 5px; white-space: pre-wrap;">{display_text}</div>',  # comparison_note
-                                None,  # image_slider
-                                gr.update(value="", visible=False),  # video_comparison_html
-                                chunk_gallery_update,  # chunk_gallery - LIVE UPDATE with thumbnails!
-                                gr.update(visible=False),  # batch_gallery
-                                state  # shared_state
+                                last_progress_value = max(last_progress_value, max(0.0, (chunk_idx - 1) / max(1, total_chunks_estimate)))
+                        else:
+                            nm_match = re.search(r"(\d+)\s*/\s*(\d+)", message)
+                            if nm_match:
+                                current = int(nm_match.group(1))
+                                total = max(1, int(nm_match.group(2)))
+                                total_chunks_estimate = max(total_chunks_estimate, total)
+                                last_progress_value = max(last_progress_value, min(0.999, current / total))
+                            elif pct_value is not None:
+                                last_progress_value = max(last_progress_value, min(0.999, pct_value / 100.0))
+
+                        if progress:
+                            progress(last_progress_value, desc=message[:100] if message else "Processing...")
+
+                        current_chunk_items = (state or {}).get("seed_controls", {}).get("chunk_gallery_items", [])
+                        if not current_chunk_items:
+                            current_chunk_items = (state or {}).get("seed_controls", {}).get("chunk_thumbnails", [])
+                        chunk_gallery_update = (
+                            gr.update(
+                                value=current_chunk_items,
+                                visible=len(current_chunk_items) > 0,
+                                columns=2,
+                                rows=2,
+                                height=320,
                             )
-                            last_ui_update_time = current_time
-                            
-                            # Clear old accumulated messages (keep last 10 for context)
-                            if len(accumulated_messages) > 10:
-                                accumulated_messages = accumulated_messages[-10:]
+                            if current_chunk_items
+                            else gr.update(visible=False)
+                        )
+
+                        is_key_event = (
+                            "processing chunk" in message.lower()
+                            or "completed chunk" in message.lower()
+                            or "error" in message.lower()
+                            or "failed" in message.lower()
+                        )
+                        if (current_time - last_ui_update_time) < ui_update_throttle and not is_key_event:
+                            continue
+
+                        percent_done = int(round(max(0.0, min(1.0, last_progress_value)) * 100.0))
+                        completed_shown = min(max(0, completed_chunk_count), total_chunks_estimate)
+                        current_shown = active_chunk_idx if active_chunk_idx > 0 else max(1, completed_shown)
+                        if total_chunks_estimate > 1:
+                            status_text = (
+                                f"Processing... {completed_shown}/{total_chunks_estimate} chunks completed "
+                                f"({percent_done}%)"
+                            )
+                            indicator_title = (
+                                f"Processing... ({completed_shown}/{total_chunks_estimate} chunks completed, "
+                                f"{percent_done}% done)"
+                            )
+                        else:
+                            status_text = f"Processing... {percent_done}%"
+                            indicator_title = f"Processing... ({percent_done}% done)"
+
+                        chunk_status_text = (
+                            f"Chunks completed: {completed_shown}/{total_chunks_estimate}\n"
+                            f"Current chunk: {current_shown}/{total_chunks_estimate}\n"
+                            f"Latest: {message}"
+                            if total_chunks_estimate > 1
+                            else f"Latest: {message}"
+                        )
+
+                        yield (
+                            status_text,
+                            "\n".join(accumulated_messages[-30:]),
+                            _processing_indicator(indicator_title),
+                            gr.update(value=None, visible=False),
+                            gr.update(value=None, visible=False),
+                            chunk_status_text,
+                            "",
+                            "\n".join(accumulated_messages[-12:]),
+                            gr.update(value="", visible=False),
+                            gr.update(value=None, visible=False),
+                            gr.update(value="", visible=False),
+                            chunk_gallery_update,
+                            gr.update(visible=False),
+                            state,
+                        )
+                        last_ui_update_time = current_time
                     elif update_type == "complete":
                         status, logs, output_video, output_image, chunk_info, chunk_summary, chunk_progress = data
                         processing_complete = True
                         if progress:
                             progress(1.0, desc="Complete!")
-                        break
-                    elif update_type == "error":
+                        break                    elif update_type == "error":
                         if progress:
                             progress(0, desc="Error occurred")
-                        # If this looks like VRAM OOM, show big banner + actionable guidance.
                         if maybe_set_vram_oom_alert(state, model_label="SeedVR2", text=data, settings=settings):
                             state["operation_status"] = "error"
-                            # Also show a modal popup (easy to notice even if user is scrolled).
-                            show_vram_oom_modal(state, title="Out of VRAM (GPU) — SeedVR2", duration=None)
+                            show_vram_oom_modal(state, title="Out of VRAM (GPU) - SeedVR2", duration=None)
+
                         yield (
-                            ("🚫 Out of VRAM (GPU) — see banner above" if state.get("alerts", {}).get("oom", {}).get("visible") else "❌ Processing failed"),  # status_box
-                            f"Error: {data}",  # log_box
-                            "",  # progress_indicator
-                            None,  # output_video
-                            None,  # output_image
-                            "Error occurred",  # chunk_info
-                            "",  # resume_status
-                            "",  # chunk_progress
-                            f'<div style="background: #ffe6e6; padding: 10px; border-radius: 5px;">Error: {data}</div>',  # comparison_note
-                            None,  # image_slider
-                            gr.update(value="", visible=False),  # video_comparison_html
-                            gr.update(visible=False),  # chunk_gallery
-                            gr.update(visible=False),  # batch_gallery
-                            state  # shared_state
+                            ("Out of VRAM (GPU) - see banner above" if state.get("alerts", {}).get("oom", {}).get("visible") else "Processing failed"),
+                            f"Error: {data}",
+                            indicator_off,
+                            gr.update(value=None, visible=False),
+                            gr.update(value=None, visible=False),
+                            "Error occurred",
+                            "",
+                            "",
+                            gr.update(value="", visible=False),
+                            gr.update(value=None, visible=False),
+                            gr.update(value="", visible=False),
+                            gr.update(visible=False),
+                            gr.update(visible=False),
+                            state,
                         )
                         return
                 except queue.Empty:
-                    continue
-
-            if not processing_complete:
+                    continue            if not processing_complete:
                 yield (
-                    "❌ Processing timed out",  # status_box
+                    "Processing timed out",  # status_box
                     "Processing did not complete within expected time",  # log_box
-                    "",  # progress_indicator
-                    None,  # output_video
-                    None,  # output_image
+                    indicator_off,  # progress_indicator
+                    gr.update(value=None, visible=False),  # output_video
+                    gr.update(value=None, visible=False),  # output_image
                     "Timeout",  # chunk_info
                     "",  # resume_status
                     "",  # chunk_progress
-                    "Processing timed out",  # comparison_note
-                    None,  # image_slider
+                    gr.update(value="", visible=False),  # comparison_note
+                    gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
                     gr.update(visible=False),  # batch_gallery
@@ -2621,16 +2793,15 @@ def build_seedvr2_callbacks(
                 )
                 return
 
-            # Final pass: if logs contain VRAM OOM signatures, raise the global banner.
-            if maybe_set_vram_oom_alert(state, model_label="SeedVR2", text=logs, settings=settings):
+            # Final pass: if logs contain VRAM OOM signatures, raise the global banner.            if maybe_set_vram_oom_alert(state, model_label="SeedVR2", text=logs, settings=settings):
                 state["operation_status"] = "error"
-                status = "🚫 Out of VRAM (GPU) — see banner above"
-                # Modal popup so users don't miss the guidance.
-                show_vram_oom_modal(state, title="Out of VRAM (GPU) — SeedVR2", duration=None)
+                status = "Out of VRAM (GPU) - see banner above"
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) - SeedVR2", duration=None)
 
             # Create comparison based on mode from Output tab
             comparison_mode = seed_controls.get("comparison_mode_val", "native")
             original_path_for_compare = settings.get("_original_input_path_before_preprocess") or settings.get("input_path")
+            comparison_html = ""
             
             if comparison_mode == "native":
                 # Use gradio's native ImageSlider for images
@@ -2684,6 +2855,7 @@ def build_seedvr2_callbacks(
                         slider_position=50.0
                     )
                     video_comparison_html_update = gr.update(value=video_comp_html, visible=True)
+                image_slider_update = gr.update(value=None, visible=False)
             
             # If no HTML comparison, use ImageSlider for images
             if not comparison_html and output_image and not output_video:
@@ -2694,28 +2866,31 @@ def build_seedvr2_callbacks(
             elif not image_slider_update:
                 image_slider_update = gr.update(value=None, visible=False)
 
-            state["operation_status"] = "completed" if "✅" in status else "ready"
+            state["operation_status"] = "completed" if "complete" in str(status or "").lower() else "ready"
             
             # Prepare final chunk gallery display
-            final_chunk_thumbs = state.get("chunk_thumbnails", [])
+            final_chunk_items = (state or {}).get("seed_controls", {}).get("chunk_gallery_items", [])
+            if not final_chunk_items:
+                final_chunk_items = (state or {}).get("seed_controls", {}).get("chunk_thumbnails", [])
             final_chunk_gallery = gr.update(
-                value=final_chunk_thumbs,
-                visible=len(final_chunk_thumbs) > 0,
-                columns=4,
+                value=final_chunk_items,
+                visible=len(final_chunk_items) > 0,
+                columns=2,
                 rows=2,
-                height=400
-            ) if final_chunk_thumbs else gr.update(visible=False)
+                height=360
+            ) if final_chunk_items else gr.update(visible=False)
             
+            vid_upd, img_upd = _media_updates(output_video, output_image)
             yield (
                 status,  # status_box
                 logs,  # log_box
-                "",  # progress_indicator
-                output_video,  # output_video
-                output_image,  # output_image
+                indicator_off,  # progress_indicator
+                vid_upd,  # output_video
+                img_upd,  # output_image
                 chunk_info,  # chunk_info
                 "",  # resume_status
                 chunk_progress,  # chunk_progress - NOW POPULATED with actual chunk progress
-                comparison_html if comparison_html else "",  # comparison_note
+                gr.update(value="", visible=False),  # comparison_note
                 image_slider_update,  # image_slider
                 video_comparison_html_update,  # video_comparison_html
                 final_chunk_gallery,  # chunk_gallery - SHOW completed chunk thumbnails!
@@ -2728,18 +2903,18 @@ def build_seedvr2_callbacks(
             state["operation_status"] = "error"
             # If this was VRAM OOM, show the big banner.
             if maybe_set_vram_oom_alert(state, model_label="SeedVR2", text=str(e), settings=locals().get("settings")):
-                show_vram_oom_modal(state, title="Out of VRAM (GPU) — SeedVR2", duration=None)
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) - SeedVR2", duration=None)
             yield (
-                "❌ Critical error",  # status_box
+                "Critical error",  # status_box
                 error_msg,  # log_box
-                "",  # progress_indicator
-                None,  # output_video
-                None,  # output_image
+                indicator_off,  # progress_indicator
+                gr.update(value=None, visible=False),  # output_video
+                gr.update(value=None, visible=False),  # output_image
                 "Error",  # chunk_info
                 "",  # resume_status
                 "",  # chunk_progress
-                "Error occurred",  # comparison_note
-                None,  # image_slider
+                gr.update(value="", visible=False),  # comparison_note
+                gr.update(value=None, visible=False),  # image_slider
                 gr.update(value="", visible=False),  # video_comparison_html
                 gr.update(visible=False),  # chunk_gallery
                 gr.update(visible=False),  # batch_gallery

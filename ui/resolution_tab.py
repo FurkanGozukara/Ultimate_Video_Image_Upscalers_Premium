@@ -159,9 +159,9 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     )
 
                     per_chunk_cleanup = gr.Checkbox(
-                        label="Clean Temp Files Per Chunk",
+                        label="Delete Chunk Files After Processing",
                         value=values[9],
-                        info="Delete temporary files after each chunk (saves disk space)"
+                        info="Deletes chunk artifacts from the run output folder (input_chunks/processed_chunks) to save disk space. Thumbnails are kept for the chunk gallery."
                     )
 
                 with gr.Row():

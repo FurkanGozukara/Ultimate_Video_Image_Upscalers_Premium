@@ -169,7 +169,9 @@ class BatchProcessor:
                 job.end_time = time.time()
                 
                 with self._lock:
-                    if success:
+                    if job.status == "skipped":
+                        progress.skipped_files += 1
+                    elif success:
                         job.status = "completed"
                         progress.completed_files += 1
                         
@@ -194,13 +196,14 @@ class BatchProcessor:
                         job.status = "failed"
                         progress.failed_files += 1
 
-                    progress.overall_progress = (progress.completed_files + progress.failed_files) / progress.total_files
+                    processed = progress.completed_files + progress.failed_files + progress.skipped_files
+                    progress.overall_progress = processed / progress.total_files
 
                     # Calculate ETA
                     elapsed = time.time() - (progress.start_time or time.time())
-                    if progress.completed_files > 0:
-                        avg_time_per_file = elapsed / progress.completed_files
-                        remaining_files = progress.total_files - progress.completed_files - progress.failed_files
+                    if processed > 0:
+                        avg_time_per_file = elapsed / processed
+                        remaining_files = progress.total_files - processed
                         progress.estimated_time_remaining = avg_time_per_file * remaining_files
 
             except Exception as e:

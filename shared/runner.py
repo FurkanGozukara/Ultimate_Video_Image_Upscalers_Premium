@@ -1630,8 +1630,23 @@ class Runner:
         # Processing parameters
         if settings.get("scale") and settings["scale"] != 1.0:
             cmd.extend(["--scale", str(settings["scale"])])
-        if settings.get("fps_multiplier") and settings["fps_multiplier"] != 2:
-            cmd.extend(["--multi", str(int(settings["fps_multiplier"]))])
+        # RIFE default is x2; avoid passing "--multi 1" (some builds reject it) and
+        # be tolerant of legacy string values like "x2".
+        try:
+            multi_raw = settings.get("fps_multiplier", 2)
+            if isinstance(multi_raw, str):
+                multi_s = multi_raw.strip().lower()
+                if multi_s.startswith("x"):
+                    multi_val = int(multi_s[1:])
+                else:
+                    multi_val = int(float(multi_s))
+            else:
+                multi_val = int(multi_raw)
+        except Exception:
+            multi_val = 2
+
+        if multi_val > 1 and multi_val != 2:
+            cmd.extend(["--multi", str(int(multi_val))])
         if settings.get("fps_override") and settings["fps_override"] > 0:
             cmd.extend(["--fps", str(settings["fps_override"])])
         if settings.get("exp") and settings["exp"] != 1:

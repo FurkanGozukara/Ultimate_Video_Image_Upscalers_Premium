@@ -83,6 +83,8 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     gr.Markdown("### 🎭 Output & Comparison Settings")
     gr.Markdown("*Configure output formats, FPS handling, and comparison display options shared across all upscaler models*")
 
+    overwrite_existing_batch_default = bool(seed_controls.get("overwrite_existing_batch_val", False))
+
     with gr.Tabs():
         # Output Format Settings
         with gr.TabItem("📁 Output Format"):
@@ -94,6 +96,12 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                     choices=["auto", "mp4", "png"],
                     value=values[0],
                     info="'auto' uses mp4 for videos, png for images. Explicit format overrides auto-detection."
+                )
+
+                overwrite_existing_batch = gr.Checkbox(
+                    label="Overwrite existing outputs (batch mode)",
+                    value=overwrite_existing_batch_default,
+                    info="When OFF (default), existing batch outputs are skipped. When ON, existing outputs are overwritten.",
                 )
 
                 png_sequence_enabled = gr.Checkbox(
@@ -456,7 +464,16 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
         inputs=[skip_first_frames, load_cap, shared_state],
         outputs=[cache_status, shared_state]
     )
-    
+
+    overwrite_existing_batch.change(
+        fn=lambda val, state: service["cache_overwrite_batch"](val, state),
+        inputs=[overwrite_existing_batch, shared_state],
+        outputs=[cache_status, shared_state],
+        queue=False,
+        show_progress="hidden",
+        trigger_mode="always_last",
+    )
+     
     # Codec info updates
     video_codec.change(
         fn=service["update_codec_info"],

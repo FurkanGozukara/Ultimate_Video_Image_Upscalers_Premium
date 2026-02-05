@@ -217,6 +217,16 @@ def build_output_callbacks(
             state["seed_controls"]["load_cap_val"] = 0
         return gr.update(value="Load-cap cached for runs."), state
 
+    def cache_overwrite_batch(val, state):
+        """
+        Cache a global preference for batch mode overwrite/skip behavior.
+
+        - False (default): skip if output already exists.
+        - True: overwrite existing outputs.
+        """
+        state["seed_controls"]["overwrite_existing_batch_val"] = bool(val)
+        return gr.update(value="Batch overwrite preference cached."), state
+
     def apply_to_pipeline(*args):
         """Apply all output settings to pipeline at once"""
         state = args[-1]
@@ -233,6 +243,9 @@ def build_output_callbacks(
         seed_controls["png_keep_basename_val"] = settings_dict.get("png_keep_basename", True)
         seed_controls["skip_first_frames_val"] = settings_dict.get("skip_first_frames", 0)
         seed_controls["load_cap_val"] = settings_dict.get("load_cap", 0)
+        # NEW: Audio preferences (used for muxing audio into model outputs)
+        seed_controls["audio_codec_val"] = settings_dict.get("audio_codec", "copy")
+        seed_controls["audio_bitrate_val"] = settings_dict.get("audio_bitrate", "")
         # Wire metadata and telemetry settings
         seed_controls["save_metadata_val"] = settings_dict.get("save_metadata", True)
         seed_controls["telemetry_enabled_val"] = settings_dict.get("telemetry_enabled", True)
@@ -295,6 +308,7 @@ def build_output_callbacks(
         "cache_png_basename": lambda *args: cache_png_basename(*args[:-1], args[-1]),
         "cache_skip": lambda *args: cache_skip(*args[:-1], args[-1]),
         "cache_cap": lambda *args: cache_cap(*args[:-1], args[-1]),
+        "cache_overwrite_batch": lambda *args: cache_overwrite_batch(*args[:-1], args[-1]),
         "apply_to_pipeline": apply_to_pipeline,
         "pin_reference_frame": pin_reference_frame,
         "unpin_reference": unpin_reference,

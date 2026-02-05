@@ -488,7 +488,8 @@ def _run_gan_video(
                     input_path=str(input_path),
                     output_format=settings.get("output_format", "mp4"),
                     global_output_dir=str(output_dir),
-                    batch_mode=False
+                    batch_mode=False,
+                    original_filename=settings.get("_original_filename"),
                 )
                 
                 # Append "_partial_cancelled" to indicate incomplete processing
@@ -552,7 +553,8 @@ def _run_gan_video(
             input_path=str(input_path),
             output_format=settings.get("output_format", "mp4"),
             global_output_dir=str(output_dir),
-            batch_mode=False
+            batch_mode=False,
+            original_filename=settings.get("_original_filename"),
         )
 
         # Use same padding as extraction (respect user's PNG padding setting)

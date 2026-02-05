@@ -20,8 +20,10 @@ from shared.path_utils import (
 from shared.resolution_calculator import estimate_fixed_scale_upscale_plan_from_dims
 from shared.face_restore import restore_image, restore_video
 from shared.logging_utils import RunLogger
+from shared.output_run_manager import prepare_single_video_run, downscaled_video_path
 from shared.realesrgan_runner import run_realesrgan
 from shared.gan_runner import run_gan_upscale, GanResult, get_gan_model_metadata
+from shared.ffmpeg_utils import scale_video
 from shared.comparison_unified import create_unified_comparison, create_video_comparison_slider
 from shared.video_comparison_slider import create_video_comparison_html
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
@@ -197,11 +199,11 @@ def gan_defaults(base_dir: Path) -> Dict[str, Any]:
 
 
 """
-📋 GAN PRESET ORDER
+ðŸ“‹ GAN PRESET ORDER
 
 MUST match inputs_list order in ui/gan_tab.py.
 
-🔧 TO ADD NEW CONTROLS:
+ðŸ”§ TO ADD NEW CONTROLS:
 1. Add default to gan_defaults()
 2. Append key to GAN_ORDER below
 3. Add component to ui/gan_tab.py inputs_list
@@ -297,12 +299,12 @@ def build_gan_callbacks(
     def save_preset(preset_name: str, *args):
         """Save preset with validation"""
         if not preset_name.strip():
-            return gr.update(), gr.update(value="⚠️ Enter a preset name before saving"), *list(args)
+            return gr.update(), gr.update(value="âš ï¸ Enter a preset name before saving"), *list(args)
 
         try:
             # Validate component count
             if len(args) != len(GAN_ORDER):
-                error_msg = f"⚠️ Preset mismatch: {len(args)} values vs {len(GAN_ORDER)} expected. Check inputs_list in gan_tab.py"
+                error_msg = f"âš ï¸ Preset mismatch: {len(args)} values vs {len(GAN_ORDER)} expected. Check inputs_list in gan_tab.py"
                 return gr.update(), gr.update(value=error_msg), *list(args)
             
             payload = _gan_dict_from_args(list(args))
@@ -313,9 +315,9 @@ def build_gan_callbacks(
             current_map = dict(zip(GAN_ORDER, list(args)))
             loaded_vals = _apply_gan_preset(payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+            return dropdown, gr.update(value=f"âœ… Saved preset '{preset_name}' for {model_name}"), *loaded_vals
         except Exception as e:
-            return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f"âŒ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
         """
@@ -338,12 +340,12 @@ def build_gan_callbacks(
             values = _apply_gan_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
             
             # Return values + status message (status is LAST)
-            status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
+            status_msg = f"âœ… Loaded preset '{preset_name}'" if preset else "â„¹ï¸ Preset not found"
             return (*values, gr.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
             # Return current values + error status
-            return (*current_values, gr.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values, gr.update(value=f"âŒ Error: {str(e)}"))
 
     def safe_defaults():
         return [defaults[k] for k in GAN_ORDER]
@@ -418,29 +420,25 @@ def build_gan_callbacks(
             if abs(input_w - optimal_w) <= tolerance and abs(input_h - optimal_h) <= tolerance:
                 return s
 
-            # Create temporary adjusted file
             in_type = detect_input_type(s["input_path"])
-            tmp_path = Path(current_temp_dir) / f"gan_input_adjust_{Path(s['input_path']).stem}.mp4"
 
             if in_type == "video":
-                # Video resolution adjustment with ffmpeg
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        s["input_path"],
-                        "-vf",
-                        f"scale={optimal_w}:{optimal_h}",
-                        str(tmp_path),
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                # Save downscaled artifact into the user-visible output folder for this run.
+                out_root = Path(s.get("_run_dir") or current_output_dir)
+                original_name = s.get("_original_filename") or Path(s["input_path"]).name
+                pre_out = downscaled_video_path(out_root, str(original_name))
+                ok, _err = scale_video(
+                    Path(s["input_path"]),
+                    Path(pre_out),
+                    int(optimal_w),
+                    int(optimal_h),
+                    lossless=True,
+                    audio_copy_first=True,
                 )
-                if tmp_path.exists():
+                if ok and Path(pre_out).exists():
                     s["_original_input_path_before_preprocess"] = s["input_path"]
-                    s["_preprocessed_input_path"] = str(tmp_path)
-                    s["input_path"] = str(tmp_path)
+                    s["_preprocessed_input_path"] = str(pre_out)
+                    s["input_path"] = str(pre_out)
                     s["resolution_adjusted"] = True
             elif in_type == "image":
                 # Image resolution adjustment with OpenCV
@@ -449,7 +447,7 @@ def build_gan_callbacks(
                     img = cv2.imread(s["input_path"], cv2.IMREAD_UNCHANGED)
                     if img is not None:
                         adjusted = cv2.resize(img, (optimal_w, optimal_h), interpolation=cv2.INTER_AREA)
-                        tmp_path = tmp_path.with_suffix(Path(s["input_path"]).suffix)
+                        tmp_path = Path(current_temp_dir) / f"gan_input_adjust_{Path(s['input_path']).stem}{Path(s['input_path']).suffix}"
                         cv2.imwrite(str(tmp_path), adjusted)
                         if tmp_path.exists():
                             s["_original_input_path_before_preprocess"] = s["input_path"]
@@ -493,6 +491,24 @@ def build_gan_callbacks(
         # Streaming: run in background thread, stream log lines if available
         progress_q: "queue.Queue[str]" = queue.Queue()
         result_holder: Dict[str, Any] = {}
+
+        video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".flv", ".wmv"}
+        image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+        def _media_updates(out_path: Optional[str]) -> tuple[Any, Any]:
+            """
+            Return (output_image_update, output_video_update) for the merged output panel.
+            """
+            try:
+                if out_path and not Path(out_path).is_dir():
+                    suf = Path(out_path).suffix.lower()
+                    if suf in video_exts:
+                        return gr.update(value=None, visible=False), gr.update(value=out_path, visible=True)
+                    if suf in image_exts:
+                        return gr.update(value=out_path, visible=True), gr.update(value=None, visible=False)
+            except Exception:
+                pass
+            return gr.update(value=None, visible=False), gr.update(value=None, visible=False)
         
         # Initialize progress if provided
         if progress:
@@ -504,11 +520,11 @@ def build_gan_callbacks(
         ffmpeg_ok, ffmpeg_msg = check_ffmpeg_available()
         if not ffmpeg_ok:
             yield (
-                "❌ ffmpeg not found in PATH",
+                "âŒ ffmpeg not found in PATH",
                 ffmpeg_msg or "Install ffmpeg and add to PATH before processing",
                 gr.update(value="", visible=False),
-                None,
-                None,
+                gr.update(value=None, visible=False),
+                gr.update(value=None, visible=False),
                 "ffmpeg missing",
                 gr.update(value=None),
                 gr.update(value="", visible=False),
@@ -522,11 +538,11 @@ def build_gan_callbacks(
         has_space, space_warning = check_disk_space(output_path_check, required_mb=5000)
         if not has_space:
             yield (
-                "❌ Insufficient disk space",
+                "âŒ Insufficient disk space",
                 space_warning or f"Free up disk space before processing. Required: 5GB+, Available: {output_path_check}",
                 gr.update(value="", visible=False),
-                None,
-                None,
+                gr.update(value=None, visible=False),
+                gr.update(value=None, visible=False),
                 "Low disk space",
                 gr.update(value=None),
                 gr.update(value="", visible=False),
@@ -537,7 +553,7 @@ def build_gan_callbacks(
         elif space_warning:
             # Low space warning - continue but warn user
             if progress:
-                progress(0, desc="⚠️ Low disk space detected")
+                progress(0, desc="âš ï¸ Low disk space detected")
 
         # Define worker functions (moved outside try block)
         def worker_single(prepped_settings):
@@ -568,9 +584,73 @@ def build_gan_callbacks(
                     return False
                 
                 try:
-                    ps = maybe_downscale(prepare_single(job.input_path))
-                    status, lg, outp, cmp_html, slider_upd = run_single(ps, progress_cb=progress_q.put)
-                    
+                    input_file = Path(job.input_path)
+                    input_kind = detect_input_type(str(input_file))
+
+                    from shared.path_utils import sanitize_filename, resolve_output_location
+                    from shared.output_run_manager import batch_item_dir, prepare_batch_video_run_dir
+
+                    batch_root = Path(current_output_dir)
+                    batch_root.mkdir(parents=True, exist_ok=True)
+
+                    if input_kind != "video":
+                        # Batch images: write directly into the batch output folder using the original name.
+                        safe_name = sanitize_filename(input_file.name)
+                        desired_out = batch_root / safe_name
+
+                        if desired_out.exists() and not overwrite_existing_batch:
+                            job.status = "skipped"
+                            job.output_path = str(desired_out)
+                            job.metadata["log"] = f"Skipped (exists): {desired_out}"
+                            return True
+                        if desired_out.exists() and overwrite_existing_batch:
+                            try:
+                                desired_out.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                        ps_base = prepare_single(job.input_path)
+                        ps_base["_original_filename"] = input_file.name
+                        ps_base["_desired_output_path"] = str(desired_out)
+                        ps = maybe_downscale(ps_base)
+                        status, lg, outp, cmp_html, slider_upd = run_single(ps, progress_cb=progress_q.put)
+                    else:
+                        # Batch videos: stable per-input folder under outputs/<input_stem>/ with chunk artifacts inside.
+                        item_out_dir = batch_item_dir(batch_root, input_file.name)
+                        predicted_final = resolve_output_location(
+                            input_path=str(input_file),
+                            output_format="mp4",
+                            global_output_dir=str(item_out_dir),
+                            batch_mode=False,
+                            original_filename=input_file.name,
+                        )
+                        run_paths = prepare_batch_video_run_dir(
+                            batch_root,
+                            input_file.name,
+                            input_path=str(input_file),
+                            model_label="GAN",
+                            mode=str(getattr(runner, "get_mode", lambda: "subprocess")() or "subprocess"),
+                            overwrite_existing=overwrite_existing_batch,
+                        )
+                        if not run_paths:
+                            if not overwrite_existing_batch:
+                                job.status = "skipped"
+                                job.output_path = str(predicted_final)
+                                job.metadata["log"] = f"Skipped (exists): {item_out_dir}"
+                                return True
+                            job.status = "failed"
+                            job.error_message = f"Could not create batch output folder: {item_out_dir}"
+                            return False
+
+                        ps_base = prepare_single(job.input_path)
+                        ps_base["_original_filename"] = input_file.name
+                        ps_base["_run_dir"] = str(run_paths.run_dir)
+                        ps_base["_processed_chunks_dir"] = str(run_paths.processed_chunks_dir)
+                        # Keep outputs inside the per-item folder (GAN runner chooses filenames).
+                        ps_base["output_override"] = str(run_paths.run_dir)
+                        ps = maybe_downscale(ps_base)
+                        status, lg, outp, cmp_html, slider_upd = run_single(ps, progress_cb=progress_q.put)
+                     
                     # Store results in job
                     job.output_path = outp
                     job.metadata["log"] = lg
@@ -658,10 +738,10 @@ def build_gan_callbacks(
             except Exception as e:
                 # Don't fail batch on metadata error
                 if progress_q:
-                    progress_q.put(f"⚠️ Warning: Failed to write batch metadata: {e}\n")
+                    progress_q.put(f"âš ï¸ Warning: Failed to write batch metadata: {e}\n")
             
             result_holder["payload"] = (
-                f"✅ Batch complete: {len(outputs)}/{len(batch_items)} processed ({batch_result.failed_files} failed)",
+                f"âœ… Batch complete: {len(outputs)}/{len(batch_items)} processed ({batch_result.failed_files} failed)",
                 "\n\n".join(logs),
                 outputs[0] if outputs else None,
                 last_cmp,
@@ -687,14 +767,26 @@ def build_gan_callbacks(
             raw_inp = upload if upload else (
                 settings.get("batch_input_path") if settings.get("batch_enable") else settings.get("input_path")
             )
-            inp = normalize_path(raw_inp)
+
+            # Gradio may provide FileData as a dict (path + orig_name). Handle both forms.
+            original_filename = None
+            if isinstance(raw_inp, dict):
+                original_filename = raw_inp.get("orig_name") or raw_inp.get("name")
+                raw_inp = raw_inp.get("path") or ""
+
+            inp = normalize_path(str(raw_inp))
+            settings["_original_filename"] = original_filename or Path(inp).name
+            try:
+                state.setdefault("seed_controls", {})["_original_filename"] = settings["_original_filename"]
+            except Exception:
+                pass
             if settings.get("batch_enable"):
                 if not inp or not Path(inp).exists() or not Path(inp).is_dir():
-                    yield ("❌ Batch input folder missing", "", gr.update(value="", visible=False), None, None, "Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
+                    yield ("âŒ Batch input folder missing", "", gr.update(value="", visible=False), gr.update(value=None, visible=False), gr.update(value=None, visible=False), "Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
                     return
             else:
                 if not inp or not Path(inp).exists():
-                    yield ("❌ Input missing", "", gr.update(value="", visible=False), None, None, "Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
+                    yield ("âŒ Input missing", "", gr.update(value="", visible=False), gr.update(value=None, visible=False), gr.update(value=None, visible=False), "Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
                     return
 
             settings["input_path"] = inp
@@ -726,16 +818,16 @@ def build_gan_callbacks(
 
             cuda_warn = validate_cuda_device_spec(settings.get("cuda_device", ""))
             if cuda_warn:
-                yield (f"⚠️ {cuda_warn}", "", gr.update(value="", visible=False), None, None, "CUDA Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
+                yield (f"âš ï¸ {cuda_warn}", "", gr.update(value="", visible=False), gr.update(value=None, visible=False), gr.update(value=None, visible=False), "CUDA Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
                 return
             devices = [d.strip() for d in str(settings.get("cuda_device") or "").split(",") if d.strip()]
             if len(devices) > 1:
                 yield (
-                    "⚠️ GAN backends currently use a single GPU; select one CUDA device.",
+                    "âš ï¸ GAN backends currently use a single GPU; select one CUDA device.",
                     "",
                     gr.update(value="", visible=False),
-                    None,
-                    None,
+                    gr.update(value=None, visible=False),
+                    gr.update(value=None, visible=False),
                     "Multi-GPU Error",
                     gr.update(value=None),
                     gr.update(value="", visible=False),
@@ -750,15 +842,17 @@ def build_gan_callbacks(
             face_strength = float(global_settings.get("face_strength", 0.5))
             backend_val = settings.get("backend", "realesrgan")
             
-            # Pull shared output/comparison preferences
-            if (not settings.get("output_format")) or settings.get("output_format") == "auto":
-                cached_fmt = seed_controls.get("output_format_val")
-                if cached_fmt:
-                    settings["output_format"] = cached_fmt
+            # NOTE: GAN tab's `output_format` is image-specific (auto/png/jpg/webp). Do NOT override it from the
+            # global Output tab (auto/mp4/png), otherwise image runs can break (e.g., output_format="mp4").
             if (not settings.get("fps_override")) or float(settings.get("fps_override") or 0) == 0:
                 cached_fps = seed_controls.get("fps_override_val")
                 if cached_fps:
                     settings["fps_override"] = cached_fps
+            # Audio mux preferences (used by chunking + final output postprocessing)
+            if seed_controls.get("audio_codec_val") is not None:
+                settings["audio_codec"] = seed_controls.get("audio_codec_val") or "copy"
+            if seed_controls.get("audio_bitrate_val") is not None:
+                settings["audio_bitrate"] = seed_controls.get("audio_bitrate_val") or ""
             cmp_mode = seed_controls.get("comparison_mode_val", "native")
             pin_pref = bool(seed_controls.get("pin_reference_val", False))
             fs_pref = bool(seed_controls.get("fullscreen_val", False))
@@ -769,6 +863,7 @@ def build_gan_callbacks(
             chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
             chunk_overlap_sec = 0.0 if auto_chunk else float(seed_controls.get("chunk_overlap_sec", 0) or 0)
             per_chunk_cleanup = seed_controls.get("per_chunk_cleanup", False)
+            overwrite_existing_batch = bool(seed_controls.get("overwrite_existing_batch_val", False))
             # PySceneDetect parameters now managed centrally in Resolution tab
             scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
             min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
@@ -817,7 +912,7 @@ def build_gan_callbacks(
                     settings=settings,
                     scene_threshold=scene_threshold,
                     min_scene_len=min_scene_len,
-                    temp_dir=current_temp_dir,
+                    work_dir=Path(settings.get("_run_dir") or current_output_dir),
                     on_progress=lambda msg: progress(0, desc=msg) if progress else None,
                     chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
                     chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
@@ -833,10 +928,10 @@ def build_gan_callbacks(
                 if progress:
                     progress(1.0, desc="Chunking complete!")
                 
-                status = "✅ GAN chunked upscale complete" if rc == 0 else f"⚠️ GAN chunking failed (code {rc})"
+                status = "âœ… GAN chunked upscale complete" if rc == 0 else f"âš ï¸ GAN chunking failed (code {rc})"
                 if rc != 0 and maybe_set_vram_oom_alert(state, model_label="GAN", text=clog, settings=settings):
-                    status = "🚫 Out of VRAM (GPU) — see banner above"
-                    show_vram_oom_modal(state, title="Out of VRAM (GPU) — GAN", duration=None)
+                    status = "ðŸš« Out of VRAM (GPU) â€” see banner above"
+                    show_vram_oom_modal(state, title="Out of VRAM (GPU) â€” GAN", duration=None)
                 
                 # Build comparison for chunked output
                 video_comp_html_update = gr.update(value="", visible=False)
@@ -854,13 +949,14 @@ def build_gan_callbacks(
                     elif not Path(final_output).is_dir():
                         slider_update = gr.update(value=(settings["input_path"], final_output), visible=True)
                 
+                img_upd, vid_upd = _media_updates(final_output)
                 yield (
                     status,
                     clog,
                     gr.update(value="", visible=False),
-                    final_output if final_output and Path(final_output).suffix.lower() in ('.png', '.jpg', '.jpeg') else None,
-                    final_output if final_output and Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv') else None,
-                    f"Chunking: {'Auto (PySceneDetect scenes)' if auto_chunk else 'Static'} — {chunk_count} chunks",
+                    img_upd,
+                    vid_upd,
+                    f"Chunking: {'Auto (PySceneDetect scenes)' if auto_chunk else 'Static'} â€” {chunk_count} chunks",
                     slider_update,
                     video_comp_html_update,
                     gr.update(visible=False),
@@ -889,7 +985,13 @@ def build_gan_callbacks(
             # Define run_single function (moved outside try block)
             def run_single(prepped_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
                 if cancel_event.is_set():
-                    return ("⏹️ Canceled", "\n".join(["Canceled before start"]), None, "", gr.update(value=None))
+                    return ("â¹ï¸ Canceled", "\n".join(["Canceled before start"]), None, "", gr.update(value=None))
+                run_output_root = Path(prepped_settings.get("_run_dir") or current_output_dir)
+                try:
+                    run_output_root.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+
                 header_log = [
                     f"Model: {prepped_settings['model_name']}",
                     f"Backend: {backend_val}",
@@ -920,7 +1022,7 @@ def build_gan_callbacks(
                             if found:
                                 break
                         if not found:
-                            return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.update(value=None))
+                            return ("âŒ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.update(value=None))
                     
                     # Add face restoration settings
                     prepped_settings["face_restore"] = face_apply
@@ -949,22 +1051,22 @@ def build_gan_callbacks(
                             settings=chunk_settings,
                             scene_threshold=scene_threshold,
                             min_scene_len=min_scene_len,
-                            temp_dir=current_temp_dir,
+                            work_dir=run_output_root,
                             on_progress=(lambda msg: progress_cb(msg) if progress_cb else None),
                             chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
                             chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
                             per_chunk_cleanup=per_chunk_cleanup,
                             allow_partial=True,
-                            global_output_dir=str(current_output_dir),
+                            global_output_dir=str(run_output_root),
                             resume_from_partial=False,
                             progress_tracker=_chunk_progress_cb,
                             process_func=None,
                             model_type="gan",
                         )
 
-                        status = "✅ GAN chunked upscale complete" if rc == 0 else f"⚠️ GAN chunking failed (code {rc})"
+                        status = "âœ… GAN chunked upscale complete" if rc == 0 else f"âš ï¸ GAN chunking failed (code {rc})"
                         if rc != 0 and maybe_set_vram_oom_alert(state, model_label="GAN", text=clog, settings=chunk_settings):
-                            status = "🚫 Out of VRAM (GPU) — see banner above"
+                            status = "ðŸš« Out of VRAM (GPU) â€” see banner above"
 
                         outp = final_output
                         if outp and Path(outp).exists() and face_apply:
@@ -1035,12 +1137,12 @@ def build_gan_callbacks(
                         settings=prepped_settings,
                         base_dir=base_dir,
                         temp_dir=current_temp_dir,
-                        output_dir=current_output_dir,
+                        output_dir=run_output_root,
                         on_progress=progress_cb if progress_cb else None,
                         cancel_event=cancel_event  # Fixed: Pass cancel event to enable cancellation
                     )
                 except Exception as exc:  # surface ffmpeg or other runtime issues
-                    err_msg = f"❌ GAN upscale failed: {exc}"
+                    err_msg = f"âŒ GAN upscale failed: {exc}"
                     if maybe_set_vram_oom_alert(state, model_label="GAN", text=str(exc), settings=prepped_settings):
                         # NOTE: Modal popups must be triggered from the main Gradio event thread.
                         # We show the modal after the worker thread finishes (see below).
@@ -1049,51 +1151,121 @@ def build_gan_callbacks(
                         progress_cb(err_msg)
                     return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.update(value=None))
                 if cancel_event.is_set():
-                    status = "⏹️ Canceled"
+                    status = "â¹ï¸ Canceled"
                 else:
-                    status = "✅ GAN upscale complete" if result.returncode == 0 else f"⚠️ GAN upscale failed"
+                    status = "âœ… GAN upscale complete" if result.returncode == 0 else f"âš ï¸ GAN upscale failed"
                 log_body = result.log or ""
                 if result.returncode != 0 and maybe_set_vram_oom_alert(state, model_label="GAN", text=log_body, settings=prepped_settings):
-                    status = "🚫 Out of VRAM (GPU) — see banner above"
+                    status = "ðŸš« Out of VRAM (GPU) â€” see banner above"
                 full_log = "\n".join(header_log + [log_body])
                 if progress_cb:
                     progress_cb(status)
-                relocated = relocate_output(result.output_path)
+                final_out_path = result.output_path
+
+                # Relocate/rename outputs when a deterministic destination is requested (batch images, single-image numbering).
+                desired_out = prepped_settings.get("_desired_output_path")
+                if desired_out and final_out_path and Path(final_out_path).exists():
+                    try:
+                        src_path = Path(final_out_path)
+                        dest_path = Path(normalize_path(str(desired_out)))
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        if src_path.is_dir():
+                            if dest_path.exists():
+                                shutil.rmtree(dest_path, ignore_errors=True)
+                            shutil.copytree(src_path, dest_path, dirs_exist_ok=False)
+                            final_out_path = str(dest_path)
+                            result.output_path = final_out_path
+                        else:
+                            if dest_path.exists():
+                                dest_path.unlink(missing_ok=True)
+
+                            # If the requested extension differs, convert via PIL for correctness.
+                            if dest_path.suffix.lower() != src_path.suffix.lower():
+                                from PIL import Image
+
+                                img = Image.open(src_path)
+                                fmt = dest_path.suffix.lower().lstrip(".")
+                                quality = int(prepped_settings.get("output_quality", 95) or 95)
+                                if fmt in ("jpg", "jpeg"):
+                                    img = img.convert("RGB")
+                                    img.save(dest_path, format="JPEG", quality=quality)
+                                elif fmt == "webp":
+                                    img.save(dest_path, format="WEBP", quality=quality)
+                                else:
+                                    img.save(dest_path)
+                                try:
+                                    src_path.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                            else:
+                                shutil.move(str(src_path), str(dest_path))
+
+                            final_out_path = str(dest_path)
+                            result.output_path = final_out_path
+                    except Exception:
+                        pass
+
+                # Preserve audio for video outputs (GAN video pipeline reconstructs video from frames -> no audio by default).
+                try:
+                    if final_out_path and Path(final_out_path).exists() and Path(final_out_path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm"):
+                        from shared.audio_utils import ensure_audio_on_video
+
+                        audio_src = prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path")
+                        if audio_src and Path(audio_src).exists():
+                            audio_codec = str(prepped_settings.get("audio_codec") or settings.get("audio_codec") or "copy")
+                            audio_bitrate = prepped_settings.get("audio_bitrate") or settings.get("audio_bitrate") or None
+                            _changed, _final, _err = ensure_audio_on_video(
+                                Path(final_out_path),
+                                Path(audio_src),
+                                audio_codec=audio_codec,
+                                audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                                on_progress=progress_cb if progress_cb else None,
+                            )
+                            if _err and progress_cb:
+                                progress_cb(f"Ã¢Å¡Â Ã¯Â¸Â Audio mux: {_err}")
+                            if _final and str(_final) != str(final_out_path):
+                                final_out_path = str(_final)
+                                result.output_path = final_out_path
+                except Exception:
+                    pass
 
                 # Save preprocessed input (if we created one) alongside outputs
                 pre_in = prepped_settings.get("_preprocessed_input_path")
-                if pre_in and (relocated or result.output_path):
-                    saved_pre = _save_preprocessed_artifact(Path(pre_in), relocated or result.output_path)
-                    if saved_pre:
-                        full_log = "\n".join([full_log, f"🧩 Preprocessed input saved: {saved_pre}"])
-                        if progress_cb:
-                            progress_cb(f"🧩 Preprocessed input saved: {saved_pre}")
+                if pre_in and Path(pre_in).exists():
+                    full_log = "\n".join([full_log, f"Downscaled input saved: {pre_in}"])
+                    if progress_cb:
+                        progress_cb(f"Downscaled input saved: {pre_in}")
 
-                if relocated or result.output_path:
+                if final_out_path:
                     try:
-                        outp = Path(relocated or result.output_path)
+                        outp = Path(final_out_path)
                         seed_controls["last_output_dir"] = str(outp.parent if outp.is_file() else outp)
                         seed_controls["last_output_path"] = str(outp) if outp.is_file() else None
                     except Exception:
                         pass
-                run_logger.write_summary(
-                    Path(relocated) if relocated else output_dir,
-                    {
-                        "input": prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path"),
-                        "output": relocated or result.output_path,
-                        "returncode": result.returncode,
-                        "args": prepped_settings,
-                        "face_apply": face_apply,
-                        "pipeline": "gan",
-                    },
-                )
+                try:
+                    run_logger.write_summary(
+                        Path(final_out_path) if final_out_path else run_output_root,
+                        {
+                            "input": prepped_settings.get("_original_input_path_before_preprocess")
+                            or prepped_settings.get("input_path"),
+                            "output": final_out_path,
+                            "returncode": result.returncode,
+                            "args": prepped_settings,
+                            "face_apply": face_apply,
+                            "pipeline": "gan",
+                        },
+                    )
+                except Exception:
+                    pass
                 cmp_html = ""
                 slider_update = gr.update(value=None)
-                if relocated or result.output_path:
+                if final_out_path:
                     src = prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path")
-                    outp = relocated or result.output_path
-                    if outp and Path(outp).exists():
-                        if Path(outp).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
+                    outp = final_out_path
+                    if Path(outp).exists():
+                        if Path(outp).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm"):
                             # Use imported video comparison function
                             cmp_html = create_video_comparison_html(
                                 original_video=src,
@@ -1107,7 +1279,7 @@ def build_gan_callbacks(
                             # For images, use ImageSlider directly
                             slider_update = gr.update(value=(src, outp), visible=True)
                             cmp_html = ""  # No HTML comparison for images, use slider instead
-                return status, full_log, relocated if relocated else (result.output_path if result.output_path else None), cmp_html, slider_update
+                return status, full_log, final_out_path, cmp_html, slider_update
 
             # Kick off worker thread
             if settings.get("batch_enable"):
@@ -1125,11 +1297,11 @@ def build_gan_callbacks(
 
                 if not items:
                     yield (
-                        "❌ No media files or frame folders found in batch folder",
+                        "âŒ No media files or frame folders found in batch folder",
                         "",
                         gr.update(value="", visible=False),
-                        None,
-                        None,
+                        gr.update(value=None, visible=False),
+                        gr.update(value=None, visible=False),
                         "Error",
                         gr.update(value=None),
                         gr.update(value="", visible=False),
@@ -1139,7 +1311,46 @@ def build_gan_callbacks(
                     return
                 t = threading.Thread(target=worker_batch, args=(items,), daemon=True)
             else:
+                # NEW: Per-run output folder for single video runs (0001/0002/...)
+                # Keeps chunk artifacts user-visible and prevents collisions between app instances.
+                if input_type == "video":
+                    try:
+                        run_paths, _explicit_final = prepare_single_video_run(
+                            output_root_fallback=current_output_dir,
+                            output_override_raw=settings.get("output_override"),
+                            input_path=settings["input_path"],
+                            original_filename=Path(settings["input_path"]).name,
+                            model_label="GAN",
+                            mode=str(getattr(runner, "get_mode", lambda: "subprocess")() or "subprocess"),
+                        )
+                        current_output_dir = Path(run_paths.run_dir)
+                        seed_controls["last_run_dir"] = str(current_output_dir)
+                        settings["_run_dir"] = str(current_output_dir)
+                        settings["_user_output_override_raw"] = settings.get("output_override") or ""
+                        # For GAN, we use the run folder as the output root; explicit file naming is handled later.
+                        settings["output_override"] = str(current_output_dir)
+                    except Exception:
+                        pass
+
                 prepped = maybe_downscale(prepare_single(settings["input_path"]))
+                # Single-image runs: enforce sequential numbering in output root (0001_<orig>.<ext>, ...).
+                try:
+                    from shared.output_run_manager import numbered_single_image_output_path
+
+                    if detect_input_type(prepped.get("input_path") or "") == "image":
+                        fmt = str(prepped.get("output_format") or "auto").lower()
+                        if fmt in ("", "auto"):
+                            ext = Path(prepped.get("_original_filename") or prepped["input_path"]).suffix or ".png"
+                        else:
+                            ext = f".{fmt}"
+                        if ext.lower() == ".jpeg":
+                            ext = ".jpg"
+                        orig_name = prepped.get("_original_filename") or Path(prepped["input_path"]).name
+                        prepped["_desired_output_path"] = str(
+                            numbered_single_image_output_path(Path(current_output_dir), str(orig_name), ext=str(ext))
+                        )
+                except Exception:
+                    pass
                 t = threading.Thread(target=worker_single, args=(prepped,), daemon=True)
             t.start()
 
@@ -1177,12 +1388,17 @@ def build_gan_callbacks(
                 if now - last_yield > 0.5:
                     last_yield = now
                     live_logs = result_holder.get("live_logs", [])
+                    img_upd, vid_upd = _media_updates(None)
                     yield (
-                        gr.update(value="⏳ Running GAN upscale..."),
+                        gr.update(value="â³ Running GAN upscale..."),
                         "\n".join(live_logs[-400:]),
-                        None,
-                        None,
+                        gr.update(value="", visible=False),
+                        img_upd,
+                        vid_upd,
+                        "Running...",
                         gr.update(value=None),
+                        gr.update(value="", visible=False),
+                        gr.update(visible=False),
                         state
                     )
                 time.sleep(0.1)
@@ -1190,16 +1406,16 @@ def build_gan_callbacks(
 
             status, lg, outp, cmp_html, slider_upd = result_holder.get(
                 "payload",
-                ("❌ Failed", "", None, "", gr.update(value=None)),
+                ("âŒ Failed", "", None, "", gr.update(value=None)),
             )
             live_logs = result_holder.get("live_logs", [])
             merged_logs = lg if lg else "\n".join(live_logs)
             
             # Update progress to 100% on completion
             if progress:
-                if "✅" in status:
+                if "âœ…" in status:
                     progress(1.0, desc="GAN upscaling complete!")
-                elif "❌" in status:
+                elif "âŒ" in status:
                     progress(0, desc="Failed")
             
             # Build video comparison for videos
@@ -1219,14 +1435,15 @@ def build_gan_callbacks(
 
             # If VRAM OOM was detected during the worker run, show a modal popup (easy to notice).
             if isinstance(state, dict) and state.get("alerts", {}).get("oom", {}).get("visible"):
-                show_vram_oom_modal(state, title="Out of VRAM (GPU) — GAN", duration=None)
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) â€” GAN", duration=None)
             
+            img_upd, vid_upd = _media_updates(outp)
             yield (
                 status,
                 merged_logs,
                 gr.update(value="", visible=False),
-                outp if outp and not Path(outp).is_dir() and Path(outp).suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp') else None,
-                outp if outp and str(outp).endswith(".mp4") else None,
+                img_upd,
+                vid_upd,
                 f"Output: {outp}" if outp else "No output",
                 slider_upd,
                 video_comp_html_update,
@@ -1236,11 +1453,11 @@ def build_gan_callbacks(
         except Exception as e:
             error_msg = f"Critical error in GAN processing: {str(e)}"
             yield (
-                "❌ Critical error",
+                "âŒ Critical error",
                 error_msg,
                 gr.update(value="", visible=False),
-                None,
-                None,
+                gr.update(value=None, visible=False),
+                gr.update(value=None, visible=False),
                 "Error",
                 gr.update(value=None),
                 gr.update(value="", visible=False),
@@ -1248,65 +1465,79 @@ def build_gan_callbacks(
                 state or {}
             )
 
+
     def cancel_action(state=None):
         """
         Cancel GAN processing and attempt to compile partial outputs if available.
-        Mirrors SeedVR2 cancel behavior for consistency.
+        Uses output-run folders first, then legacy temp fallback.
         """
         cancel_event.set()
         try:
             runner.cancel()
         except Exception:
             pass
-        
-        # Check for partial outputs from chunked processing
-        temp_chunks_dir = Path(global_settings.get("temp_dir", temp_dir)) / "chunks"
-        if temp_chunks_dir.exists():
+
+        compiled_output: Optional[str] = None
+        live_output_root = Path(global_settings.get("output_dir", output_dir))
+        state_obj = state or {}
+        seed_controls = state_obj.get("seed_controls", {}) if isinstance(state_obj, dict) else {}
+        last_run_dir = seed_controls.get("last_run_dir")
+        audio_source = seed_controls.get("last_input_path") or None
+        audio_codec = str(seed_controls.get("audio_codec_val") or "copy")
+        audio_bitrate = seed_controls.get("audio_bitrate_val") or None
+
+        try:
+            from shared.chunking import salvage_partial_from_run_dir
+            from shared.output_run_manager import recent_output_run_dirs
+
+            for run_dir in recent_output_run_dirs(
+                live_output_root,
+                last_run_dir=str(last_run_dir) if last_run_dir else None,
+                limit=20,
+            ):
+                partial_path, _method = salvage_partial_from_run_dir(
+                    run_dir,
+                    partial_basename="cancelled_gan_partial",
+                    audio_source=str(audio_source) if audio_source else None,
+                    audio_codec=audio_codec,
+                    audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                )
+                if partial_path and Path(partial_path).exists():
+                    compiled_output = str(partial_path)
+                    break
+        except Exception as e:
+            return (
+                gr.update(value=f"Cancelled - Error compiling partials: {str(e)}"),
+                "Cancellation successful but partial compilation failed",
+                state_obj,
+            )
+
+        if not compiled_output:
             try:
-                from shared.chunking import detect_resume_state, concat_videos
-                from shared.path_utils import collision_safe_path
-                
-                # Check for completed video chunks
-                partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
-                partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
-                
-                compiled_output = None
-                
-                # Try to compile video chunks
-                if completed_chunks and len(completed_chunks) > 0:
-                    partial_target = collision_safe_path(temp_chunks_dir / "cancelled_gan_partial.mp4")
-                    if concat_videos(completed_chunks, partial_target):
-                        compiled_output = str(partial_target)
-                        # Copy to outputs folder
-                        final_output = Path(output_dir) / f"cancelled_gan_partial_upscaled.mp4"
-                        final_output = collision_safe_path(final_output)
-                        shutil.copy2(partial_target, final_output)
-                        compiled_output = str(final_output)
-                
-                # Or compile PNG chunks
-                elif completed_png_chunks and len(completed_png_chunks) > 0:
-                    from shared.path_utils import collision_safe_dir
-                    partial_target = collision_safe_dir(temp_chunks_dir / "cancelled_gan_partial_png")
-                    partial_target.mkdir(parents=True, exist_ok=True)
-                    
-                    for i, chunk_path in enumerate(completed_png_chunks, 1):
-                        dest = partial_target / f"chunk_{i:04d}"
-                        if Path(chunk_path).is_dir():
-                            shutil.copytree(chunk_path, dest, dirs_exist_ok=True)
-                        else:
-                            shutil.copy2(chunk_path, dest)
-                    
-                    compiled_output = str(partial_target)
-                
-                if compiled_output:
-                    return gr.update(value=f"⏹️ Cancelled - Partial GAN output compiled: {Path(compiled_output).name}"), f"Partial results saved to: {compiled_output}", state or {}
-                else:
-                    return gr.update(value="⏹️ Cancelled - No partial outputs to compile"), "Processing was cancelled before any chunks were completed", state or {}
-                    
-            except Exception as e:
-                return gr.update(value=f"⏹️ Cancelled - Error compiling partials: {str(e)}"), "Cancellation successful but partial compilation failed", state or {}
-        
-        return gr.update(value="⏹️ GAN processing cancelled"), "No partial outputs found to compile", state or {}
+                temp_chunks_dir = Path(global_settings.get("temp_dir", temp_dir)) / "chunks"
+                if temp_chunks_dir.exists():
+                    from shared.chunking import salvage_partial_from_run_dir
+
+                    partial_path, _method = salvage_partial_from_run_dir(
+                        temp_chunks_dir,
+                        partial_basename="cancelled_gan_partial",
+                    )
+                    if partial_path and Path(partial_path).exists():
+                        compiled_output = str(partial_path)
+            except Exception:
+                pass
+
+        if compiled_output:
+            return (
+                gr.update(value=f"Cancelled - Partial GAN output compiled: {Path(compiled_output).name}"),
+                f"Partial results saved to: {compiled_output}",
+                state_obj,
+            )
+        return (
+            gr.update(value="Cancelled - No partial outputs to compile"),
+            "Processing was cancelled before any chunks were completed",
+            state_obj,
+        )
 
     def get_model_scale(model_name: str) -> int:
         """Get the scale factor for a specific model"""

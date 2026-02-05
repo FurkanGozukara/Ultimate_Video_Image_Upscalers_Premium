@@ -31,6 +31,8 @@ from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.error_handling import logger as error_logger
 from shared.resolution_calculator import estimate_fixed_scale_upscale_plan_from_dims
 from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
+from shared.output_run_manager import prepare_single_video_run, batch_item_dir, downscaled_video_path
+from shared.ffmpeg_utils import scale_video
 
 # Cancel event for FlashVSR+ processing
 _flashvsr_cancel_event = threading.Event()
@@ -354,6 +356,11 @@ def build_flashvsr_callbacks(
                 settings["_comparison_mode"] = seed_controls["comparison_mode_val"]
             if seed_controls.get("save_metadata_val") is not None:
                 settings["save_metadata"] = seed_controls["save_metadata_val"]
+            # Audio mux preferences (used by chunking + final output postprocessing)
+            if seed_controls.get("audio_codec_val") is not None:
+                settings["audio_codec"] = seed_controls.get("audio_codec_val") or "copy"
+            if seed_controls.get("audio_bitrate_val") is not None:
+                settings["audio_bitrate"] = seed_controls.get("audio_bitrate_val") or ""
             
             # Clear cancel event
             _flashvsr_cancel_event.clear()
@@ -394,35 +401,33 @@ def build_flashvsr_callbacks(
                     if plan.preprocess_scale >= 0.999999:
                         return
 
-                    temp_root = Path(global_settings.get("temp_dir", temp_dir))
-                    temp_root.mkdir(parents=True, exist_ok=True)
-
                     in_type = detect_input_type(src_input_path)
 
                     if in_type == "video":
-                        pre_out = collision_safe_path(
-                            temp_root
-                            / f"{Path(src_input_path).stem}_pre{int(plan.preprocess_width)}x{int(plan.preprocess_height)}.mp4"
+                        out_root = Path(
+                            cfg.get("_run_dir") or cfg.get("global_output_dir") or global_settings.get("output_dir", output_dir)
                         )
+                        original_name = cfg.get("_original_filename") or Path(src_input_path).name
+                        pre_out = downscaled_video_path(out_root, str(original_name))
                         if progress:
                             progress(0, desc=f"Preprocessing input → {int(plan.preprocess_width)}×{int(plan.preprocess_height)}")
-                        cmd = [
-                            "ffmpeg",
-                            "-y",
-                            "-i",
-                            src_input_path,
-                            "-vf",
-                            f"scale={int(plan.preprocess_width)}:{int(plan.preprocess_height)}:flags=lanczos",
-                            str(pre_out),
-                        ]
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        if pre_out.exists():
+                        ok, _err = scale_video(
+                            Path(src_input_path),
+                            Path(pre_out),
+                            int(plan.preprocess_width),
+                            int(plan.preprocess_height),
+                            lossless=True,
+                            audio_copy_first=True,
+                        )
+                        if ok and Path(pre_out).exists():
                             cfg["_original_input_path_before_preprocess"] = src_input_path
                             cfg["_preprocessed_input_path"] = str(pre_out)
                             cfg["_effective_input_path"] = str(pre_out)
                         return
 
                     if in_type == "directory":
+                        temp_root = Path(global_settings.get("temp_dir", temp_dir))
+                        temp_root.mkdir(parents=True, exist_ok=True)
                         src_dir = Path(src_input_path)
                         img_files = [p for p in sorted(src_dir.iterdir()) if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
                         if not img_files:
@@ -474,6 +479,24 @@ def build_flashvsr_callbacks(
             # Initialize progress
             if progress:
                 progress(0, desc="Initializing FlashVSR+...")
+
+            video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".flv", ".wmv"}
+            image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+            def _media_updates(out_path: Optional[str]) -> tuple[Any, Any]:
+                """
+                Return (output_video_update, output_image_update) for the merged output panel.
+                """
+                try:
+                    if out_path and not Path(out_path).is_dir():
+                        suf = Path(out_path).suffix.lower()
+                        if suf in video_exts:
+                            return gr.update(value=out_path, visible=True), gr.update(value=None, visible=False)
+                        if suf in image_exts:
+                            return gr.update(value=None, visible=False), gr.update(value=out_path, visible=True)
+                except Exception:
+                    pass
+                return gr.update(value=None, visible=False), gr.update(value=None, visible=False)
             
             # PRE-FLIGHT CHECKS (mirrors SeedVR2/GAN for consistency)
             from shared.error_handling import check_ffmpeg_available, check_disk_space
@@ -481,11 +504,12 @@ def build_flashvsr_callbacks(
             # Check ffmpeg availability
             ffmpeg_ok, ffmpeg_msg = check_ffmpeg_available()
             if not ffmpeg_ok:
+                vid_upd, img_upd = _media_updates(None)
                 yield (
                     "❌ ffmpeg not found in PATH",
                     ffmpeg_msg or "Install ffmpeg and add to PATH before processing",
-                    None,
-                    None,
+                    vid_upd,
+                    img_upd,
                     gr.update(visible=False),
                     gr.update(value="", visible=False),
                     state
@@ -496,11 +520,12 @@ def build_flashvsr_callbacks(
             output_path_check = Path(global_settings.get("output_dir", output_dir))
             has_space, space_warning = check_disk_space(output_path_check, required_mb=5000)
             if not has_space:
+                vid_upd, img_upd = _media_updates(None)
                 yield (
                     "❌ Insufficient disk space",
                     space_warning or "Free up at least 5GB disk space before processing",
-                    None,
-                    None,
+                    vid_upd,
+                    img_upd,
                     gr.update(visible=False),
                     gr.update(value="", visible=False),
                     state
@@ -515,11 +540,12 @@ def build_flashvsr_callbacks(
                 batch_out = normalize_path(settings.get("batch_output_path") or "") if settings.get("batch_output_path") else ""
 
                 if not batch_in or not Path(batch_in).exists() or not Path(batch_in).is_dir():
+                    vid_upd, img_upd = _media_updates(None)
                     yield (
                         "❌ Batch input folder missing/invalid",
                         "Provide a valid Batch Input Folder path.",
-                        None,
-                        None,
+                        vid_upd,
+                        img_upd,
                         gr.update(visible=False),
                         gr.update(value="", visible=False),
                         state,
@@ -553,22 +579,29 @@ def build_flashvsr_callbacks(
                 scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
                 min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
                 frame_accurate_split = bool(seed_controls.get("frame_accurate_split", True))
+                overwrite_existing = bool(seed_controls.get("overwrite_existing_batch_val", False))
 
                 logs: List[str] = []
                 outputs: List[str] = []
                 last_input_path: Optional[str] = None
                 last_output_path: Optional[str] = None
+                batch_root = Path(batch_out) if batch_out else Path(global_settings.get("output_dir", output_dir))
+                try:
+                    batch_root.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
 
                 if progress:
                     progress(0, desc=f"Batch: {len(items)} item(s) queued")
 
                 for idx, item in enumerate(items, 1):
                     if _flashvsr_cancel_event.is_set():
+                        vid_upd, img_upd = _media_updates(None)
                         yield (
                             "⏹️ Batch cancelled",
                             "\n".join(logs[-200:]) + "\n\n[Cancelled by user]",
-                            None,
-                            None,
+                            vid_upd,
+                            img_upd,
                             gr.update(visible=False),
                             gr.update(value="", visible=False),
                             state,
@@ -586,9 +619,41 @@ def build_flashvsr_callbacks(
                     item_settings["input_path"] = item_path
                     item_settings["_effective_input_path"] = item_path
                     item_settings["_original_filename"] = Path(item_path).name
-                    item_settings["global_output_dir"] = str(output_dir)
-                    if batch_out:
-                        item_settings["output_override"] = batch_out
+                    item_out_dir = batch_item_dir(batch_root, Path(item_path).name)
+
+                    mode_val = str(item_settings.get("mode", "tiny") or "tiny")
+                    seed_val = int(item_settings.get("seed", 0) or 0)
+                    base_no_ext = Path(item_path).stem
+                    predicted_output_file = item_out_dir / f"FlashVSR_{mode_val}_{base_no_ext}_{seed_val}.mp4"
+
+                    from shared.output_run_manager import prepare_batch_video_run_dir
+
+                    run_paths = prepare_batch_video_run_dir(
+                        batch_root,
+                        Path(item_path).name,
+                        input_path=str(item_path),
+                        model_label="FlashVSR+",
+                        mode=str(getattr(runner, "get_mode", lambda: "subprocess")() or "subprocess"),
+                        overwrite_existing=overwrite_existing,
+                    )
+                    if not run_paths:
+                        if not overwrite_existing:
+                            logs.append(
+                                f"⏭️ [{idx}/{len(items)}] {Path(item_path).name} skipped (output folder exists)"
+                            )
+                            if predicted_output_file.exists():
+                                outputs.append(str(predicted_output_file))
+                            continue
+                        logs.append(
+                            f"❌ [{idx}/{len(items)}] {Path(item_path).name} failed (could not create output folder)"
+                        )
+                        continue
+
+                    item_settings["global_output_dir"] = str(run_paths.run_dir)
+                    item_settings["_run_dir"] = str(run_paths.run_dir)
+                    item_settings["_processed_chunks_dir"] = str(run_paths.processed_chunks_dir)
+                    # Explicit output file path inside the per-item folder.
+                    item_settings["output_override"] = str(predicted_output_file)
 
                     _apply_vnext_preprocess(item_settings, item_path)
 
@@ -610,8 +675,7 @@ def build_flashvsr_callbacks(
 
                         # For batch output, prefer an explicit file name to match FlashVSR naming.
                         try:
-                            out_base = Path(batch_out) if batch_out else Path(global_settings.get("output_dir", output_dir))
-                            out_base.mkdir(parents=True, exist_ok=True)
+                            out_base = Path(item_out_dir)
                             base_stem = Path(chunk_settings.get("_original_filename") or item_path).stem
                             seed_val = int(chunk_settings.get("seed", 0) or 0)
                             mode_val = str(chunk_settings.get("mode", "tiny") or "tiny")
@@ -634,13 +698,13 @@ def build_flashvsr_callbacks(
                             settings=chunk_settings,
                             scene_threshold=scene_threshold,
                             min_scene_len=min_scene_len,
-                            temp_dir=Path(global_settings.get("temp_dir", temp_dir)),
+                            work_dir=Path(item_out_dir),
                             on_progress=lambda msg: None,
                             chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
                             chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
                             per_chunk_cleanup=per_chunk_cleanup,
                             allow_partial=True,
-                            global_output_dir=str(global_settings.get("output_dir", output_dir)),
+                            global_output_dir=str(item_out_dir),
                             resume_from_partial=False,
                             progress_tracker=None,
                             process_func=_process_chunk,
@@ -681,7 +745,9 @@ def build_flashvsr_callbacks(
                         # Save preprocessed input (if created) alongside outputs
                         pre_in = item_settings.get("_preprocessed_input_path")
                         if pre_in and outp:
-                            saved_pre = _save_preprocessed_artifact(Path(pre_in), outp)
+                            # Preprocessed inputs (e.g., downscaled videos) are already written into the run folder
+                            # (see `downscaled_<orig>.mp4`), so we don't duplicate them under `pre_processed/`.
+                            saved_pre = None
                             if saved_pre:
                                 logs.append(f"🧩 Preprocessed input saved: {saved_pre}")
 
@@ -750,7 +816,11 @@ def build_flashvsr_callbacks(
                         h, sld = create_unified_comparison(
                             input_path=last_input_path,
                             output_path=last_output_path,
-                            mode="slider" if last_output_path.endswith(".mp4") else "native",
+                            mode=(
+                                "slider"
+                                if Path(last_output_path).suffix.lower() in video_exts
+                                else "native"
+                            ),
                         )
                         html_comp = h if h else gr.update(value="", visible=False)
                         img_slider = sld if sld else gr.update(visible=False)
@@ -758,11 +828,12 @@ def build_flashvsr_callbacks(
                         pass
 
                 status = f"✅ FlashVSR+ batch complete ({len(outputs)}/{len(items)} succeeded, {len(items) - len(outputs)} failed)"
+                vid_upd, img_upd = _media_updates(last_output_path)
                 yield (
                     status,
                     "\n".join(logs),
-                    last_output_path if last_output_path and last_output_path.endswith(".mp4") else None,
-                    last_output_path if last_output_path and not last_output_path.endswith(".mp4") else None,
+                    vid_upd,
+                    img_upd,
                     img_slider if img_slider else gr.update(visible=False),
                     html_comp if html_comp else gr.update(value="", visible=False),
                     state,
@@ -772,11 +843,12 @@ def build_flashvsr_callbacks(
             # Resolve input
             input_path = normalize_path(upload if upload else settings["input_path"])
             if not input_path or not Path(input_path).exists():
+                vid_upd, img_upd = _media_updates(None)
                 yield (
                     "❌ Input path missing",
                     "",
-                    None,
-                    None,
+                    vid_upd,
+                    img_upd,
                     gr.update(visible=False),
                     gr.update(value="", visible=False),
                     state
@@ -786,7 +858,36 @@ def build_flashvsr_callbacks(
             settings["input_path"] = input_path
             settings["_effective_input_path"] = input_path  # may be overridden by preprocessing
             settings["_original_filename"] = Path(input_path).name
-            settings["global_output_dir"] = str(output_dir)
+
+            # NEW: Per-run output folder for videos (0001/0002/...) to avoid collisions and
+            # to keep chunk artifacts user-visible.
+            if detect_input_type(input_path) == "video":
+                try:
+                    base_out_root = Path(global_settings.get("output_dir", output_dir))
+                    run_paths, explicit_final = prepare_single_video_run(
+                        output_root_fallback=base_out_root,
+                        output_override_raw=settings.get("output_override"),
+                        input_path=input_path,
+                        original_filename=settings.get("_original_filename") or Path(input_path).name,
+                        model_label="FlashVSR+",
+                        mode="subprocess",
+                    )
+                    run_dir = Path(run_paths.run_dir)
+                    seed_controls["last_run_dir"] = str(run_dir)
+                    settings["_run_dir"] = str(run_dir)
+                    settings["_processed_chunks_dir"] = str(run_paths.processed_chunks_dir)
+                    settings["_user_output_override_raw"] = settings.get("output_override") or ""
+
+                    base_stem = Path(settings.get("_original_filename") or input_path).stem
+                    seed_val = int(settings.get("seed", 0) or 0)
+                    mode_val = str(settings.get("mode", "tiny") or "tiny")
+                    default_final = run_dir / f"FlashVSR_{mode_val}_{base_stem}_{seed_val}.mp4"
+                    settings["output_override"] = str(explicit_final) if explicit_final else str(default_final)
+                except Exception:
+                    pass
+            
+            # Output root for artifacts + preprocessing
+            settings["global_output_dir"] = str(Path(settings.get("_run_dir") or output_dir))
             _apply_vnext_preprocess(settings, input_path)
 
             # Pull universal PySceneDetect chunking settings from Resolution tab (global).
@@ -855,13 +956,13 @@ def build_flashvsr_callbacks(
                             settings=chunk_settings,
                             scene_threshold=scene_threshold,
                             min_scene_len=min_scene_len,
-                            temp_dir=Path(global_settings.get("temp_dir", temp_dir)),
+                            work_dir=Path(settings.get("_run_dir") or Path(global_settings.get("output_dir", output_dir))),
                             on_progress=lambda msg: progress_queue.put(msg),
                             chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
                             chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
                             per_chunk_cleanup=per_chunk_cleanup,
                             allow_partial=True,
-                            global_output_dir=str(global_settings.get("output_dir", output_dir)),
+                            global_output_dir=str(Path(settings.get("_run_dir") or Path(global_settings.get("output_dir", output_dir)))),
                             resume_from_partial=False,
                             progress_tracker=_chunk_progress_cb,
                             process_func=_process_chunk,
@@ -940,11 +1041,12 @@ def build_flashvsr_callbacks(
                     if compiled_output:
                         status_msg += f" - Partial output saved: {Path(compiled_output).name}"
                     
+                    vid_upd, img_upd = _media_updates(compiled_output)
                     yield (
                         status_msg,
                         "\n".join(log_buffer[-50:]) + "\n\n[Cancelled by user]",
-                        None,
-                        None,
+                        vid_upd,
+                        img_upd,
                         gr.update(visible=False),
                         gr.update(value="", visible=False),
                         state
@@ -970,11 +1072,12 @@ def build_flashvsr_callbacks(
                 now = time.time()
                 if now - last_update > 0.5:
                     last_update = now
+                    vid_upd, img_upd = _media_updates(None)
                     yield (
                         "⚙️ Processing with FlashVSR+...",
                         "\n".join(log_buffer[-50:]),
-                        None,
-                        None,
+                        vid_upd,
+                        img_upd,
                         gr.update(visible=False),
                         gr.update(value="Processing...", visible=False),
                         state
@@ -991,8 +1094,8 @@ def build_flashvsr_callbacks(
                 yield (
                     ("🚫 Out of VRAM (GPU) — see banner above" if state.get("alerts", {}).get("oom", {}).get("visible") else "❌ Processing failed"),
                     f"Error: {result_holder['error']}",
-                    None,
-                    None,
+                    gr.update(value=None, visible=False),
+                    gr.update(value=None, visible=False),
                     gr.update(visible=False),
                     gr.update(value="", visible=False),
                     state
@@ -1004,8 +1107,8 @@ def build_flashvsr_callbacks(
                 yield (
                     "❌ No result",
                     "Processing did not complete",
-                    None,
-                    None,
+                    gr.update(value=None, visible=False),
+                    gr.update(value=None, visible=False),
                     gr.update(visible=False),
                     gr.update(value="", visible=False),
                     state
@@ -1046,10 +1149,33 @@ def build_flashvsr_callbacks(
             # Save preprocessed input (if we created one) alongside outputs
             pre_in = settings.get("_preprocessed_input_path")
             if pre_in and output_path:
-                saved_pre = _save_preprocessed_artifact(Path(pre_in), output_path)
+                # Preprocessed inputs are already saved into the run folder (downscaled_<orig>.mp4).
+                saved_pre = None
                 if saved_pre:
                     log_buffer.append(f"🧩 Preprocessed input saved: {saved_pre}")
             
+            # Preserve audio for video outputs (best-effort; chunked runs are handled by chunk_and_process).
+            if output_path and Path(output_path).exists() and Path(output_path).suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv', '.webm']:
+                try:
+                    from shared.audio_utils import ensure_audio_on_video
+
+                    audio_src = settings.get("_original_input_path_before_preprocess") or input_path
+                    audio_codec = str(settings.get("audio_codec") or "copy")
+                    audio_bitrate = settings.get("audio_bitrate") or None
+                    _changed, _final, _err = ensure_audio_on_video(
+                        Path(output_path),
+                        Path(audio_src),
+                        audio_codec=audio_codec,
+                        audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                        on_progress=lambda x: log_buffer.append(x) if x else None,
+                    )
+                    if _err:
+                        log_buffer.append(f"âš ï¸ Audio mux: {_err}")
+                    if _final and str(_final) != str(output_path):
+                        output_path = str(_final)
+                except Exception as e:
+                    log_buffer.append(f"âš ï¸ Audio mux failed: {str(e)}")
+
             # Create comparison
             html_comp, img_slider = create_unified_comparison(
                 input_path=input_path,
@@ -1110,11 +1236,12 @@ def build_flashvsr_callbacks(
                 status = "🚫 Out of VRAM (GPU) — see banner above"
                 show_vram_oom_modal(state, title="Out of VRAM (GPU) — FlashVSR+", duration=None)
             
+            vid_upd, img_upd = _media_updates(output_path)
             yield (
                 status,
                 result.log,
-                output_path if output_path and output_path.endswith(".mp4") else None,
-                output_path if output_path and not output_path.endswith(".mp4") else None,
+                vid_upd,
+                img_upd,
                 img_slider if img_slider else gr.update(visible=False),
                 html_comp if html_comp else gr.update(value="", visible=False),
                 state
@@ -1128,8 +1255,8 @@ def build_flashvsr_callbacks(
             yield (
                 "❌ Critical error",
                 f"Error: {str(e)}",
-                None,
-                None,
+                gr.update(value=None, visible=False),
+                gr.update(value=None, visible=False),
                 gr.update(visible=False),
                 gr.update(value="", visible=False),
                 state or {}

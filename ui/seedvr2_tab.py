@@ -75,7 +75,7 @@ def seedvr2_tab(
     if current_preset_name:
         def update_status(state):
             existing = state["health_banner"]["text"]
-            msg = f"✅ SeedVR2: Using universal preset '{current_preset_name}'"
+            msg = f" SeedVR2: Using universal preset '{current_preset_name}'"
             state["health_banner"]["text"] = existing + "\n" + msg if existing else msg
             return state
         shared_state.value = update_status(shared_state.value)
@@ -100,10 +100,10 @@ def seedvr2_tab(
         from shared.error_handling import check_ffmpeg_available
         ffmpeg_available, ffmpeg_msg = check_ffmpeg_available()
         if not ffmpeg_available:
-            gpu_hint = f"❌ CRITICAL: {ffmpeg_msg}\nffmpeg is REQUIRED for video processing. Install ffmpeg and restart."
+            gpu_hint = f" CRITICAL: {ffmpeg_msg}\nffmpeg is REQUIRED for video processing. Install ffmpeg and restart."
     except Exception:
         ffmpeg_available = False
-        gpu_hint = "❌ CRITICAL: ffmpeg not found. Install ffmpeg to enable video processing."
+        gpu_hint = " CRITICAL: ffmpeg not found. Install ffmpeg to enable video processing."
 
     try:
         # IMPORTANT: Do NOT import torch here. Using torch.cuda in the parent Gradio
@@ -120,22 +120,22 @@ def seedvr2_tab(
             compile_available = False
         else:
             if cuda_available:
-                gpu_hint = f"✅ Detected {cuda_count} CUDA GPU(s) - GPU acceleration available"
+                gpu_hint = f" Detected {cuda_count} CUDA GPU(s) - GPU acceleration available"
                 # Check if VS Build Tools available for compile
                 from shared.health import is_vs_build_tools_available
                 compile_available = is_vs_build_tools_available()
                 if not compile_available:
-                    gpu_hint += "\n⚠️ VS Build Tools not detected - torch.compile will be disabled"
+                    gpu_hint += "\n VS Build Tools not detected - torch.compile will be disabled"
             else:
-                gpu_hint = "⚠️ CUDA not detected (nvidia-smi unavailable or no NVIDIA GPU) - GPU-only features disabled. Processing will use CPU (significantly slower)"
+                gpu_hint = " CUDA not detected (nvidia-smi unavailable or no NVIDIA GPU) - GPU-only features disabled. Processing will use CPU (significantly slower)"
                 compile_available = False
 
         # Append ffmpeg status to GPU hint
         if not ffmpeg_available:
-            gpu_hint = f"❌ CRITICAL: ffmpeg not found\n{gpu_hint}"
+            gpu_hint = f" CRITICAL: ffmpeg not found\n{gpu_hint}"
 
     except Exception as e:
-        gpu_hint = f"❌ CUDA detection failed: {str(e)}"
+        gpu_hint = f" CUDA detection failed: {str(e)}"
         cuda_available = False
         cuda_count = 0
         compile_available = False
@@ -144,11 +144,11 @@ def seedvr2_tab(
     with gr.Row():
         # Left Column: Input Controls
         with gr.Column(scale=3):
-            gr.Markdown("### 🎬 Input / Controls")
+            gr.Markdown("###  Input / Controls")
 
             # Input section with enhanced detection (file upload only, path textbox moved below)
             with gr.Group():
-                gr.Markdown("#### 📁 Enhanced Input: Video Files & Frame Folders")
+                gr.Markdown("####  Enhanced Input: Video Files & Frame Folders")
                 gr.Markdown("*Auto-detects whether your input is a single video file or a folder containing frame sequences*")
 
                 with gr.Row():
@@ -159,14 +159,14 @@ def seedvr2_tab(
                     )
                     with gr.Column():
                         input_image_preview = gr.Image(
-                            label="📸 Input Preview (Image)",
+                            label=" Input Preview (Image)",
                             type="filepath",
                             interactive=False,
                             height=250,
                             visible=False,
                         )
                         input_video_preview = gr.Video(
-                            label="🎬 Input Preview (Video)",
+                            label=" Input Preview (Video)",
                             interactive=False,
                             height=250,
                             visible=False,
@@ -181,7 +181,7 @@ def seedvr2_tab(
                 # Auto-detection results (auto-triggered, no manual button needed)
                 input_detection_result = gr.Markdown("", visible=False)
 
-            # NOTE: 🎬 SeedVR2 Native Streaming (Advanced) moved to right column (above ℹ️ Processing Mode).
+            # NOTE:  SeedVR2 Native Streaming (Advanced) moved to right column (above  Processing Mode).
 
             # Output controls (Output Override / Output Format) moved to the right column
             # above the utility buttons for quick access before/after runs.
@@ -189,7 +189,7 @@ def seedvr2_tab(
             # Model selection is placed above Batch Size (see below).
 
             # -----------------------------------------------------------------
-            # ✅ New sizing controls (Upscale-x)
+            #  New sizing controls (Upscale-x)
             # -----------------------------------------------------------------
             # Keep the legacy short-side resolution value for backward compatibility
             # with old presets, but hide it from the UI. The runtime `resolution`
@@ -203,7 +203,7 @@ def seedvr2_tab(
             )
 
             # NOTE: Upscale-x sizing controls (Upscale x / Max Resolution / Pre-downscale)
-            # are defined in the right column directly above 📋 Run Log for quick access.
+            # are defined in the right column directly above  Run Log for quick access.
 
             # Core processing parameters
             # SeedVR2 Model selection (placed just above Batch Size)
@@ -308,13 +308,13 @@ def seedvr2_tab(
                 )
 
             # Device configuration
-            gr.Markdown("#### 💻 Device & Offload")
+            gr.Markdown("####  Device & Offload")
             
             # Show GPU availability warning if CUDA not available
             if not cuda_available and not is_macos:
                 gr.Markdown(
                     f'<div style="background: #fff3cd; padding: 12px; border-radius: 8px; border: 1px solid #ffc107;">'
-                    f'<strong>⚠️ GPU Acceleration Unavailable</strong><br>'
+                    f'<strong> GPU Acceleration Unavailable</strong><br>'
                     f'{gpu_hint}<br><br>'
                     f'GPU-only controls are disabled. Processing will use CPU (10-100x slower).'
                     f'</div>',
@@ -353,7 +353,7 @@ def seedvr2_tab(
                 )
 
             # BlockSwap configuration
-            gr.Markdown("#### 🔄 BlockSwap")
+            gr.Markdown("####  BlockSwap")
             with gr.Row():
                 blocks_to_swap = gr.Slider(
                     label="Blocks to Swap",
@@ -368,7 +368,7 @@ def seedvr2_tab(
                 )
 
             # VAE Tiling
-            gr.Markdown("#### 🧩 VAE Tiling")
+            gr.Markdown("####  VAE Tiling")
             with gr.Row():
                 vae_encode_tiled = gr.Checkbox(
                     label="VAE Encode Tiled",
@@ -423,7 +423,7 @@ def seedvr2_tab(
             )
 
             # Performance & Compile (moved here: directly above Output & Metadata)
-            gr.Markdown("#### ⚡ Performance & Compile")
+            gr.Markdown("####  Performance & Compile")
             
             # Validate attention_mode value before using it
             attention_value = values[34] if len(values) > 34 else "sdpa"
@@ -545,7 +545,7 @@ def seedvr2_tab(
 
             # Output & Metadata controls (shared settings from Output tab)
             gr.Markdown("---")
-            gr.Markdown("#### 📤 Output & Metadata")
+            gr.Markdown("####  Output & Metadata")
             
             with gr.Row():
                 save_metadata = gr.Checkbox(
@@ -564,7 +564,7 @@ def seedvr2_tab(
                 )
             
             # ADDED v2.5.22: FFmpeg 10-bit encoding for reduced banding
-            gr.Markdown("#### 🎨 Video Encoding (v2.5.22+)")
+            gr.Markdown("####  Video Encoding (v2.5.22+)")
             gr.Markdown("""
             **NEW: 10-bit Color Depth Support**
             
@@ -574,7 +574,7 @@ def seedvr2_tab(
             - **Better color accuracy** for high-quality sources
             - **Smaller file size** at same quality (x265 compression)
             
-            ⚠️ Note: 10-bit requires `ffmpeg` backend (disables OpenCV).
+             Note: 10-bit requires `ffmpeg` backend (disables OpenCV).
             """)
             
             with gr.Row():
@@ -605,7 +605,7 @@ def seedvr2_tab(
 
             # Input path textbox (direct path alternative to upload)
             gr.Markdown("---")
-            gr.Markdown("#### 📁 Direct Input Path (Alternative to Upload)")
+            gr.Markdown("####  Direct Input Path (Alternative to Upload)")
             input_path = gr.Textbox(
                 label="Input Video or Frames Folder Path",
                 value=values[0],
@@ -622,7 +622,7 @@ def seedvr2_tab(
 
         # Right Column: Output & Actions
         with gr.Column(scale=2):
-            gr.Markdown("### 🎯 Output / Actions")
+            gr.Markdown("### Output / Actions")
 
             # Status and progress
             health_display = gr.Markdown(value="", visible=False)
@@ -632,7 +632,7 @@ def seedvr2_tab(
             progress_indicator = gr.Markdown(value="", visible=True)
             eta_display = gr.Markdown(value="", visible=True)
             
-            # Upscale factor + action buttons (placed directly above 📋 Run Log)
+            # Upscale factor + action buttons (placed directly above  Run Log)
             with gr.Group():
                 _upscale_factor_default = merged_defaults.get("upscale_factor", 4.0) or 4.0
                 try:
@@ -670,7 +670,7 @@ def seedvr2_tab(
                     )
 
                     pre_downscale_then_upscale = gr.Checkbox(
-                        label="⬇️➡️⬆️ Pre-downscale then upscale (when capped)",
+                        label=" Pre-downscale then upscale (when capped)",
                         value=bool(merged_defaults.get("pre_downscale_then_upscale", False)),
                         info="If max edge would reduce effective scale, downscale input first so the model still runs at the full Upscale x.",
                         scale=1,
@@ -680,13 +680,13 @@ def seedvr2_tab(
                 # Row 1: Upscale + Preview
                 with gr.Row():
                     upscale_btn = gr.Button(
-                        "🚀 Upscale" if ffmpeg_available else "❌ Upscale (ffmpeg required)",
+                        " Upscale" if ffmpeg_available else " Upscale (ffmpeg required)",
                         variant="primary" if ffmpeg_available else "stop",
                         size="lg",
                         interactive=ffmpeg_available,
                     )
                     preview_btn = gr.Button(
-                        "👁️ First-frame Preview" if ffmpeg_available else "❌ Preview (ffmpeg required)",
+                        " First-frame Preview" if ffmpeg_available else " Preview (ffmpeg required)",
                         size="lg",
                         interactive=ffmpeg_available,
                     )
@@ -694,40 +694,35 @@ def seedvr2_tab(
                 # Row 2: Confirm cancel + Cancel
                 with gr.Row():
                     cancel_confirm = gr.Checkbox(
-                        label="⚠️ Confirm cancel (subprocess mode only)",
+                        label=" Confirm cancel (subprocess mode only)",
                         value=False,
                         info="Cancel only works in subprocess mode. Check Global Settings to verify mode.",
                         scale=3,
                     )
                     cancel_btn = gr.Button(
-                        "⏹️ Cancel (subprocess only)",
+                        " Cancel (subprocess only)",
                         variant="stop",
                         size="sm",
                         scale=0,
                     )
             
-            log_box = gr.Textbox(
-                label="📋 Run Log",
-                value="",
-                lines=12,
-                buttons=["copy"]
-            )
-
-            # Output display with enhanced comparison
-            output_video = gr.Video(
-                label="🎬 Upscaled Video",
-                interactive=False,
-                buttons=["download"]
-            )
-            output_image = gr.Image(
-                label="🖼️ Upscaled Image / Preview",
-                interactive=False,
-                buttons=["download"]
-            )
+            with gr.Accordion(" Upscaled Output", open=True):
+                output_video = gr.Video(
+                    label=" Upscaled Video",
+                    interactive=False,
+                    visible=False,
+                    buttons=["download"],
+                )
+                output_image = gr.Image(
+                    label=" Upscaled Image / Preview",
+                    interactive=False,
+                    visible=False,
+                    buttons=["download"],
+                )
             
             # Gallery for batch results
             batch_gallery = gr.Gallery(
-                label="📦 Batch Results",
+                label="Batch Results",
                 visible=False,
                 columns=3,
                 rows=2,
@@ -738,19 +733,46 @@ def seedvr2_tab(
 
             # Enhanced ImageSlider with latest Gradio features
             image_slider = gr.ImageSlider(
-                label="🔍 Image Comparison",
+                label="Image Comparison",
                 interactive=False,
                 height=500,
                 slider_position=50,
                 max_height=600,
-                buttons=["download", "fullscreen"]
+                buttons=["download", "fullscreen"],
+                visible=False,
             )
             
             # Video Comparison with custom HTML5 slider
             video_comparison_html = gr.HTML(
-                label="🎬 Video Comparison Slider",
+                label="Video Comparison Slider",
                 value="",
                 visible=False
+            )
+
+            # Chunk preview (placed directly under the output panel)
+            chunk_info = gr.Markdown("Chunk processing status will appear here.")
+            resume_status = gr.Markdown("", visible=True)
+            chunk_progress = gr.Markdown("", visible=False)
+            
+            # Chunk thumbnail gallery - Shows completed chunks as they finish
+            with gr.Accordion("Completed Chunks Gallery", open=True):
+                gr.Markdown("*Completed chunks appear here during processing. Click a video to preview.*")
+                chunk_gallery = gr.Gallery(
+                    label="Completed Chunks",
+                    visible=False,
+                    columns=4,
+                    rows=2,
+                    height="auto",
+                    object_fit="contain",
+                    buttons=[],
+                    allow_preview=True
+                )
+
+            log_box = gr.Textbox(
+                label="Run Log",
+                value="",
+                lines=12,
+                buttons=["copy"]
             )
 
             # Output controls (single run) - placed above utility buttons
@@ -777,17 +799,17 @@ def seedvr2_tab(
 
             # Utility buttons - MOVED HERE: directly under output panel as requested
             with gr.Row():
-                open_outputs_btn = gr.Button("📂 Open Outputs Folder", size="lg")
-                delete_temp_btn = gr.Button("🗑️ Delete Temp Folder", size="lg")
+                open_outputs_btn = gr.Button(" Open Outputs Folder", size="lg")
+                delete_temp_btn = gr.Button(" Delete Temp Folder", size="lg")
             
             delete_confirm = gr.Checkbox(
-                label="⚠️ Confirm delete temp folder (required for safety)",
+                label=" Confirm delete temp folder (required for safety)",
                 value=False,
                 info="Enable this to confirm deletion of temporary files"
             )
 
             # Batch processing controls - MOVED HERE: right column above Last Processed Chunk as requested
-            with gr.Accordion("📦 Batch Processing", open=False):
+            with gr.Accordion(" Batch Processing", open=False):
                 batch_enable = gr.Checkbox(
                     label="Enable Batch Processing (use directory input)",
                     value=values[5]
@@ -804,52 +826,33 @@ def seedvr2_tab(
                     placeholder="Optional override for batch outputs"
                 )
 
-            # Last processed chunk info
-            chunk_info = gr.Markdown("Last processed chunk will appear here.")
-            resume_status = gr.Markdown("", visible=True)
-            chunk_progress = gr.Markdown("", visible=True)
-            
-            # Chunk thumbnail gallery - Shows completed chunks as they finish
-            with gr.Accordion("🎬 Completed Chunks Gallery", open=False):
-                gr.Markdown("*Thumbnails of completed chunks appear here during processing*")
-                chunk_gallery = gr.Gallery(
-                    label="Completed Chunks (updates as processing progresses)",
-                    visible=False,
-                    columns=4,
-                    rows=2,
-                    height="auto",
-                    object_fit="contain",
-                    buttons=[],
-                    allow_preview=True
-                )
-
             # Warnings and info
             alpha_warn = gr.Markdown(
-                '<span class="warning-text">⚠️ PNG inputs with alpha are preserved; MP4 output drops alpha. Choose PNG output to retain alpha.</span>',
+                '<span class="warning-text"> PNG inputs with alpha are preserved; MP4 output drops alpha. Choose PNG output to retain alpha.</span>',
                 visible=False
             )
             fps_warn = gr.Markdown(
-                '<span class="warning-text">⚠️ Input video has no FPS metadata. Output will use 30 FPS default. Override FPS if needed.</span>',
+                '<span class="warning-text"> Input video has no FPS metadata. Output will use 30 FPS default. Override FPS if needed.</span>',
                 visible=False
             )
-            comparison_note = gr.HTML("")
+            comparison_note = gr.HTML("", visible=False)
 
             # Face restoration toggle
             face_restore_chk = gr.Checkbox(
-                label="👤 Apply Face Restoration after upscale",
+                label=" Apply Face Restoration after upscale",
                 value=global_settings.get("face_global", False)
             )
 
             if not ffmpeg_available:
                 gr.Markdown("""
                 <div style="background: #ffebee; padding: 12px; border-radius: 8px; border: 2px solid #f44336;">
-                    <strong>⚠️ ffmpeg NOT FOUND</strong><br>
+                    <strong> ffmpeg NOT FOUND</strong><br>
                     Video processing requires ffmpeg to be installed and available in your system PATH.<br>
                     <br>
                     <strong>Installation:</strong><br>
-                    • Windows: Download from <a href="https://ffmpeg.org/download.html" target="_blank">ffmpeg.org</a> and add to PATH<br>
-                    • Linux: <code>sudo apt install ffmpeg</code> or <code>sudo yum install ffmpeg</code><br>
-                    • macOS: <code>brew install ffmpeg</code><br>
+                     Windows: Download from <a href="https://ffmpeg.org/download.html" target="_blank">ffmpeg.org</a> and add to PATH<br>
+                     Linux: <code>sudo apt install ffmpeg</code> or <code>sudo yum install ffmpeg</code><br>
+                     macOS: <code>brew install ffmpeg</code><br>
                     <br>
                     After installation, restart the application.
                 </div>
@@ -878,27 +881,27 @@ def seedvr2_tab(
             )
 
             # Model loading status with periodic updates
-            model_status = gr.Markdown("### 🔧 Model Status\nNo models loaded", elem_classes="model-status")
+            model_status = gr.Markdown("###  Model Status\nNo models loaded", elem_classes="model-status")
 
             # Model management buttons with clarification
             gr.Markdown("""
-            **ℹ️ Model Unloading (Subprocess Mode):**
+            ** Model Unloading (Subprocess Mode):**
             - In subprocess mode (current), models are automatically unloaded after each run
             - These buttons force CUDA cache clearing for manual VRAM management
             - **In-app mode** (when implemented) will cache models between runs - then these buttons will actually unload persistent models
             """)
             with gr.Row():
-                unload_model_btn = gr.Button("🧹 Clear CUDA Cache", variant="secondary", size="lg")
-                unload_all_models_btn = gr.Button("🧹 Clear All CUDA Caches", variant="stop", size="lg")
+                unload_model_btn = gr.Button(" Clear CUDA Cache", variant="secondary", size="lg")
+                unload_all_models_btn = gr.Button(" Clear All CUDA Caches", variant="stop", size="lg")
             model_unload_status = gr.Markdown("", visible=False)
 
             # Timer for periodic model status updates
             model_status_timer = gr.Timer(value=2.0, active=False)  # Update every 2 seconds when active
 
-            # 🎬 SeedVR2 Native Streaming (Advanced) - moved here (must be immediately above ℹ️ Processing Mode)
-            with gr.Accordion("🎬 SeedVR2 Native Streaming (Advanced)", open=False):
+            #  SeedVR2 Native Streaming (Advanced) - moved here (must be immediately above  Processing Mode)
+            with gr.Accordion(" SeedVR2 Native Streaming (Advanced)", open=False):
                 gr.Markdown("""
-                ### 🚀 SeedVR2 Native Streaming Mode
+                ###  SeedVR2 Native Streaming Mode
                 
                 **What is this?** SeedVR2-specific CLI-internal memory-bounded processing that streams frames through the model.
                 
@@ -912,7 +915,7 @@ def seedvr2_tab(
                 - Then this native streaming processes each scene in frame chunks
                 - Double-chunking for ultimate memory efficiency
                 
-                💡 **For most users**: Configure chunking in **Resolution & Scene Split** tab only.
+                 **For most users**: Configure chunking in **Resolution & Scene Split** tab only.
                 Use this only if PySceneDetect chunking alone isn't enough for your VRAM.
                 """)
                 
@@ -927,7 +930,7 @@ def seedvr2_tab(
                 chunk_estimate_display = gr.Markdown(
                     "",
                     visible=False,
-                    label="📊 Chunk Estimation"
+                    label=" Chunk Estimation"
                 )
                 
                 resume_chunking = gr.Checkbox(
@@ -935,39 +938,39 @@ def seedvr2_tab(
                     value=values[46] if len(values) > 46 else False,  # Now index 46 (was 49, removed 3 items)
                     info="Resume interrupted chunking from existing partial outputs. Useful for recovering from crashes or cancellations."
                 )
-                check_resume_btn = gr.Button("🔍 Check Resume Status", size="lg")
+                check_resume_btn = gr.Button(" Check Resume Status", size="lg")
 
             # Mode information
-            gr.Markdown("#### ℹ️ Processing Mode")
+            gr.Markdown("####  Processing Mode")
             gr.Markdown(
                 "**Current Mode:** Check Global Settings tab to view/change execution mode\n\n"
                 "**Available Modes:**\n"
                 "- **Subprocess (Default & RECOMMENDED):** Each run is isolated with full VRAM cleanup and **cancellation support**\n"
-                "  - ✅ **Automatic vcvars wrapper** on Windows (enables torch.compile when VS Build Tools installed)\n"
-                "  - ✅ **Full cancellation support** with proper cleanup\n"
-                "  - ✅ **100% VRAM/RAM cleanup** after each run\n"
-                "- **⚠️ In-app (EXPERIMENTAL - NOT RECOMMENDED FOR SEEDVR2):**\n"
+                "  -  **Automatic vcvars wrapper** on Windows (enables torch.compile when VS Build Tools installed)\n"
+                "  -  **Full cancellation support** with proper cleanup\n"
+                "  -  **100% VRAM/RAM cleanup** after each run\n"
+                "- ** In-app (EXPERIMENTAL - NOT RECOMMENDED FOR SEEDVR2):**\n"
                 "  - **SeedVR2 Limitation**: Models reload each run (CLI design) - **NO speed benefit**\n"
                 "  - **Cannot cancel** mid-process (no subprocess to kill)\n"
                 "  - **vcvars must be pre-activated** before app start (cannot activate after Python loaded)\n"
                 "  - **May work for GAN/RIFE** but SeedVR2 gains nothing from in-app mode\n\n"
-                "**⚠️ IMPORTANT:** Cancel button only works in **subprocess mode**. In-app mode runs cannot be cancelled mid-process.\n\n"
-                "**💡 SeedVR2 Recommendation:** **Always use subprocess mode**. In-app provides no benefits for SeedVR2 due to CLI architecture (models reload each run). Switch modes in Global Settings tab."
+                "** IMPORTANT:** Cancel button only works in **subprocess mode**. In-app mode runs cannot be cancelled mid-process.\n\n"
+                "** SeedVR2 Recommendation:** **Always use subprocess mode**. In-app provides no benefits for SeedVR2 due to CLI architecture (models reload each run). Switch modes in Global Settings tab."
             )
             gr.Markdown("**Comparison:** Enhanced ImageSlider with fullscreen and download support for images. Custom HTML5 slider for videos.")
 
     # ============================================================================
-    # 📋 PRESET INPUT LIST - CRITICAL SYNCHRONIZATION POINT
+    #  PRESET INPUT LIST - CRITICAL SYNCHRONIZATION POINT
     # ============================================================================
     # This list MUST match SEEDVR2_ORDER in shared/services/seedvr2_service.py
     # 
-    # ⚠️ WHEN ADDING NEW CONTROLS:
+    #  WHEN ADDING NEW CONTROLS:
     # 1. Add default value to seedvr2_defaults() in seedvr2_service.py
     # 2. Append key to SEEDVR2_ORDER in seedvr2_service.py
     # 3. Add component to this inputs_list AT THE SAME POSITION
     # 4. Save callback will auto-validate and warn if counts mismatch
     #
-    # ✅ BACKWARD COMPATIBILITY:
+    #  BACKWARD COMPATIBILITY:
     # Old presets automatically get new defaults via merge_config() - no migration needed!
     #
     # Current count: len(SEEDVR2_ORDER) = 53, len(inputs_list) must also = 53
@@ -1001,7 +1004,7 @@ def seedvr2_tab(
         import logging
         logger = logging.getLogger("SeedVR2Tab")
         logger.error(
-            f"❌ CRITICAL: inputs_list ({len(inputs_list)}) and SEEDVR2_ORDER ({len(SEEDVR2_ORDER)}) "
+            f" CRITICAL: inputs_list ({len(inputs_list)}) and SEEDVR2_ORDER ({len(SEEDVR2_ORDER)}) "
             f"are OUT OF SYNC! Presets will not work correctly. "
             f"Expected {len(SEEDVR2_ORDER)} components."
         )
@@ -1012,9 +1015,9 @@ def seedvr2_tab(
             from shared.model_manager import get_model_manager
             model_manager = get_model_manager()
             status_text = service.get("get_model_loading_status", lambda: "No models loaded")()
-            return gr.update(value=f"### 🔧 Model Status\n{status_text}")
+            return gr.update(value=f"###  Model Status\n{status_text}")
         except Exception:
-            return gr.update(value="### 🔧 Model Status\nStatus unavailable")
+            return gr.update(value="###  Model Status\nStatus unavailable")
 
     # Wire up all the event handlers
 
@@ -1025,13 +1028,13 @@ def seedvr2_tab(
         auto_detect_scenes = bool(seed_controls.get("auto_detect_scenes", True))
 
         if auto_chunk and auto_detect_scenes:
-            title = "Analyzing input (resolution + scene detection)…"
+            title = "Analyzing input (resolution + scene detection)"
             sub = (
                 "PySceneDetect scans the video to find scene cuts; on long videos this can take a while. "
                 "Disable <strong>Auto Detect Scenes</strong> in the Resolution tab to speed this up."
             )
         else:
-            title = "Analyzing input…"
+            title = "Analyzing input"
             sub = "Reading media metadata and calculating target sizing."
 
         return (
@@ -1059,7 +1062,7 @@ def seedvr2_tab(
                 return
             except Exception as e:
                 yield (
-                    gr.update(value=f"✅ Input cached (info error: {str(e)[:80]})", visible=True),
+                    gr.update(value=f" Input cached (info error: {str(e)[:80]})", visible=True),
                     state,
                     gr.update(visible=False),
                 )
@@ -1085,12 +1088,12 @@ def seedvr2_tab(
             except Exception as e:
                 yield (
                     val or "",
-                    gr.update(value=f"✅ File uploaded (info error: {str(e)[:80]})", visible=True),
+                    gr.update(value=f" File uploaded (info error: {str(e)[:80]})", visible=True),
                     state,
                     gr.update(visible=False),
                 )
                 return
-        # If upload is cleared, hide panels (don’t show a persistent message).
+        # If upload is cleared, hide panels (dont show a persistent message).
         yield val or "", gr.update(value="", visible=False), state, gr.update(value="", visible=False)
         return
 
@@ -1196,10 +1199,10 @@ def seedvr2_tab(
             multi_gpu_supported = getattr(model_meta, 'supports_multi_gpu', True)
             
             if not compile_supported:
-                compile_warning = f"⚠️ Model '{m}' doesn't support torch.compile (e.g., GGUF quantized models). Compile options will be auto-disabled at runtime."
+                compile_warning = f" Model '{m}' doesn't support torch.compile (e.g., GGUF quantized models). Compile options will be auto-disabled at runtime."
             
             if not multi_gpu_supported:
-                multi_gpu_warning = f"⚠️ Model '{m}' is single-GPU only. Multi-GPU device specs will be reduced to first GPU."
+                multi_gpu_warning = f" Model '{m}' is single-GPU only. Multi-GPU device specs will be reduced to first GPU."
         
         # Load last-used preset for this model
         last_used_preset = preset_manager.load_last_used("seedvr2", m)
@@ -1219,9 +1222,9 @@ def seedvr2_tab(
                     warnings.append(multi_gpu_warning)
                 status_text += "\n\n" + "\n".join(warnings)
             
-            model_status_update = gr.update(value=f"### 🔧 Model Status\n{status_text}")
+            model_status_update = gr.update(value=f"###  Model Status\n{status_text}")
         except Exception as e:
-            model_status_update = gr.update(value=f"### 🔧 Model Status\nError: {str(e)}")
+            model_status_update = gr.update(value=f"###  Model Status\nError: {str(e)}")
         
         # If last-used preset exists, merge with current values
         if last_used_preset:
@@ -1235,7 +1238,7 @@ def seedvr2_tab(
             
             new_vals = [merged[k] for k in SEEDVR2_ORDER]
             cache_msg = gr.update(
-                value=f"✅ Model '{m}' selected - loaded last-used preset\n{compile_warning}\n{multi_gpu_warning}", 
+                value=f" Model '{m}' selected - loaded last-used preset\n{compile_warning}\n{multi_gpu_warning}", 
                 visible=True
             )
             return [cache_msg, model_status_update] + new_vals
@@ -1249,7 +1252,7 @@ def seedvr2_tab(
             new_vals = [current_dict[k] for k in SEEDVR2_ORDER]
             
             cache_msg = gr.update(
-                value=f"✅ Model '{m}' selected (no saved preset)\n{compile_warning}\n{multi_gpu_warning}", 
+                value=f" Model '{m}' selected (no saved preset)\n{compile_warning}\n{multi_gpu_warning}", 
                 visible=True
             )
             return [cache_msg, model_status_update] + new_vals
@@ -1266,13 +1269,13 @@ def seedvr2_tab(
             from shared.model_manager import get_model_manager
             model_manager = get_model_manager()
             status_text = service.get("get_model_loading_status", lambda: "Model status unavailable")()
-            return gr.update(value=f"### 🔧 Model Status\n{status_text}")
+            return gr.update(value=f"###  Model Status\n{status_text}")
         except Exception:
-            return gr.update(value="### 🔧 Model Status\nStatus unavailable")
+            return gr.update(value="###  Model Status\nStatus unavailable")
 
     # Add a refresh button for model status
     with gr.Row():
-        refresh_model_status_btn = gr.Button("🔄 Refresh Model Status", size="lg", variant="secondary")
+        refresh_model_status_btn = gr.Button(" Refresh Model Status", size="lg", variant="secondary")
         toggle_auto_refresh = gr.Checkbox(label="Auto-refresh (2s)", value=False, scale=0)
     
     refresh_model_status_btn.click(
@@ -1304,16 +1307,16 @@ def seedvr2_tab(
             try:
                 from shared.gpu_utils import clear_cuda_cache
                 clear_cuda_cache()
-                msg = "✅ CUDA cache cleared. Note: In subprocess mode, models reload each run automatically."
+                msg = " CUDA cache cleared. Note: In subprocess mode, models reload each run automatically."
             except Exception:
-                msg = "⚠️ CUDA cache clear attempted (may not be available)"
+                msg = " CUDA cache clear attempted (may not be available)"
             
             model_manager = get_model_manager()
             model_manager.unload_all_models()  # Update tracking state
             
             return gr.update(value=msg, visible=True), service["get_model_loading_status"]()
         except Exception as e:
-            return gr.update(value=f"❌ Error: {str(e)}", visible=True), service["get_model_loading_status"]()
+            return gr.update(value=f" Error: {str(e)}", visible=True), service["get_model_loading_status"]()
     
     def unload_all_models():
         """Clear all CUDA caches (subprocess mode) or unload all models (in-app mode when implemented)"""
@@ -1324,16 +1327,16 @@ def seedvr2_tab(
             try:
                 from shared.gpu_utils import clear_cuda_cache
                 clear_cuda_cache()
-                msg = "✅ All CUDA caches cleared. Subprocess mode: Models reload each run."
+                msg = " All CUDA caches cleared. Subprocess mode: Models reload each run."
             except Exception:
-                msg = "⚠️ CUDA cache clear attempted"
+                msg = " CUDA cache clear attempted"
             
             model_manager = get_model_manager()
             model_manager.unload_all_models()
             
             return gr.update(value=msg, visible=True), service["get_model_loading_status"]()
         except Exception as e:
-            return gr.update(value=f"❌ Error: {str(e)}", visible=True), service["get_model_loading_status"]()
+            return gr.update(value=f" Error: {str(e)}", visible=True), service["get_model_loading_status"]()
     
     unload_model_btn.click(
         fn=unload_current_model,
@@ -1387,7 +1390,7 @@ def seedvr2_tab(
         """Handle cancel with explicit confirmation check"""
         if not confirm_checked:
             return (
-                gr.update(value="⚠️ Cancellation not confirmed. Enable 'Confirm cancel' checkbox and click again."),
+                gr.update(value=" Cancellation not confirmed. Enable 'Confirm cancel' checkbox and click again."),
                 gr.update(value="Cancellation requires confirmation. Please enable the checkbox above."),
                 state
             )
@@ -1479,7 +1482,7 @@ def seedvr2_tab(
         outputs=[input_image_preview, input_video_preview],
     )
 
-    # When the user clicks the “X” to clear the upload, also clear derived info panels + textbox path.
+    # When the user clicks the X to clear the upload, also clear derived info panels + textbox path.
     def clear_input_panels_on_upload_clear(file_path, state):
         # Only act when cleared.
         if file_path:
@@ -1565,12 +1568,12 @@ def seedvr2_tab(
     # Tile validation helpers
     def validate_tile_encode(tile_size, overlap):
         if tile_size > 0 and overlap >= tile_size:
-            return gr.update(value=f"⚠️ Encode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
+            return gr.update(value=f" Encode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
         return gr.update(value="", visible=False)
     
     def validate_tile_decode(tile_size, overlap):
         if tile_size > 0 and overlap >= tile_size:
-            return gr.update(value=f"⚠️ Decode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
+            return gr.update(value=f" Decode tile overlap ({overlap}) must be < tile size ({tile_size}). Will be auto-corrected.", visible=True)
         return gr.update(value="", visible=False)
     
     # Wire up tile validation
@@ -1600,12 +1603,12 @@ def seedvr2_tab(
         """Validate that 10-bit encoding has required backend"""
         if use_10bit_val and backend != "ffmpeg":
             return gr.update(
-                value="⚠️ 10-bit encoding requires 'ffmpeg' backend. Please select 'ffmpeg' from Video Backend dropdown or disable 10-bit encoding.",
+                value=" 10-bit encoding requires 'ffmpeg' backend. Please select 'ffmpeg' from Video Backend dropdown or disable 10-bit encoding.",
                 visible=True
             )
         elif use_10bit_val and backend == "ffmpeg":
             return gr.update(
-                value="✅ 10-bit encoding enabled: Using x265 codec with yuv420p10le pixel format for reduced banding in gradients.",
+                value=" 10-bit encoding enabled: Using x265 codec with yuv420p10le pixel format for reduced banding in gradients.",
                 visible=True
             )
         return gr.update(value="", visible=False)
@@ -1640,12 +1643,12 @@ def seedvr2_tab(
         # IMPORTANT: No torch import here (keeps parent process VRAM at 0).
         try:
             if not cuda_available or cuda_count <= 0:
-                return gr.update(value="⚠️ CUDA not detected on this system. GPU acceleration disabled.", visible=True)
+                return gr.update(value=" CUDA not detected on this system. GPU acceleration disabled.", visible=True)
 
             # Parse device spec (handle "all" and comma-separated IDs)
             device_str = str(cuda_device_val).strip()
             if device_str.lower() == "all":
-                return gr.update(value=f"✅ Using all {cuda_count} available GPU(s)", visible=True)
+                return gr.update(value=f" Using all {cuda_count} available GPU(s)", visible=True)
 
             devices = [d.strip() for d in device_str.replace(" ", "").split(",") if d.strip()]
 
@@ -1664,24 +1667,24 @@ def seedvr2_tab(
 
             if invalid_devices:
                 return gr.update(
-                    value=f"❌ Invalid CUDA device ID(s): {', '.join(invalid_devices)}. Available devices: 0-{cuda_count-1}",
+                    value=f" Invalid CUDA device ID(s): {', '.join(invalid_devices)}. Available devices: 0-{cuda_count-1}",
                     visible=True,
                 )
 
             if len(valid_devices) > 1:
                 return gr.update(
                     value=(
-                        f"✅ Multi-GPU: Using {len(valid_devices)} GPUs ({', '.join(map(str, valid_devices))})\n"
-                        f"⚠️ Note: Multi-GPU disables model caching (cache_dit/cache_vae auto-disabled)"
+                        f" Multi-GPU: Using {len(valid_devices)} GPUs ({', '.join(map(str, valid_devices))})\n"
+                        f" Note: Multi-GPU disables model caching (cache_dit/cache_vae auto-disabled)"
                     ),
                     visible=True,
                 )
             if len(valid_devices) == 1:
-                return gr.update(value=f"✅ Single GPU: Using GPU {valid_devices[0]}", visible=True)
+                return gr.update(value=f" Single GPU: Using GPU {valid_devices[0]}", visible=True)
 
             return gr.update(value="", visible=False)
         except Exception as e:
-            return gr.update(value=f"⚠️ Validation error: {str(e)}", visible=True)
+            return gr.update(value=f" Validation error: {str(e)}", visible=True)
     
     # Cache + GPU validation (enhanced with comprehensive checks)
     def validate_cache_gpu(cache_dit_val, cache_vae_val, cuda_device_val):
@@ -1689,7 +1692,7 @@ def seedvr2_tab(
             return gr.update(value="", visible=False)
         devices = [d.strip() for d in str(cuda_device_val).split(",") if d.strip()]
         if len(devices) > 1 and (cache_dit_val or cache_vae_val):
-            return gr.update(value="⚠️ Model caching (cache_dit/cache_vae) only works with single GPU. Multi-GPU detected - caching will be auto-disabled.", visible=True)
+            return gr.update(value=" Model caching (cache_dit/cache_vae) only works with single GPU. Multi-GPU detected - caching will be auto-disabled.", visible=True)
         return gr.update(value="", visible=False)
     
     # Wire up LIVE CUDA device validation (validates on every change)
@@ -1730,22 +1733,22 @@ def seedvr2_tab(
             
             if not input_info.is_valid:
                 return gr.update(
-                    value=f"❌ **Invalid Input**\n\n{input_info.error_message}",
+                    value=f" **Invalid Input**\n\n{input_info.error_message}",
                     visible=True
                 )
             
             # Build compact info message
-            info_parts = [f"✅ **Input Detected: {input_info.input_type.upper()}**"]
+            info_parts = [f" **Input Detected: {input_info.input_type.upper()}**"]
             
             if input_info.input_type == "frame_sequence":
-                info_parts.append(f"&nbsp;&nbsp;📁 Pattern: `{input_info.frame_pattern}`")
-                info_parts.append(f"&nbsp;&nbsp;🎞️ Frames: {input_info.frame_start}-{input_info.frame_end}")
+                info_parts.append(f"&nbsp;&nbsp; Pattern: `{input_info.frame_pattern}`")
+                info_parts.append(f"&nbsp;&nbsp; Frames: {input_info.frame_start}-{input_info.frame_end}")
                 if input_info.missing_frames:
-                    info_parts.append(f"&nbsp;&nbsp;⚠️ Missing: {len(input_info.missing_frames)}")
+                    info_parts.append(f"&nbsp;&nbsp; Missing: {len(input_info.missing_frames)}")
             elif input_info.input_type == "directory":
-                info_parts.append(f"&nbsp;&nbsp;📂 Files: {input_info.total_files}")
+                info_parts.append(f"&nbsp;&nbsp; Files: {input_info.total_files}")
             elif input_info.input_type in ["video", "image"]:
-                info_parts.append(f"&nbsp;&nbsp;📄 Format: **{input_info.format.upper()}**")
+                info_parts.append(f"&nbsp;&nbsp; Format: **{input_info.format.upper()}**")
             
             # Single line format for compact display
             result_md = " ".join(info_parts)
@@ -1753,7 +1756,7 @@ def seedvr2_tab(
             
         except Exception as e:
             return gr.update(
-                value=f"❌ **Detection Error**\n\n{str(e)}",
+                value=f" **Detection Error**\n\n{str(e)}",
                 visible=True
             )
     
@@ -1828,20 +1831,20 @@ def seedvr2_tab(
             
             duration = get_media_duration_seconds(input_path_val)
             if not duration or duration <= 0:
-                return gr.update(value="⚠️ Could not detect video duration for chunk estimation", visible=True), state
+                return gr.update(value=" Could not detect video duration for chunk estimation", visible=True), state
             
             if auto_chunk:
                 info_lines = [
-                    "### 📊 Auto Chunk (PySceneDetect Scenes)",
+                    "###  Auto Chunk (PySceneDetect Scenes)",
                     f"**Video Duration:** {duration:.1f}s ({duration/60:.1f} min)",
                     f"**Scene Detection:** threshold={scene_threshold:g}, min_len={min_scene_len:g}s",
                     f"**Overlap:** forced 0 (avoid blending across scene cuts)",
                     "",
-                    "💡 *Chunk count depends on detected scene cuts. Use Static Chunk mode for predictable chunk length.*",
+                    " *Chunk count depends on detected scene cuts. Use Static Chunk mode for predictable chunk length.*",
                 ]
             else:
                 if chunk_size_sec > 0 and chunk_overlap_sec >= chunk_size_sec:
-                    return gr.update(value="⚠️ Static chunk overlap must be smaller than chunk size.", visible=True), state
+                    return gr.update(value=" Static chunk overlap must be smaller than chunk size.", visible=True), state
 
                 # Estimate number of chunks
                 import math
@@ -1849,7 +1852,7 @@ def seedvr2_tab(
                 estimated_chunks = math.ceil(duration / effective_chunk_size)
 
                 info_lines = [
-                    "### 📊 Static Chunk Estimate",
+                    "###  Static Chunk Estimate",
                     f"**Video Duration:** {duration:.1f}s ({duration/60:.1f} min)",
                     f"**Chunk Size:** {chunk_size_sec}s with {chunk_overlap_sec}s overlap",
                     f"**Estimated Chunks:** ~{estimated_chunks} chunks",
@@ -1859,7 +1862,7 @@ def seedvr2_tab(
             return gr.update(value="\n".join(info_lines), visible=True), state
             
         except Exception as e:
-            return gr.update(value=f"⚠️ Estimation error: {str(e)[:100]}", visible=True), state
+            return gr.update(value=f" Estimation error: {str(e)[:100]}", visible=True), state
     
     # Wire up automatic chunk estimation
     input_path.change(

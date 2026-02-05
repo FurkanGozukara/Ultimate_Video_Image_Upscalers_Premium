@@ -23,6 +23,7 @@ from shared.models.rife_meta import get_rife_metadata, get_rife_default_model
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.error_handling import logger as error_logger
 from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
+from shared.output_run_manager import prepare_single_video_run
 
 
 # Defaults and ordering --------------------------------------------------------
@@ -90,7 +91,7 @@ def rife_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
 
 
 """
-📋 RIFE PRESET ORDER - MUST match inputs_list in ui/rife_tab.py
+ðŸ“‹ RIFE PRESET ORDER - MUST match inputs_list in ui/rife_tab.py
 Adding controls? Update rife_defaults(), RIFE_ORDER, and inputs_list in sync.
 Current count: 32 components
 """
@@ -500,12 +501,12 @@ def build_rife_callbacks(
     def save_preset(preset_name: str, *args):
         """Save preset with validation"""
         if not preset_name.strip():
-            return gr.update(), gr.update(value="⚠️ Enter a preset name before saving"), *list(args)
+            return gr.update(), gr.update(value="âš ï¸ Enter a preset name before saving"), *list(args)
 
         try:
             # Validate component count
             if len(args) != len(RIFE_ORDER):
-                error_msg = f"⚠️ Preset mismatch: {len(args)} values vs {len(RIFE_ORDER)} expected. Check inputs_list in rife_tab.py"
+                error_msg = f"âš ï¸ Preset mismatch: {len(args)} values vs {len(RIFE_ORDER)} expected. Check inputs_list in rife_tab.py"
                 return gr.update(), gr.update(value=error_msg), *list(args)
             
             payload = _rife_dict_from_args(list(args))
@@ -516,9 +517,9 @@ def build_rife_callbacks(
             current_map = dict(zip(RIFE_ORDER, list(args)))
             loaded_vals = _apply_rife_preset(payload, defaults, preset_manager, current=current_map)
 
-            return dropdown, gr.update(value=f"✅ Saved preset '{preset_name}' for {model_name}"), *loaded_vals
+            return dropdown, gr.update(value=f"âœ… Saved preset '{preset_name}' for {model_name}"), *loaded_vals
         except Exception as e:
-            return gr.update(), gr.update(value=f"❌ Error saving preset: {str(e)}"), *list(args)
+            return gr.update(), gr.update(value=f"âŒ Error saving preset: {str(e)}"), *list(args)
 
     def load_preset(preset_name: str, model_name: str, current_values: List[Any]):
         """
@@ -539,12 +540,12 @@ def build_rife_callbacks(
             values = _apply_rife_preset(preset or {}, defaults_with_model, preset_manager, current=current_map)
             
             # Return values + status message (status is LAST)
-            status_msg = f"✅ Loaded preset '{preset_name}'" if preset else "ℹ️ Preset not found"
+            status_msg = f"âœ… Loaded preset '{preset_name}'" if preset else "â„¹ï¸ Preset not found"
             return (*values, gr.update(value=status_msg))
         except Exception as e:
             print(f"Error loading preset {preset_name}: {e}")
             # Return current values + error status
-            return (*current_values, gr.update(value=f"❌ Error: {str(e)}"))
+            return (*current_values, gr.update(value=f"âŒ Error: {str(e)}"))
 
     def safe_defaults():
         """Get safe default values."""
@@ -564,6 +565,16 @@ def build_rife_callbacks(
             
             # Apply RIFE guardrails (single GPU, FPS limits, etc.)
             settings = _enforce_rife_guardrails(settings, defaults)
+            # Normalize fps multiplier to an int for runtime (UI uses strings like "x2").
+            try:
+                fps_mult_raw = settings.get("fps_multiplier", 2)
+                if isinstance(fps_mult_raw, str):
+                    fps_mult = int(fps_mult_raw.lower().replace("x", "").strip() or "2")
+                else:
+                    fps_mult = int(fps_mult_raw)
+                settings["fps_multiplier"] = max(1, int(fps_mult))
+            except Exception:
+                settings["fps_multiplier"] = 2
 
             # PRE-FLIGHT CHECKS (mirrors SeedVR2/GAN for consistency)
             from shared.error_handling import check_ffmpeg_available, check_disk_space
@@ -571,31 +582,31 @@ def build_rife_callbacks(
             # Check ffmpeg availability
             ffmpeg_ok, ffmpeg_msg = check_ffmpeg_available()
             if not ffmpeg_ok:
-                yield ("❌ ffmpeg not found in PATH", ffmpeg_msg or "Install ffmpeg and add to PATH before processing", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield ("âŒ ffmpeg not found in PATH", ffmpeg_msg or "Install ffmpeg and add to PATH before processing", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 return
             
             # Check disk space (require at least 5GB free)
             output_path_check = Path(global_settings.get("output_dir", output_dir))
             has_space, space_warning = check_disk_space(output_path_check, required_mb=5000)
             if not has_space:
-                yield ("❌ Insufficient disk space", space_warning or "Free up at least 5GB disk space before processing", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield ("âŒ Insufficient disk space", space_warning or "Free up at least 5GB disk space before processing", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 return
 
             input_path = normalize_path(uploaded_file if uploaded_file else img_folder)
             if not input_path or not Path(input_path).exists():
-                yield ("❌ Input missing or not found", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield ("âŒ Input missing or not found", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 return
 
             # Validate input type based on mode
             if settings.get("img_mode"):
                 # In --img mode, require a frames folder or images
                 if Path(input_path).is_file() and Path(input_path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
-                    yield ("⚠️ --img mode expects frames folder or images, not a video file.", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    yield ("âš ï¸ --img mode expects frames folder or images, not a video file.", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                     return
             else:
                 # In video mode, require a video file
                 if Path(input_path).is_dir():
-                    yield ("⚠️ Video mode expects a video file. Enable --img for frame folders.", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    yield ("âš ï¸ Video mode expects a video file. Enable --img for frame folders.", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                     return
 
             settings["input_path"] = input_path
@@ -609,12 +620,12 @@ def build_rife_callbacks(
             # Validate CUDA devices (using shared GPU utility)
             cuda_warning = validate_cuda_device_spec(settings.get("cuda_device", ""))
             if cuda_warning:
-                yield (f"⚠️ {cuda_warning}", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield (f"âš ï¸ {cuda_warning}", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 return
 
             # Check ffmpeg availability
             if not _ffmpeg_available():
-                yield ("❌ ffmpeg not found in PATH. Install ffmpeg and retry.", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield ("âŒ ffmpeg not found in PATH. Install ffmpeg and retry.", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 return
 
             # Apply cached values from Resolution & Scene Split tab (vNext Upscale-x)
@@ -646,10 +657,19 @@ def build_rife_callbacks(
                     effective_scale = max(0.5, min(4.0, effective_scale))
                     settings["scale"] = effective_scale
 
-            # Apply output format from Comparison tab if set
-            cached_fmt = seed_controls.get("output_format_val")
-            if settings.get("output_format") in (None, "auto") and cached_fmt:
+            # Apply Output tab "Output Format" cache ONLY when it maps to a valid RIFE container.
+            # (Output tab can be "png", which is not a RIFE container; RIFE uses `png_output` instead.)
+            cached_fmt = str(seed_controls.get("output_format_val") or "").strip().lower()
+            if settings.get("output_format") in (None, "auto") and cached_fmt in ("mp4",):
                 settings["output_format"] = cached_fmt
+
+            # Audio preferences (used by chunking + final muxing). "Remove Audio" overrides everything.
+            audio_codec = str(seed_controls.get("audio_codec_val") or "copy")
+            audio_bitrate = seed_controls.get("audio_bitrate_val") or ""
+            if bool(settings.get("no_audio", False)):
+                audio_codec = "none"
+            settings["audio_codec"] = audio_codec
+            settings["audio_bitrate"] = audio_bitrate
             
             # Pull PySceneDetect chunking settings from Resolution tab (universal chunking)
             auto_chunk = bool(seed_controls.get("auto_chunk", True))
@@ -665,11 +685,55 @@ def build_rife_callbacks(
             # Determine if PySceneDetect chunking should be used
             from shared.path_utils import detect_input_type as detect_type
             input_type_check = detect_type(input_path)
+
+            # NEW: Per-run output folder for single video runs (0001/0002/...) to avoid collisions and
+            # to keep chunk artifacts user-visible.
+            if (
+                input_type_check == "video"
+                and not settings.get("batch_enable", False)
+                and not settings.get("img_mode", False)
+            ):
+                try:
+                    base_out_root = Path(global_settings.get("output_dir", output_dir))
+                    run_paths, explicit_final = prepare_single_video_run(
+                        output_root_fallback=base_out_root,
+                        output_override_raw=settings.get("output_override") or "",
+                        input_path=input_path,
+                        original_filename=Path(input_path).name,
+                        model_label="RIFE",
+                        mode=str(getattr(runner, "get_mode", lambda: "subprocess")() or "subprocess"),
+                    )
+                    run_dir = Path(run_paths.run_dir)
+                    seed_controls["last_run_dir"] = str(run_dir)
+                    settings["_run_dir"] = str(run_dir)
+                    settings["_processed_chunks_dir"] = str(run_paths.processed_chunks_dir)
+                    settings["_user_output_override_raw"] = str(settings.get("output_override") or "")
+
+                    png_output = bool(settings.get("png_output", False))
+                    if png_output:
+                        # PNG sequence output: force an output DIRECTORY inside the run folder.
+                        # If user provided a file override, reuse its stem as the directory name.
+                        if explicit_final:
+                            default_final = run_dir / Path(explicit_final).stem
+                        else:
+                            default_final = run_dir / f"{Path(input_path).stem}_png"
+                        settings["output_override"] = str(default_final)
+                    else:
+                        out_ext = str(settings.get("output_format") or "mp4")
+                        if out_ext == "auto":
+                            out_ext = "mp4"
+                        out_ext = out_ext.lstrip(".")
+                        default_final = run_dir / f"{Path(input_path).stem}.{out_ext}"
+                        settings["output_override"] = str(explicit_final) if explicit_final else str(default_final)
+                except Exception:
+                    pass
+
             should_use_chunking = (
                 (auto_chunk or chunk_size_sec > 0) and
                 input_type_check == "video" and
                 not settings.get("batch_enable", False) and
-                not settings.get("img_mode", False)  # Don't chunk image sequences
+                not settings.get("img_mode", False) and  # Don't chunk image sequences
+                not bool(settings.get("png_output", False))  # PNG export uses directory outputs; keep flow simple
             )
             
             # If chunking enabled, use universal chunk_and_process for RIFE
@@ -679,7 +743,7 @@ def build_rife_callbacks(
                 mode_label = "Auto Chunk (PySceneDetect scenes)" if auto_chunk else f"Static Chunk ({chunk_size_sec:g}s)"
                 init_desc = "Initializing scene detection..." if auto_chunk else "Initializing chunking..."
                 yield (
-                    f"⚙️ Starting {mode_label} for RIFE processing...",
+                    f"âš™ï¸ Starting {mode_label} for RIFE processing...",
                     init_desc,
                     gr.update(value="Chunking...", visible=True),
                     None,
@@ -695,7 +759,7 @@ def build_rife_callbacks(
                 settings["frame_accurate_split"] = frame_accurate_split
                 
                 def chunk_progress_cb(progress_val, desc=""):
-                    yield (f"⚙️ Chunking: {desc}", f"Processing chunks... {desc}", gr.update(value=desc, visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    yield (f"âš™ï¸ Chunking: {desc}", f"Processing chunks... {desc}", gr.update(value=desc, visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 
                 # Run chunked RIFE processing
                 rc, clog, final_output, chunk_count = chunk_and_process(
@@ -703,24 +767,24 @@ def build_rife_callbacks(
                     settings=settings,
                     scene_threshold=scene_threshold,
                     min_scene_len=min_scene_len,
-                    temp_dir=temp_dir,
+                    work_dir=Path(settings.get("_run_dir") or output_dir),
                     on_progress=lambda msg: None,
                     chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
                     chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
                     per_chunk_cleanup=per_chunk_cleanup,
                     allow_partial=True,
-                    global_output_dir=str(output_dir),
+                    global_output_dir=str(Path(settings.get("_run_dir") or output_dir)),
                     resume_from_partial=False,
                     progress_tracker=chunk_progress_cb,
                     process_func=None,
                     model_type="rife",  # Route to runner.run_rife
                 )
                 
-                status = "✅ RIFE chunked processing complete" if rc == 0 else f"⚠️ RIFE chunking failed (code {rc})"
+                status = "âœ… RIFE chunked processing complete" if rc == 0 else f"âš ï¸ RIFE chunking failed (code {rc})"
                 if rc != 0 and maybe_set_vram_oom_alert(state, model_label="RIFE", text=clog, settings=settings):
                     state["operation_status"] = "error"
-                    status = "🚫 Out of VRAM (GPU) — see banner above"
-                    show_vram_oom_modal(state, title="Out of VRAM (GPU) — RIFE", duration=None)
+                    status = "ðŸš« Out of VRAM (GPU) â€” see banner above"
+                    show_vram_oom_modal(state, title="Out of VRAM (GPU) â€” RIFE", duration=None)
                 
                 # Build comparison for chunked output
                 video_comp_html_update = gr.update(value="", visible=False)
@@ -753,7 +817,7 @@ def build_rife_callbacks(
                 batch_output_path = Path(settings.get("batch_output_path", ""))
 
                 if not batch_input_path.exists():
-                    yield ("❌ Batch input path does not exist", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    yield ("âŒ Batch input path does not exist", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                     return
 
                 # Collect all video files for RIFE
@@ -766,7 +830,7 @@ def build_rife_callbacks(
                     batch_files = [batch_input_path]
 
                 if not batch_files:
-                    yield ("❌ No supported video files found in batch input", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    yield ("âŒ No supported video files found in batch input", "", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                     return
 
                 # Create batch processor
@@ -798,9 +862,10 @@ def build_rife_callbacks(
                         single_settings["input_path"] = job.input_path
                         single_settings["batch_enable"] = False  # Disable batch for individual processing
                         single_settings["output_override"] = None  # Will be set per-item for batch
+                        single_settings["_original_filename"] = Path(job.input_path).name
 
-                        # Generate unique output path for this batch item to prevent collisions
-                        from shared.path_utils import collision_safe_path, collision_safe_dir
+                        overwrite_existing = bool(seed_controls.get("overwrite_existing_batch_val", False))
+
                         batch_output_folder = Path(batch_output_path) if batch_output_path.exists() else output_dir
                         batch_output_folder.mkdir(parents=True, exist_ok=True)
 
@@ -809,18 +874,38 @@ def build_rife_callbacks(
                         if out_ext == "auto":
                             out_ext = "mp4"
 
-                        if bool(single_settings.get("png_output")):
-                            unique_dir = collision_safe_dir(batch_output_folder / f"{Path(job.input_path).stem}_upscaled")
-                            single_settings["output_override"] = str(unique_dir)
+                        from shared.output_run_manager import batch_item_dir, prepare_batch_video_run_dir
+
+                        item_out_dir = batch_item_dir(batch_output_folder, Path(job.input_path).name)
+                        png_output_job = bool(single_settings.get("png_output", False))
+                        if png_output_job:
+                            predicted_final = item_out_dir / f"{Path(job.input_path).stem}_png"
                         else:
-                            unique_out = collision_safe_path(
-                                batch_output_folder / f"{Path(job.input_path).stem}_upscaled.{out_ext.lstrip('.')}"
-                            )
-                            single_settings["output_override"] = str(unique_out)
+                            predicted_final = item_out_dir / f"{Path(job.input_path).stem}.{out_ext.lstrip('.')}"
+
+                        run_paths = prepare_batch_video_run_dir(
+                            batch_output_folder,
+                            Path(job.input_path).name,
+                            input_path=str(job.input_path),
+                            model_label="RIFE",
+                            mode=str(getattr(runner, "get_mode", lambda: "subprocess")() or "subprocess"),
+                            overwrite_existing=overwrite_existing,
+                        )
+                        if not run_paths:
+                            if not overwrite_existing:
+                                job.status = "skipped"
+                                job.output_path = str(predicted_final)
+                                return True
+                            job.error_message = f"Could not create batch output folder: {item_out_dir}"
+                            return False
+                        single_settings["_run_dir"] = str(run_paths.run_dir)
+                        single_settings["_processed_chunks_dir"] = str(run_paths.processed_chunks_dir)
+                        single_settings["_user_output_override_raw"] = str(job.metadata["settings"].get("output_override") or "")
+                        single_settings["output_override"] = str(predicted_final)
 
                         # Apply universal chunking (Resolution tab) for batch videos, same as single-file runs.
                         from shared.path_utils import detect_input_type as _detect_type
-                        should_chunk = (_detect_type(job.input_path) == "video") and (auto_chunk or chunk_size_sec > 0)
+                        should_chunk = (_detect_type(job.input_path) == "video") and (auto_chunk or chunk_size_sec > 0) and (not png_output_job)
                         if should_chunk:
                             from shared.chunking import chunk_and_process
 
@@ -829,13 +914,13 @@ def build_rife_callbacks(
                                 settings=single_settings,
                                 scene_threshold=scene_threshold,
                                 min_scene_len=min_scene_len,
-                                temp_dir=temp_dir,
+                                work_dir=Path(single_settings.get("_run_dir") or item_out_dir),
                                 on_progress=lambda msg: None,
                                 chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
                                 chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
                                 per_chunk_cleanup=per_chunk_cleanup,
                                 allow_partial=True,
-                                global_output_dir=str(output_dir),
+                                global_output_dir=str(Path(single_settings.get("_run_dir") or item_out_dir)),
                                 resume_from_partial=False,
                                 progress_tracker=None,
                                 process_func=None,
@@ -857,10 +942,73 @@ def build_rife_callbacks(
                                     )
                                     if restored:
                                         job.output_path = restored
+                                # Face restoration can drop audio; re-mux/strip according to preferences.
+                                try:
+                                    from shared.audio_utils import ensure_audio_on_video
+
+                                    audio_codec = str(single_settings.get("audio_codec") or "copy")
+                                    audio_bitrate = single_settings.get("audio_bitrate") or None
+                                    if Path(job.output_path).exists() and Path(job.output_path).is_file():
+                                        if audio_codec.strip().lower() in ("none", "no", "off", "disable", "disabled"):
+                                            ensure_audio_on_video(
+                                                Path(job.output_path),
+                                                Path(job.output_path),
+                                                audio_codec="none",
+                                                audio_bitrate=None,
+                                                on_progress=None,
+                                            )
+                                        elif Path(job.input_path).exists():
+                                            ensure_audio_on_video(
+                                                Path(job.output_path),
+                                                Path(job.input_path),
+                                                audio_codec=audio_codec,
+                                                audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                                                on_progress=None,
+                                            )
+                                except Exception:
+                                    pass
                                 return ok
 
                             job.error_message = clog
                             return False
+
+                        # If the user disabled RIFE and has no other processing flags, just copy to outputs.
+                        try:
+                            fps_mult_val = int(single_settings.get("fps_multiplier", 1) or 1)
+                        except Exception:
+                            fps_mult_val = 1
+                        should_run_rife_job = (
+                            bool(single_settings.get("rife_enabled", False))
+                            or fps_mult_val > 1
+                            or float(single_settings.get("fps_override", 0.0) or 0.0) > 0.0
+                            or float(single_settings.get("scale", 1.0) or 1.0) != 1.0
+                            or bool(single_settings.get("png_output", False))
+                            or bool(single_settings.get("montage", False))
+                            or bool(single_settings.get("skip_static_frames", False))
+                            or int(single_settings.get("exp", 1) or 1) != 1
+                        )
+                        if not should_run_rife_job:
+                            try:
+                                dest = Path(normalize_path(str(predicted_final)))
+                                if dest.suffix == "":
+                                    dest.mkdir(parents=True, exist_ok=True)
+                                else:
+                                    dest.parent.mkdir(parents=True, exist_ok=True)
+                                    shutil.copy2(job.input_path, dest)
+                                # Respect "Remove Audio" even in copy-only mode.
+                                try:
+                                    from shared.audio_utils import ensure_audio_on_video
+
+                                    audio_codec = str(single_settings.get("audio_codec") or "copy")
+                                    if audio_codec.strip().lower() in ("none", "no", "off", "disable", "disabled"):
+                                        ensure_audio_on_video(dest, dest, audio_codec="none", audio_bitrate=None, on_progress=None)
+                                except Exception:
+                                    pass
+                                job.output_path = str(dest)
+                                return True
+                            except Exception as e:
+                                job.error_message = str(e)
+                                return False
 
                         result = runner.run_rife(single_settings, on_progress=None)
 
@@ -877,6 +1025,31 @@ def build_rife_callbacks(
                                 )
                                 if restored:
                                     job.output_path = restored
+                            # Ensure audio is correct (RIFE/face-restore can produce video-only outputs).
+                            try:
+                                from shared.audio_utils import ensure_audio_on_video
+
+                                audio_codec = str(single_settings.get("audio_codec") or "copy")
+                                audio_bitrate = single_settings.get("audio_bitrate") or None
+                                if Path(job.output_path).exists() and Path(job.output_path).is_file():
+                                    if audio_codec.strip().lower() in ("none", "no", "off", "disable", "disabled"):
+                                        ensure_audio_on_video(
+                                            Path(job.output_path),
+                                            Path(job.output_path),
+                                            audio_codec="none",
+                                            audio_bitrate=None,
+                                            on_progress=None,
+                                        )
+                                    elif Path(job.input_path).exists():
+                                        ensure_audio_on_video(
+                                            Path(job.output_path),
+                                            Path(job.input_path),
+                                            audio_codec=audio_codec,
+                                            audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                                            on_progress=None,
+                                        )
+                            except Exception:
+                                pass
                         else:
                             job.error_message = result.log
                             ok = False
@@ -906,10 +1079,10 @@ def build_rife_callbacks(
                     for j in [x for x in jobs if x.status == "failed"][:10]:
                         name = Path(j.input_path).name
                         err = (j.error_message or "").strip()
-                        err = (err[:180] + "…") if len(err) > 180 else err
-                        log_lines.append(f"❌ {name}: {err}" if err else f"❌ {name}")
+                        err = (err[:180] + "â€¦") if len(err) > 180 else err
+                        log_lines.append(f"âŒ {name}: {err}" if err else f"âŒ {name}")
 
-                yield (f"✅ {summary_msg}", "\n".join(log_lines), gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield (f"âœ… {summary_msg}", "\n".join(log_lines), gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 return
 
             # Single file processing with streaming updates
@@ -922,21 +1095,30 @@ def build_rife_callbacks(
                 # Throttle updates to every 0.5 seconds to avoid UI spam
                 if current_time - last_progress_update > 0.5:
                     last_progress_update = current_time
-                    yield (f"⚙️ Processing: {message}", f"Progress: {message}", gr.update(value=message, visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    yield (f"âš™ï¸ Processing: {message}", f"Progress: {message}", gr.update(value=message, visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
 
             # Start processing with progress tracking
-            yield ("⚙️ Starting processing...", "Initializing...", gr.update(value="Initializing...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+            yield ("âš™ï¸ Starting processing...", "Initializing...", gr.update(value="Initializing...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
 
             # Determine processing workflow
             edit_mode = settings.get("edit_mode", "none")
-            rife_enabled = settings.get("rife_enabled", False) or settings.get("fps_multiplier", 1.0) > 1.0 or settings.get("fps_override", 0.0) > 0.0
+            should_run_rife = (
+                bool(settings.get("rife_enabled", False))
+                or int(settings.get("fps_multiplier", 1) or 1) > 1
+                or float(settings.get("fps_override", 0.0) or 0.0) > 0.0
+                or float(settings.get("scale", 1.0) or 1.0) != 1.0
+                or bool(settings.get("png_output", False))
+                or bool(settings.get("montage", False))
+                or bool(settings.get("skip_static_frames", False))
+                or int(settings.get("exp", 1) or 1) != 1
+            )
 
             current_input = settings["input_path"]
             final_output_path = None
 
             # Step 1: Apply video editing (if any)
             if edit_mode != "none":
-                yield ("⚙️ Applying video editing...", "Processing video edits...", gr.update(value="Video editing in progress...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield ("âš™ï¸ Applying video editing...", "Processing video edits...", gr.update(value="Video editing in progress...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
 
                 edit_temp_output = temp_dir / f"edit_temp_{Path(current_input).stem}_{int(time.time())}.mp4"
                 edit_success, edit_log, edited_path = _apply_video_editing(
@@ -945,19 +1127,19 @@ def build_rife_callbacks(
                 )
 
                 if not edit_success:
-                    yield (f"❌ Video editing failed: {edit_log}", "Edit failed", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    yield (f"âŒ Video editing failed: {edit_log}", "Edit failed", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                     return
 
                 current_input = edited_path
-                yield ("✅ Video editing completed", "Edit completed successfully", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield ("âœ… Video editing completed", "Edit completed successfully", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
 
             # Step 2: Apply RIFE processing (if enabled)
-            if rife_enabled:
+            if should_run_rife:
                 # Update settings to use the edited video as input
                 rife_settings = settings.copy()
                 rife_settings["input_path"] = current_input
 
-                yield ("⚙️ Running RIFE frame interpolation...", "Starting RIFE processing...", gr.update(value="RIFE processing...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield ("âš™ï¸ Running RIFE frame interpolation...", "Starting RIFE processing...", gr.update(value="RIFE processing...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
 
                 # Create a queue for progress updates
                 progress_queue = queue.Queue()
@@ -978,7 +1160,7 @@ def build_rife_callbacks(
                     try:
                         update_type, data = progress_queue.get(timeout=0.1)
                         if update_type == "progress":
-                            yield (f"⚙️ RIFE Processing: {data}", f"Progress: {data}", gr.update(value=data, visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                            yield (f"âš™ï¸ RIFE Processing: {data}", f"Progress: {data}", gr.update(value=data, visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
                         elif update_type == "complete":
                             result = data
                             processing_complete = True
@@ -986,45 +1168,129 @@ def build_rife_callbacks(
                         elif update_type == "error":
                             if maybe_set_vram_oom_alert(state, model_label="RIFE", text=data, settings=rife_settings):
                                 state["operation_status"] = "error"
-                                show_vram_oom_modal(state, title="Out of VRAM (GPU) — RIFE", duration=None)
-                                yield ("🚫 Out of VRAM (GPU) — see banner above", f"Error: {data}", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                                show_vram_oom_modal(state, title="Out of VRAM (GPU) â€” RIFE", duration=None)
+                                yield ("ðŸš« Out of VRAM (GPU) â€” see banner above", f"Error: {data}", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                             else:
-                                yield ("❌ RIFE processing failed", f"Error: {data}", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                                yield ("âŒ RIFE processing failed", f"Error: {data}", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                             return
                     except queue.Empty:
                         continue
 
                 if not processing_complete:
-                    yield ("❌ Processing timed out", "RIFE processing did not complete within expected time", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    yield ("âŒ Processing timed out", "RIFE processing did not complete within expected time", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                     return
 
-                status = "✅ RIFE complete" if result.returncode == 0 else f"⚠️ RIFE exited with code {result.returncode}"
+                status = "âœ… RIFE complete" if result.returncode == 0 else f"âš ï¸ RIFE exited with code {result.returncode}"
                 if result.returncode != 0 and maybe_set_vram_oom_alert(state, model_label="RIFE", text=result.log, settings=rife_settings):
                     state["operation_status"] = "error"
-                    status = "🚫 Out of VRAM (GPU) — see banner above"
-                    show_vram_oom_modal(state, title="Out of VRAM (GPU) — RIFE", duration=None)
+                    status = "ðŸš« Out of VRAM (GPU) â€” see banner above"
+                    show_vram_oom_modal(state, title="Out of VRAM (GPU) â€” RIFE", duration=None)
                 final_output_path = result.output_path
             else:
-                # No RIFE processing, use the current input as final output
+                # No RIFE processing: copy/move into the run output location so the user always
+                # gets a file in the output folder (and we avoid touching the original input).
                 final_output_path = current_input
-                status = "✅ Processing complete" if edit_mode != "none" else "✅ File copied (no processing)"
+                status = "âœ… Processing complete" if edit_mode != "none" else "âœ… File copied (no processing)"
+                try:
+                    dest_override = (settings.get("output_override") or "").strip()
+                    if dest_override:
+                        from shared.path_utils import collision_safe_path
+
+                        src_p = Path(final_output_path)
+                        dest_p = Path(normalize_path(dest_override))
+                        if dest_p.suffix == "":
+                            dest_p = dest_p / src_p.name
+                        dest_p = collision_safe_path(dest_p)
+                        dest_p.parent.mkdir(parents=True, exist_ok=True)
+
+                        try:
+                            same = src_p.resolve() == dest_p.resolve()
+                        except Exception:
+                            same = str(src_p) == str(dest_p)
+
+                        if (not same) and src_p.exists():
+                            # Move edited temp outputs; copy original inputs.
+                            orig_raw = str(settings.get("input_path", "") or "").strip()
+                            orig_p = Path(normalize_path(orig_raw)) if orig_raw else None
+
+                            is_original_input = False
+                            if orig_p:
+                                try:
+                                    is_original_input = src_p.resolve() == orig_p.resolve()
+                                except Exception:
+                                    is_original_input = str(src_p) == str(orig_p)
+
+                            if is_original_input:
+                                shutil.copy2(src_p, dest_p)
+                            else:
+                                shutil.move(str(src_p), str(dest_p))
+                            final_output_path = str(dest_p)
+                except Exception:
+                    pass
+
+            # Pick a suitable audio source for post-processing (face-restore can drop audio).
+            audio_source_for_mux = current_input if should_run_rife else final_output_path
 
             # Apply face restoration if enabled
             face_apply = bool(global_settings.get("face_global", False))
             if face_apply and final_output_path and Path(final_output_path).exists():
-                yield ("⚙️ Applying face restoration...", "Face restoration in progress...", gr.update(value="Face restoration...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                yield ("âš™ï¸ Applying face restoration...", "Face restoration in progress...", gr.update(value="Face restoration...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                pre_face_output = str(final_output_path)
                 face_strength = float(global_settings.get("face_strength", 0.5))
                 restored = restore_video(final_output_path, strength=face_strength,
                                        on_progress=lambda x: progress_callback(f"Face restoration: {x}"))
                 if restored:
                     final_output_path = restored
-                    yield ("✅ Face restoration completed", "Face restoration done", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                    # Prefer audio from the pre-face output only if it actually contains audio;
+                    # otherwise keep the previously chosen source (often the original/edited input).
+                    try:
+                        from shared.audio_utils import has_audio_stream
+
+                        if Path(pre_face_output).exists() and has_audio_stream(Path(pre_face_output)):
+                            audio_source_for_mux = pre_face_output
+                    except Exception:
+                        pass
+                    yield ("âœ… Face restoration completed", "Face restoration done", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+
+            # Audio normalization (best-effort): ensure output has (or does not have) audio per Output tab.
+            try:
+                from shared.audio_utils import ensure_audio_on_video
+
+                if final_output_path and Path(final_output_path).exists() and Path(final_output_path).is_file():
+                    video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".flv", ".wmv"}
+                    if Path(final_output_path).suffix.lower() in video_exts:
+                        audio_codec = str(settings.get("audio_codec") or "copy")
+                        audio_bitrate = settings.get("audio_bitrate") or None
+                        if audio_codec.strip().lower() in ("none", "no", "off", "disable", "disabled"):
+                            _changed, _final, _err = ensure_audio_on_video(
+                                Path(final_output_path),
+                                Path(final_output_path),
+                                audio_codec="none",
+                                audio_bitrate=None,
+                                on_progress=None,
+                            )
+                        else:
+                            src = audio_source_for_mux or settings.get("input_path")
+                            if src and Path(src).exists():
+                                _changed, _final, _err = ensure_audio_on_video(
+                                    Path(final_output_path),
+                                    Path(src),
+                                    audio_codec=audio_codec,
+                                    audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                                    on_progress=None,
+                                )
+                            else:
+                                _changed, _final, _err = (False, None, "")
+                        if _final and str(_final) != str(final_output_path):
+                            final_output_path = str(_final)
+            except Exception:
+                pass
 
             # Create metadata string
             processing_steps = []
             if edit_mode != "none":
                 processing_steps.append(f"Edit: {edit_mode}")
-            if rife_enabled:
+            if should_run_rife:
                 processing_steps.append(f"RIFE: {settings.get('fps_multiplier')}x")
             if face_apply:
                 processing_steps.append(f"Face: {face_strength}")
@@ -1048,10 +1314,10 @@ def build_rife_callbacks(
                     {
                         "input": settings["input_path"],
                         "output": final_output_path,
-                        "returncode": result.returncode if rife_enabled else 0,
+                        "returncode": (result.returncode if should_run_rife and "result" in locals() else 0),
                         "args": settings,
                         "edit_mode": edit_mode,
-                        "rife_enabled": rife_enabled,
+                        "rife_enabled": bool(should_run_rife),
                         "face_restoration": face_apply,
                     },
                 )
@@ -1085,12 +1351,12 @@ def build_rife_callbacks(
                             visible=True
                         )
 
-            state["operation_status"] = "completed" if "✅" in status else "ready"
+            state["operation_status"] = "completed" if "âœ…" in status else "ready"
             
             # Return 7 outputs to match UI expectations: status, log, progress_indicator, output_video, image_slider, video_comparison_html, state
             yield (
                 status,
-                result.log if rife_enabled and 'result' in locals() else "",
+                result.log if should_run_rife and "result" in locals() else "",
                 gr.update(value="", visible=False),  # progress_indicator (clear on completion)
                 final_output_path if final_output_path and Path(final_output_path).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv') else None,
                 image_slider_update,
@@ -1103,66 +1369,75 @@ def build_rife_callbacks(
             state = state or {}
             state["operation_status"] = "error"
             if maybe_set_vram_oom_alert(state, model_label="RIFE", text=str(e), settings=locals().get("settings")):
-                show_vram_oom_modal(state, title="Out of VRAM (GPU) — RIFE", duration=None)
-            yield ("❌ Critical error", error_msg, gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                show_vram_oom_modal(state, title="Out of VRAM (GPU) â€” RIFE", duration=None)
+            yield ("âŒ Critical error", error_msg, gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+
 
     def cancel():
-        """Cancel current processing and compile any partial outputs if available."""
+        """Cancel current processing and compile partial outputs if available."""
         canceled = runner.cancel()
         if not canceled:
             return gr.update(value="No active process to cancel"), ""
 
-        # Try to salvage partial outputs (mirrors SeedVR2/GAN/FlashVSR+ behavior)
-        compiled_output = None
-        temp_base = Path(global_settings.get("temp_dir", temp_dir))
-        temp_chunks_dir = temp_base / "chunks"
-        
-        if temp_chunks_dir.exists():
-            try:
-                from shared.chunking import detect_resume_state, concat_videos
-                from shared.path_utils import collision_safe_path
-                import shutil
-                
-                # Check for completed video chunks
-                partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
-                partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
-                
-                # Try to compile video chunks
-                if completed_chunks and len(completed_chunks) > 0:
-                    partial_target = collision_safe_path(temp_chunks_dir / "cancelled_rife_partial.mp4")
-                    if concat_videos(completed_chunks, partial_target):
-                        final_output = Path(output_dir) / f"cancelled_rife_partial_upscaled.mp4"
-                        final_output = collision_safe_path(final_output)
-                        shutil.copy2(partial_target, final_output)
-                        compiled_output = str(final_output)
-                
-                # Or compile PNG chunks
-                elif completed_png_chunks and len(completed_png_chunks) > 0:
-                    from shared.path_utils import collision_safe_dir
-                    partial_target = collision_safe_dir(temp_chunks_dir / "cancelled_rife_partial_png")
-                    partial_target.mkdir(parents=True, exist_ok=True)
-                    
-                    for i, chunk_path in enumerate(completed_png_chunks, 1):
-                        dest = partial_target / f"chunk_{i:04d}"
-                        if Path(chunk_path).is_dir():
-                            shutil.copytree(chunk_path, dest, dirs_exist_ok=True)
-                        else:
-                            shutil.copy2(chunk_path, dest)
-                    
-                    compiled_output = str(partial_target)
-                
-                if compiled_output:
-                    return (
-                        gr.update(value=f"⏹️ Cancelled - Partial RIFE output saved: {Path(compiled_output).name}"),
-                        f"Partial results salvaged and saved to: {compiled_output}"
-                    )
-            except Exception as e:
-                return (
-                    gr.update(value=f"⏹️ Cancelled - Error salvaging partials: {str(e)}"),
-                    "Processing cancelled but partial compilation failed"
+        compiled_output: Optional[str] = None
+        live_output_root = Path(global_settings.get("output_dir", output_dir))
+        state_snapshot = {}
+        try:
+            state_snapshot = shared_state.value if isinstance(shared_state.value, dict) else {}
+        except Exception:
+            state_snapshot = {}
+        seed_controls = state_snapshot.get("seed_controls", {}) if isinstance(state_snapshot, dict) else {}
+        last_run_dir = seed_controls.get("last_run_dir")
+        audio_source = seed_controls.get("last_input_path") or None
+        audio_codec = str(seed_controls.get("audio_codec_val") or "copy")
+        audio_bitrate = seed_controls.get("audio_bitrate_val") or None
+
+        try:
+            from shared.chunking import salvage_partial_from_run_dir
+            from shared.output_run_manager import recent_output_run_dirs
+
+            for run_dir in recent_output_run_dirs(
+                live_output_root,
+                last_run_dir=str(last_run_dir) if last_run_dir else None,
+                limit=20,
+            ):
+                partial_path, _method = salvage_partial_from_run_dir(
+                    run_dir,
+                    partial_basename="cancelled_rife_partial",
+                    audio_source=str(audio_source) if audio_source else None,
+                    audio_codec=audio_codec,
+                    audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
                 )
-        
-        return gr.update(value="⏹️ RIFE processing cancelled"), "Processing cancelled - no partial outputs found to salvage"
+                if partial_path and Path(partial_path).exists():
+                    compiled_output = str(partial_path)
+                    break
+        except Exception as e:
+            return (
+                gr.update(value=f"Cancelled - Error salvaging partials: {str(e)}"),
+                "Processing cancelled but partial compilation failed",
+            )
+
+        if not compiled_output:
+            try:
+                temp_chunks_dir = Path(global_settings.get("temp_dir", temp_dir)) / "chunks"
+                if temp_chunks_dir.exists():
+                    from shared.chunking import salvage_partial_from_run_dir
+
+                    partial_path, _method = salvage_partial_from_run_dir(
+                        temp_chunks_dir,
+                        partial_basename="cancelled_rife_partial",
+                    )
+                    if partial_path and Path(partial_path).exists():
+                        compiled_output = str(partial_path)
+            except Exception:
+                pass
+
+        if compiled_output:
+            return (
+                gr.update(value=f"Cancelled - Partial RIFE output saved: {Path(compiled_output).name}"),
+                f"Partial results salvaged and saved to: {compiled_output}",
+            )
+        return gr.update(value="Cancelled - No partial outputs found"), "Processing cancelled - no partial outputs found to salvage"
 
     def open_outputs_folder_rife():
         """Open outputs folder - delegates to shared utility (no code duplication)"""

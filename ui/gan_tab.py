@@ -363,17 +363,19 @@ def gan_tab(
                 buttons=["copy"]
             )
 
-            # Output displays
-            output_image = gr.Image(
-                label="🖼️ Upscaled Image",
-                interactive=False,
-                buttons=["download"]
-            )
-            output_video = gr.Video(
-                label="🎬 Upscaled Video",
-                interactive=False,
-                buttons=["download"]
-            )
+            with gr.Accordion("🎬 Upscaled Output", open=True):
+                output_video = gr.Video(
+                    label="🎬 Upscaled Video",
+                    interactive=False,
+                    visible=False,
+                    buttons=["download"],
+                )
+                output_image = gr.Image(
+                    label="🖼️ Upscaled Image",
+                    interactive=False,
+                    visible=False,
+                    buttons=["download"],
+                )
 
             # Enhanced comparison
             image_slider = gr.ImageSlider(
