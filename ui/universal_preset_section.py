@@ -439,6 +439,47 @@ def sync_tab_to_shared_state(
     tab_dict = values_to_dict(tab_name, values)
     seed_controls[f"{tab_name}_settings"] = tab_dict
     seed_controls["preset_dirty"] = True  # Mark as modified
+
+    # Keep derived cross-tab caches in sync so other pipelines immediately
+    # see updated Resolution/Output settings without requiring "Apply" buttons.
+    if tab_name == "resolution":
+        try:
+            seed_controls["upscale_factor_val"] = float(tab_dict.get("upscale_factor", 4.0) or 4.0)
+        except Exception:
+            seed_controls["upscale_factor_val"] = 4.0
+        try:
+            seed_controls["max_resolution_val"] = int(tab_dict.get("max_target_resolution", 0) or 0)
+        except Exception:
+            seed_controls["max_resolution_val"] = 0
+        seed_controls["enable_max_target"] = bool(tab_dict.get("enable_max_target", True))
+        seed_controls["auto_resolution"] = bool(tab_dict.get("auto_resolution", True))
+        seed_controls["auto_detect_scenes"] = bool(tab_dict.get("auto_detect_scenes", True))
+        seed_controls["auto_chunk"] = bool(tab_dict.get("auto_chunk", True))
+        seed_controls["frame_accurate_split"] = bool(tab_dict.get("frame_accurate_split", True))
+        seed_controls["chunk_size_sec"] = float(tab_dict.get("chunk_size", 0) or 0)
+        if seed_controls["auto_chunk"]:
+            tab_dict["chunk_overlap"] = 0.0
+            seed_controls["chunk_overlap_sec"] = 0.0
+        else:
+            seed_controls["chunk_overlap_sec"] = float(tab_dict.get("chunk_overlap", 0.0) or 0.0)
+        seed_controls["ratio_downscale"] = bool(tab_dict.get("ratio_downscale_then_upscale", False))
+        seed_controls["per_chunk_cleanup"] = bool(tab_dict.get("per_chunk_cleanup", False))
+        seed_controls["scene_threshold"] = float(tab_dict.get("scene_threshold", 27.0) or 27.0)
+        seed_controls["min_scene_len"] = float(tab_dict.get("min_scene_len", 1.0) or 1.0)
+
+    if tab_name == "output":
+        seed_controls["png_padding_val"] = int(tab_dict.get("png_padding", 6) or 6)
+        seed_controls["png_keep_basename_val"] = bool(tab_dict.get("png_keep_basename", True))
+        seed_controls["skip_first_frames_val"] = int(tab_dict.get("skip_first_frames", 0) or 0)
+        seed_controls["load_cap_val"] = int(tab_dict.get("load_cap", 0) or 0)
+        seed_controls["fps_override_val"] = float(tab_dict.get("fps_override", 0) or 0)
+        seed_controls["output_format_val"] = tab_dict.get("output_format", "auto") or "auto"
+        seed_controls["comparison_mode_val"] = tab_dict.get("comparison_mode", "slider") or "slider"
+        seed_controls["pin_reference_val"] = bool(tab_dict.get("pin_reference", False))
+        seed_controls["fullscreen_val"] = bool(tab_dict.get("fullscreen_enabled", True))
+        seed_controls["save_metadata_val"] = bool(tab_dict.get("save_metadata", True))
+        seed_controls["telemetry_enabled_val"] = bool(tab_dict.get("telemetry_enabled", True))
+
     state["seed_controls"] = seed_controls
     return state
 
@@ -463,4 +504,3 @@ def get_tab_values_from_state(
         tab_settings = defaults.get(tab_name, {})
     
     return dict_to_values(tab_name, tab_settings)
-

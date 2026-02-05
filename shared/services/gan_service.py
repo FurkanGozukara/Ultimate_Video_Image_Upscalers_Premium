@@ -611,7 +611,7 @@ def build_gan_callbacks(
                 image_count = len(batch_items) - video_count
                 is_image_only_batch = image_count > 0 and video_count == 0
                 
-                metadata_dir = Path(global_settings.get("output_dir", output_dir))
+                metadata_dir = Path(current_output_dir)
                 
                 if is_image_only_batch:
                     # Image-only batch: Single consolidated metadata (no per-file metadata to avoid spam)
@@ -683,7 +683,11 @@ def build_gan_callbacks(
             current_output_dir = Path(global_settings.get("output_dir", output_dir))
             current_temp_dir = Path(global_settings.get("temp_dir", temp_dir))
 
-            inp = normalize_path(upload if upload else settings["input_path"])
+            # Input selection: in batch mode prefer `batch_input_path`.
+            raw_inp = upload if upload else (
+                settings.get("batch_input_path") if settings.get("batch_enable") else settings.get("input_path")
+            )
+            inp = normalize_path(raw_inp)
             if settings.get("batch_enable"):
                 if not inp or not Path(inp).exists() or not Path(inp).is_dir():
                     yield ("❌ Batch input folder missing", "", gr.update(value="", visible=False), None, None, "Error", gr.update(value=None), gr.update(value="", visible=False), gr.update(visible=False), state)
@@ -694,6 +698,26 @@ def build_gan_callbacks(
                     return
 
             settings["input_path"] = inp
+            if settings.get("batch_enable"):
+                settings["batch_input_path"] = inp
+
+                # Output selection: in batch mode prefer `batch_output_path` when provided.
+                batch_out_raw = (settings.get("batch_output_path") or "").strip()
+                if batch_out_raw:
+                    try:
+                        current_output_dir = Path(normalize_path(batch_out_raw))
+                    except Exception:
+                        pass
+
+            # Ensure output/temp directories exist.
+            try:
+                current_output_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                current_temp_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
 
             # Expand "all" to device list if specified (uses shared GPU utility)
             cuda_device_raw = settings.get("cuda_device", "")
@@ -740,21 +764,20 @@ def build_gan_callbacks(
             fs_pref = bool(seed_controls.get("fullscreen_val", False))
             
             # Pull PySceneDetect chunking settings from Resolution tab (universal chunking)
+            auto_chunk = bool(seed_controls.get("auto_chunk", True))
+            frame_accurate_split = bool(seed_controls.get("frame_accurate_split", True))
             chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
-            chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0) or 0)
+            chunk_overlap_sec = 0.0 if auto_chunk else float(seed_controls.get("chunk_overlap_sec", 0) or 0)
             per_chunk_cleanup = seed_controls.get("per_chunk_cleanup", False)
             # PySceneDetect parameters now managed centrally in Resolution tab
             scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
-            min_scene_len = float(seed_controls.get("min_scene_len", 2.0))
+            min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
             
             # Determine if PySceneDetect chunking should be used for video inputs
             from shared.path_utils import detect_input_type as detect_type
             input_type = detect_type(inp)
-            should_use_chunking = (
-                chunk_size_sec > 0 and 
-                input_type == "video" and 
-                not settings.get("batch_enable", False)
-            )
+            # Chunking is handled in `run_single()` so it also works in batch mode.
+            should_use_chunking = False
             
             # If chunking is enabled for video, use universal chunk_and_process
             if should_use_chunking:
@@ -762,7 +785,8 @@ def build_gan_callbacks(
                 from shared.runner import RunResult
                 
                 if progress:
-                    progress(0, desc="Starting PySceneDetect chunking for GAN processing...")
+                    mode_label = "Auto Chunk (PySceneDetect scenes)" if auto_chunk else f"Static Chunk ({chunk_size_sec:g}s)"
+                    progress(0, desc=f"Starting {mode_label} for GAN processing...")
                 
                 # Prepare settings for chunking
                 settings["chunk_size_sec"] = chunk_size_sec
@@ -795,8 +819,8 @@ def build_gan_callbacks(
                     min_scene_len=min_scene_len,
                     temp_dir=current_temp_dir,
                     on_progress=lambda msg: progress(0, desc=msg) if progress else None,
-                    chunk_seconds=chunk_size_sec,
-                    chunk_overlap=chunk_overlap_sec,
+                    chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
+                    chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
                     per_chunk_cleanup=per_chunk_cleanup,
                     allow_partial=True,
                     global_output_dir=str(current_output_dir),
@@ -836,7 +860,7 @@ def build_gan_callbacks(
                     gr.update(value="", visible=False),
                     final_output if final_output and Path(final_output).suffix.lower() in ('.png', '.jpg', '.jpeg') else None,
                     final_output if final_output and Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv') else None,
-                    f"Processed {chunk_count} chunks via PySceneDetect",
+                    f"Chunking: {'Auto (PySceneDetect scenes)' if auto_chunk else 'Static'} — {chunk_count} chunks",
                     slider_update,
                     video_comp_html_update,
                     gr.update(visible=False),
@@ -865,7 +889,7 @@ def build_gan_callbacks(
             # Define run_single function (moved outside try block)
             def run_single(prepped_settings: Dict[str, Any], progress_cb: Optional[Callable[[str], None]] = None):
                 if cancel_event.is_set():
-                    return ("⏹️ Canceled", "\n".join(["Canceled before start"]), None, "", gr.update(value=None), state)
+                    return ("⏹️ Canceled", "\n".join(["Canceled before start"]), None, "", gr.update(value=None))
                 header_log = [
                     f"Model: {prepped_settings['model_name']}",
                     f"Backend: {backend_val}",
@@ -896,11 +920,113 @@ def build_gan_callbacks(
                             if found:
                                 break
                         if not found:
-                            return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.update(value=None), state)
+                            return ("❌ Model weights not found", "\n".join(header_log + ["Missing model file."]), None, "", gr.update(value=None))
                     
                     # Add face restoration settings
                     prepped_settings["face_restore"] = face_apply
                     prepped_settings["face_strength"] = face_strength
+
+                    # Apply universal chunking (Resolution tab) for video inputs (single + batch).
+                    should_chunk_video = (detect_input_type(prepped_settings["input_path"]) == "video") and (auto_chunk or chunk_size_sec > 0)
+                    if should_chunk_video:
+                        from shared.chunking import chunk_and_process
+
+                        chunk_settings = prepped_settings.copy()
+                        # Disable per-chunk face restore; apply once on final output to match non-chunked behavior.
+                        chunk_settings["face_restore"] = False
+                        chunk_settings["face_strength"] = face_strength
+                        chunk_settings["chunk_size_sec"] = chunk_size_sec
+                        chunk_settings["chunk_overlap_sec"] = chunk_overlap_sec
+                        chunk_settings["per_chunk_cleanup"] = per_chunk_cleanup
+                        chunk_settings["frame_accurate_split"] = frame_accurate_split
+
+                        def _chunk_progress_cb(_progress_val, desc=""):
+                            if progress_cb and desc:
+                                progress_cb(desc)
+
+                        rc, clog, final_output, chunk_count = chunk_and_process(
+                            runner=runner,
+                            settings=chunk_settings,
+                            scene_threshold=scene_threshold,
+                            min_scene_len=min_scene_len,
+                            temp_dir=current_temp_dir,
+                            on_progress=(lambda msg: progress_cb(msg) if progress_cb else None),
+                            chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
+                            chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
+                            per_chunk_cleanup=per_chunk_cleanup,
+                            allow_partial=True,
+                            global_output_dir=str(current_output_dir),
+                            resume_from_partial=False,
+                            progress_tracker=_chunk_progress_cb,
+                            process_func=None,
+                            model_type="gan",
+                        )
+
+                        status = "✅ GAN chunked upscale complete" if rc == 0 else f"⚠️ GAN chunking failed (code {rc})"
+                        if rc != 0 and maybe_set_vram_oom_alert(state, model_label="GAN", text=clog, settings=chunk_settings):
+                            status = "🚫 Out of VRAM (GPU) — see banner above"
+
+                        outp = final_output
+                        if outp and Path(outp).exists() and face_apply:
+                            restored = restore_video(
+                                outp,
+                                strength=face_strength,
+                                on_progress=progress_cb if progress_cb else None,
+                            )
+                            if restored:
+                                outp = restored
+
+                        # Update shared state output pointers.
+                        if outp and Path(outp).exists():
+                            try:
+                                out_path = Path(outp)
+                                seed_controls["last_output_dir"] = str(out_path.parent if out_path.is_file() else out_path)
+                                seed_controls["last_output_path"] = str(out_path) if out_path.is_file() else None
+                            except Exception:
+                                pass
+
+                        try:
+                            run_logger.write_summary(
+                                Path(outp) if outp else current_output_dir,
+                                {
+                                    "input": prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path"),
+                                    "output": outp,
+                                    "returncode": rc,
+                                    "args": chunk_settings,
+                                    "face_apply": face_apply,
+                                    "pipeline": "gan",
+                                    "chunking": {
+                                        "mode": "auto" if auto_chunk else "static",
+                                        "chunk_size_sec": 0.0 if auto_chunk else chunk_size_sec,
+                                        "scene_threshold": scene_threshold,
+                                        "min_scene_len": min_scene_len,
+                                        "chunks": chunk_count,
+                                    },
+                                },
+                            )
+                        except Exception:
+                            pass
+
+                        full_log = "\n".join(header_log + [clog])
+                        if progress_cb:
+                            progress_cb(status)
+
+                        cmp_html = ""
+                        slider_update = gr.update(value=None)
+                        src = prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path")
+                        if outp and Path(outp).exists():
+                            if Path(outp).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
+                                cmp_html = create_video_comparison_html(
+                                    original_video=src,
+                                    upscaled_video=outp,
+                                    height=600,
+                                    slider_position=50.0
+                                )
+                            elif Path(outp).is_dir():
+                                cmp_html = f"<p>PNG frames saved to {outp}</p>"
+                            else:
+                                slider_update = gr.update(value=(src, outp), visible=True)
+                        return status, full_log, outp, cmp_html, slider_update
                     
                     # Use GAN runner with proper backend integration
                     result = run_gan_upscale(
@@ -921,7 +1047,7 @@ def build_gan_callbacks(
                         pass
                     if progress_cb:
                         progress_cb(err_msg)
-                    return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.update(value=None), state)
+                    return (err_msg, "\n".join(header_log + [str(exc)]), None, "", gr.update(value=None))
                 if cancel_event.is_set():
                     status = "⏹️ Canceled"
                 else:
@@ -998,7 +1124,19 @@ def build_gan_callbacks(
                     items = image_files + video_files
 
                 if not items:
-                    return ("❌ No media files or frame folders found in batch folder", "", None, "", gr.update(value=None), state)
+                    yield (
+                        "❌ No media files or frame folders found in batch folder",
+                        "",
+                        gr.update(value="", visible=False),
+                        None,
+                        None,
+                        "Error",
+                        gr.update(value=None),
+                        gr.update(value="", visible=False),
+                        gr.update(visible=False),
+                        state,
+                    )
+                    return
                 t = threading.Thread(target=worker_batch, args=(items,), daemon=True)
             else:
                 prepped = maybe_downscale(prepare_single(settings["input_path"]))
@@ -1066,9 +1204,11 @@ def build_gan_callbacks(
             
             # Build video comparison for videos
             video_comp_html_update = gr.update(value="", visible=False)
-            if outp and Path(outp).exists() and Path(outp).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'):
+            if cmp_html:
+                video_comp_html_update = gr.update(value=cmp_html, visible=True)
+            elif outp and Path(outp).exists() and Path(outp).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv'):
                 original_path = settings.get("input_path", "")
-                if original_path and Path(original_path).exists():
+                if original_path and Path(original_path).exists() and Path(original_path).is_file():
                     video_comp_html_value = create_video_comparison_html(
                         original_video=original_path,
                         upscaled_video=outp,
@@ -1114,6 +1254,10 @@ def build_gan_callbacks(
         Mirrors SeedVR2 cancel behavior for consistency.
         """
         cancel_event.set()
+        try:
+            runner.cancel()
+        except Exception:
+            pass
         
         # Check for partial outputs from chunked processing
         temp_chunks_dir = Path(global_settings.get("temp_dir", temp_dir)) / "chunks"
@@ -1201,5 +1345,3 @@ def build_gan_callbacks(
         "open_outputs_folder": open_outputs_folder_gan,
         "clear_temp_folder": clear_temp_folder_gan,
     }
-
-

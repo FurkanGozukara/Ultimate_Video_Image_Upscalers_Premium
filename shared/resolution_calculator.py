@@ -463,7 +463,7 @@ def round_to_multiple(value: int, multiple: int) -> int:
 def calculate_chunk_count(
     video_path: str,
     chunk_size_sec: float,
-    min_scene_len: float = 2.0
+    min_scene_len: float = 1.0
 ) -> Tuple[int, float, str]:
     """
     Estimate number of chunks for scene-based splitting.

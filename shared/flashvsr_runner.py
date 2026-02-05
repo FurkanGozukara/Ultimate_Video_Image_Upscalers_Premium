@@ -85,8 +85,16 @@ def run_flashvsr(
         
         # Determine output path (naming should follow ORIGINAL input)
         output_override = settings.get("output_override", "")
+        explicit_output_file: Optional[Path] = None
         if output_override:
-            output_folder = normalize_path(output_override)
+            override_path = Path(normalize_path(output_override))
+            # FlashVSR CLI writes into an output FOLDER; support file-path override by
+            # running in the parent folder and renaming the produced mp4 after.
+            if override_path.suffix:
+                explicit_output_file = collision_safe_path(override_path)
+                output_folder = str(explicit_output_file.parent)
+            else:
+                output_folder = str(override_path)
         else:
             # Use default output naming
             output_folder = resolve_output_location(
@@ -252,6 +260,19 @@ def run_flashvsr(
                 output_path = str(newest)
 
         if output_path:
+            # Optional: rename/move to an explicit file path override.
+            if explicit_output_file:
+                try:
+                    import shutil
+                    desired = explicit_output_file
+                    desired.parent.mkdir(parents=True, exist_ok=True)
+                    if Path(output_path).resolve() != desired.resolve():
+                        shutil.move(output_path, desired)
+                    output_path = str(desired)
+                    log(f"✅ Output renamed to: {output_path}")
+                except Exception as exc:
+                    log(f"⚠️ Failed to rename output to override path: {exc}")
+
             log(f"✅ Output saved: {output_path}")
             
             result = FlashVSRResult(

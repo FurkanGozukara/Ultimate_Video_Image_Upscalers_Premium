@@ -335,17 +335,29 @@ def update_shared_state_from_preset(
     
     # Also update individual cached values that other parts of the app use
     res_settings = preset.get("resolution", {})
+    # Enforce: overlap is not meaningful for scene cuts (auto chunking).
+    # Keep resolution_settings consistent so preset save/load stays stable.
+    res_settings = dict(res_settings) if isinstance(res_settings, dict) else {}
+    auto_chunk = bool(res_settings.get("auto_chunk", True))
+    res_settings.setdefault("auto_detect_scenes", True)
+    res_settings.setdefault("frame_accurate_split", True)
+    if auto_chunk:
+        res_settings["chunk_overlap"] = 0.0
+    seed_controls["resolution_settings"] = res_settings
     # NEW (vNext): unified Upscale-x sizing cache (applies to SeedVR2/GAN/FlashVSR)
     seed_controls["upscale_factor_val"] = float(res_settings.get("upscale_factor", 4.0) or 4.0)
     seed_controls["max_resolution_val"] = int(res_settings.get("max_target_resolution", 0) or 0)
+    seed_controls["auto_chunk"] = auto_chunk
+    seed_controls["auto_detect_scenes"] = bool(res_settings.get("auto_detect_scenes", True))
+    seed_controls["frame_accurate_split"] = bool(res_settings.get("frame_accurate_split", True))
     seed_controls["chunk_size_sec"] = res_settings.get("chunk_size", 0)
-    seed_controls["chunk_overlap_sec"] = res_settings.get("chunk_overlap", 0.5)
+    seed_controls["chunk_overlap_sec"] = 0.0 if auto_chunk else float(res_settings.get("chunk_overlap", 0.0) or 0.0)
     seed_controls["ratio_downscale"] = res_settings.get("ratio_downscale_then_upscale", False)
     seed_controls["enable_max_target"] = res_settings.get("enable_max_target", True)
     seed_controls["auto_resolution"] = res_settings.get("auto_resolution", True)
     seed_controls["per_chunk_cleanup"] = res_settings.get("per_chunk_cleanup", False)
     seed_controls["scene_threshold"] = res_settings.get("scene_threshold", 27.0)
-    seed_controls["min_scene_len"] = res_settings.get("min_scene_len", 2.0)
+    seed_controls["min_scene_len"] = res_settings.get("min_scene_len", 1.0)
     
     out_settings = preset.get("output", {})
     seed_controls["png_padding_val"] = out_settings.get("png_padding", 6)
@@ -358,6 +370,7 @@ def update_shared_state_from_preset(
     seed_controls["pin_reference_val"] = out_settings.get("pin_reference", False)
     seed_controls["fullscreen_val"] = out_settings.get("fullscreen_enabled", True)
     seed_controls["save_metadata_val"] = out_settings.get("save_metadata", True)
+    seed_controls["telemetry_enabled_val"] = out_settings.get("telemetry_enabled", True)
     
     state["seed_controls"] = seed_controls
     return state

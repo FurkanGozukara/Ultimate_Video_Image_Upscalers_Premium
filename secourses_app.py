@@ -26,6 +26,7 @@ from shared.health import collect_health_report
 from shared.logging_utils import RunLogger
 from shared.path_utils import get_default_output_dir, get_default_temp_dir
 from shared.preset_manager import PresetManager
+from shared.universal_preset import dict_to_values, get_all_defaults
 from shared.runner import Runner
 from shared.gradio_compat import check_gradio_version, check_required_features
 from ui.seedvr2_tab import seedvr2_tab
@@ -309,6 +310,40 @@ def main():
       0%   { transform: translateX(-20%) rotate(10deg); }
       100% { transform: translateX(35%) rotate(10deg); }
     }
+
+    /* Small inline processing indicator (used in input sizing panels) */
+    .processing-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      border: 1px solid rgba(59,130,246,0.28);
+      background: linear-gradient(90deg, rgba(59,130,246,0.10), rgba(16,185,129,0.06));
+      padding: 10px 12px;
+      border-radius: 12px;
+      margin: 6px 0;
+    }
+    .processing-spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(59,130,246,0.25);
+      border-top-color: rgba(59,130,246,0.90);
+      border-radius: 9999px;
+      animation: secSpin 0.9s linear infinite;
+      flex: 0 0 auto;
+      margin-top: 2px;
+    }
+    .processing-col { display: flex; flex-direction: column; }
+    .processing-text { font-weight: 850; animation: secPulse 1.2s ease-in-out infinite; }
+    .processing-sub { font-size: 12px; opacity: 0.85; margin-top: 2px; line-height: 1.35; }
+    @keyframes secSpin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    @keyframes secPulse {
+      0% { opacity: 0.55; }
+      50% { opacity: 1.0; }
+      100% { opacity: 0.55; }
+    }
     """
 
     # =========================================================================
@@ -368,6 +403,7 @@ def main():
     
     # Load universal preset on startup
     startup_preset, startup_preset_name, all_models = load_startup_universal_preset()
+    sync_defaults = get_all_defaults(BASE_DIR, all_models)
     
     with gr.Blocks(title=APP_TITLE, theme=modern_theme, css=CUSTOM_CSS) as demo:
         # =========================================================================
@@ -376,6 +412,15 @@ def main():
         # Extract tab settings from universal preset
         startup_res_settings = startup_preset.get("resolution", {})
         startup_output_settings = startup_preset.get("output", {})
+        startup_auto_chunk = bool((startup_res_settings or {}).get("auto_chunk", True))
+        startup_res_settings = dict(startup_res_settings) if isinstance(startup_res_settings, dict) else {}
+        startup_res_settings.setdefault("auto_chunk", startup_auto_chunk)
+        startup_res_settings.setdefault("auto_detect_scenes", True)
+        startup_res_settings.setdefault("frame_accurate_split", True)
+        if startup_auto_chunk:
+            startup_res_settings["chunk_overlap"] = 0.0
+        startup_preset["resolution"] = startup_res_settings
+        startup_chunk_overlap_sec = 0.0 if startup_auto_chunk else float(startup_res_settings.get("chunk_overlap", 0.0) or 0.0)
         
         shared_state = gr.State({
             "health_banner": {"text": health_text},
@@ -410,20 +455,24 @@ def main():
                 "fps_override_val": startup_output_settings.get("fps_override", 0),
                 "output_format_val": startup_output_settings.get("output_format", "auto"),
                 "comparison_mode_val": startup_output_settings.get("comparison_mode", "slider"),
-                "pin_reference_val": startup_output_settings.get("pin_reference", False),
-                "fullscreen_val": startup_output_settings.get("fullscreen_enabled", True),
-                "save_metadata_val": startup_output_settings.get("save_metadata", True),
-                "face_strength_val": global_settings.get("face_strength", 0.5),
+                 "pin_reference_val": startup_output_settings.get("pin_reference", False),
+                 "fullscreen_val": startup_output_settings.get("fullscreen_enabled", True),
+                 "save_metadata_val": startup_output_settings.get("save_metadata", True),
+                 "telemetry_enabled_val": startup_output_settings.get("telemetry_enabled", True),
+                 "face_strength_val": global_settings.get("face_strength", 0.5),
                 
                 # Resolution tab cached values
+                "auto_chunk": startup_auto_chunk,
+                "auto_detect_scenes": bool(startup_res_settings.get("auto_detect_scenes", True)),
+                "frame_accurate_split": bool(startup_res_settings.get("frame_accurate_split", True)),
                 "chunk_size_sec": startup_res_settings.get("chunk_size", 0),
-                "chunk_overlap_sec": startup_res_settings.get("chunk_overlap", 0.5),
+                "chunk_overlap_sec": startup_chunk_overlap_sec,
                 "ratio_downscale": startup_res_settings.get("ratio_downscale_then_upscale", False),
                 "enable_max_target": startup_res_settings.get("enable_max_target", True),
                 "auto_resolution": startup_res_settings.get("auto_resolution", True),
                 "per_chunk_cleanup": startup_res_settings.get("per_chunk_cleanup", False),
                 "scene_threshold": startup_res_settings.get("scene_threshold", 27.0),
-                "min_scene_len": startup_res_settings.get("min_scene_len", 2.0),
+                "min_scene_len": startup_res_settings.get("min_scene_len", 1.0),
                 
                 # Pinned reference (persisted globally)
                 "pinned_reference_path": global_settings.get("pinned_reference_path"),
@@ -670,9 +719,39 @@ def main():
                     outputs=[mode_radio, mode_confirm, mode_status, shared_state],
                 )
 
+        # ------------------------------------------------------------------ #
+        # Universal preset sync:
+        # - The load button updates ALL tabs in shared_state.
+        # - Each tab refreshes its UI values when the user selects the tab.
+        # ------------------------------------------------------------------ #
+        def _make_tab_sync(tab_name: str):
+            tab_defaults = sync_defaults.get(tab_name, {})
+
+            def _sync(state: Dict[str, Any]):
+                seed_controls = (state or {}).get("seed_controls", {}) if isinstance(state, dict) else {}
+                tab_settings = seed_controls.get(f"{tab_name}_settings", {}) if isinstance(seed_controls, dict) else {}
+                tab_settings = tab_settings if isinstance(tab_settings, dict) else {}
+
+                # Enforce guardrails that are shared-state level invariants.
+                if tab_name == "resolution":
+                    if bool(tab_settings.get("auto_chunk", True)):
+                        tab_settings = dict(tab_settings)
+                        tab_settings["chunk_overlap"] = 0.0
+
+                values = dict_to_values(tab_name, tab_settings, tab_defaults)
+
+                current = seed_controls.get("current_preset_name") if isinstance(seed_controls, dict) else None
+                current = current or ""
+                presets = preset_manager.list_universal_presets()
+                dropdown_upd = gr.update(choices=presets, value=current or "")
+                status_text = f"✅ Synced from universal preset '{current}'" if current else "ℹ️ Synced from shared state"
+                return (*values, dropdown_upd, gr.update(value=status_text))
+
+            return _sync
+
         # Self-contained tabs following SECourses pattern
-        with gr.Tab("🎬 SeedVR2 (Video/Image)"):
-            seedvr2_tab(
+        with gr.Tab("🎬 SeedVR2 (Video/Image)") as tab_seedvr2:
+            seedvr2_ui = seedvr2_tab(
                 preset_manager=preset_manager,
                 runner=runner,
                 run_logger=run_logger,
@@ -682,32 +761,64 @@ def main():
                 temp_dir=temp_dir,
                 output_dir=output_dir
             )
+        tab_seedvr2.select(
+            fn=_make_tab_sync("seedvr2"),
+            inputs=[shared_state],
+            outputs=seedvr2_ui["inputs_list"] + [seedvr2_ui["preset_dropdown"], seedvr2_ui["preset_status"]],
+            queue=False,
+            show_progress="hidden",
+            trigger_mode="always_last",
+        )
 
-        with gr.Tab("📐 Resolution & Scene Split"):
-            resolution_tab(
+        with gr.Tab("📐 Resolution & Scene Split") as tab_resolution:
+            resolution_ui = resolution_tab(
                 preset_manager=preset_manager,
                 shared_state=shared_state,
                 base_dir=BASE_DIR
             )
+        tab_resolution.select(
+            fn=_make_tab_sync("resolution"),
+            inputs=[shared_state],
+            outputs=resolution_ui["inputs_list"] + [resolution_ui["preset_dropdown"], resolution_ui["preset_status"]],
+            queue=False,
+            show_progress="hidden",
+            trigger_mode="always_last",
+        )
 
-        with gr.Tab("🎭 Output & Comparison"):
-            output_tab(
+        with gr.Tab("🎭 Output & Comparison") as tab_output:
+            output_ui = output_tab(
                 preset_manager=preset_manager,
                 shared_state=shared_state,
                 base_dir=BASE_DIR,
                 global_settings=global_settings
             )
+        tab_output.select(
+            fn=_make_tab_sync("output"),
+            inputs=[shared_state],
+            outputs=output_ui["inputs_list"] + [output_ui["preset_dropdown"], output_ui["preset_status"]],
+            queue=False,
+            show_progress="hidden",
+            trigger_mode="always_last",
+        )
 
-        with gr.Tab("👤 Face Restoration"):
-            face_tab(
+        with gr.Tab("👤 Face Restoration") as tab_face:
+            face_ui = face_tab(
                 preset_manager=preset_manager,
                 global_settings=global_settings,
                 shared_state=shared_state,
                 base_dir=BASE_DIR
             )
+        tab_face.select(
+            fn=_make_tab_sync("face"),
+            inputs=[shared_state],
+            outputs=face_ui["inputs_list"] + [face_ui["preset_dropdown"], face_ui["preset_status"]],
+            queue=False,
+            show_progress="hidden",
+            trigger_mode="always_last",
+        )
 
-        with gr.Tab("⏱️ RIFE / FPS / Edit Videos"):
-            rife_tab(
+        with gr.Tab("⏱️ RIFE / FPS / Edit Videos") as tab_rife:
+            rife_ui = rife_tab(
                 preset_manager=preset_manager,
                 runner=runner,
                 run_logger=run_logger,
@@ -717,9 +828,17 @@ def main():
                 temp_dir=temp_dir,
                 output_dir=output_dir
             )
+        tab_rife.select(
+            fn=_make_tab_sync("rife"),
+            inputs=[shared_state],
+            outputs=rife_ui["inputs_list"] + [rife_ui["preset_dropdown"], rife_ui["preset_status"]],
+            queue=False,
+            show_progress="hidden",
+            trigger_mode="always_last",
+        )
 
-        with gr.Tab("🖼️ Image-Based (GAN)"):
-            gan_tab(
+        with gr.Tab("🖼️ Image-Based (GAN)") as tab_gan:
+            gan_ui = gan_tab(
                 preset_manager=preset_manager,
                 runner=runner,
                 run_logger=run_logger,
@@ -729,9 +848,17 @@ def main():
                 temp_dir=temp_dir,
                 output_dir=output_dir
             )
+        tab_gan.select(
+            fn=_make_tab_sync("gan"),
+            inputs=[shared_state],
+            outputs=gan_ui["inputs_list"] + [gan_ui["preset_dropdown"], gan_ui["preset_status"]],
+            queue=False,
+            show_progress="hidden",
+            trigger_mode="always_last",
+        )
 
-        with gr.Tab("⚡ FlashVSR+ (Real-Time Diffusion)"):
-            flashvsr_tab(
+        with gr.Tab("⚡ FlashVSR+ (Real-Time Diffusion)") as tab_flashvsr:
+            flashvsr_ui = flashvsr_tab(
                 preset_manager=preset_manager,
                 run_logger=run_logger,
                 global_settings=global_settings,
@@ -740,6 +867,14 @@ def main():
                 temp_dir=temp_dir,
                 output_dir=output_dir
             )
+        tab_flashvsr.select(
+            fn=_make_tab_sync("flashvsr"),
+            inputs=[shared_state],
+            outputs=flashvsr_ui["inputs_list"] + [flashvsr_ui["preset_dropdown"], flashvsr_ui["preset_status"]],
+            queue=False,
+            show_progress="hidden",
+            trigger_mode="always_last",
+        )
 
         with gr.Tab("🏥 Health Check"):
             health_tab(
@@ -796,4 +931,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

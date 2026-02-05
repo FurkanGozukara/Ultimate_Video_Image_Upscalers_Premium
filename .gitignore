@@ -18,7 +18,10 @@ venv/
 Real-ESRGAN/
 open-model-database
 .mp4
+.jpg
+*.jpg
 *.mp4
+*.pyc
 *__pycache__*
 outputs/
 models/

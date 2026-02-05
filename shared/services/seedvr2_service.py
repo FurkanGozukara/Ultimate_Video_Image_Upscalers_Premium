@@ -1032,8 +1032,9 @@ def _process_single_file(
         
         # Check if PySceneDetect chunking should be enabled (ONLY from Resolution tab now)
         # Legacy chunk_enable removed - chunking is now purely controlled by Resolution tab
+        auto_chunk = bool(seed_controls.get("auto_chunk", True))
         chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
-        chunk_enabled_resolution_tab = chunk_size_sec > 0
+        chunk_enabled_resolution_tab = auto_chunk or (chunk_size_sec > 0)
         
         should_chunk = (
             chunk_enabled_resolution_tab
@@ -1124,7 +1125,8 @@ def _process_single_file(
             # Get ALL chunking params from Resolution tab (via seed_controls)
             # PySceneDetect parameters now managed centrally in Resolution tab
             scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
-            min_scene_len = float(seed_controls.get("min_scene_len", 2.0))
+            min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
+            settings["frame_accurate_split"] = bool(seed_controls.get("frame_accurate_split", True))
             
             rc, clog, final_out, chunk_count = chunk_and_process(
                 runner,
@@ -1133,8 +1135,8 @@ def _process_single_file(
                 min_scene_len=min_scene_len,
                 temp_dir=Path(global_settings["temp_dir"]),
                 on_progress=lambda msg: progress_cb(msg) if progress_cb else None,
-                chunk_seconds=chunk_size_sec,
-                chunk_overlap=float(seed_controls.get("chunk_overlap_sec", 0) or 0),
+                chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
+                chunk_overlap=0.0 if auto_chunk else float(seed_controls.get("chunk_overlap_sec", 0) or 0),
                 per_chunk_cleanup=bool(seed_controls.get("per_chunk_cleanup", False)),
                 resume_from_partial=bool(settings.get("resume_chunking", False)),
                 allow_partial=True,
@@ -1154,7 +1156,8 @@ def _process_single_file(
             native_streaming_info = ""
             if settings.get("chunk_size", 0) > 0:
                 native_streaming_info = f" + native streaming ({settings['chunk_size']} frames/chunk)"
-            chunk_summary = f"Processed {chunk_count} scene chunks{native_streaming_info}. Final: {output_path}"
+            mode_label = "Auto (PySceneDetect scenes)" if auto_chunk else f"Static ({chunk_size_sec:g}s)"
+            chunk_summary = f"{mode_label}: processed {chunk_count} chunks{native_streaming_info}. Final: {output_path}"
             
             # Build detailed chunk info with live progress updates
             chunk_progress_detailed = "\n".join(chunk_progress_updates[-10:]) if chunk_progress_updates else "Chunking in progress..."
@@ -1238,17 +1241,19 @@ def _process_single_file(
 
             # Log the run - use live output_dir from global settings
             live_output_dir = Path(global_settings.get("output_dir", output_dir))
-            run_logger.write_summary(
-                Path(result.output_path) if result.output_path else live_output_dir,
-                {
-                    "input": settings.get("_original_input_path_before_preprocess") or settings["input_path"],
-                    "output": result.output_path,
-                    "returncode": result.returncode,
-                    "args": settings,
-                    "face_global": face_apply,
-                    "chunk_summary": chunk_summary,
-                },
-            )
+            telemetry_enabled = bool(global_settings.get("telemetry", True))
+            if telemetry_enabled:
+                run_logger.write_summary(
+                    Path(result.output_path) if result.output_path else live_output_dir,
+                    {
+                        "input": settings.get("_original_input_path_before_preprocess") or settings["input_path"],
+                        "output": result.output_path,
+                        "returncode": result.returncode,
+                        "args": settings,
+                        "face_global": face_apply,
+                        "chunk_summary": chunk_summary,
+                    },
+                )
 
         # Apply face restoration if enabled
         if face_apply and output_video and Path(output_video).exists():
@@ -1489,8 +1494,8 @@ def build_seedvr2_callbacks(
         # Try to find and properly merge chunk-based partial outputs
         if temp_chunks_dir.exists():
             try:
-                from shared.chunking import detect_resume_state, concat_videos, concat_videos_with_blending
-                from shared.path_utils import collision_safe_path, get_media_fps
+                from shared.chunking import detect_resume_state, concat_videos
+                from shared.path_utils import collision_safe_path
 
                 partial_video, completed_chunks = detect_resume_state(temp_chunks_dir, "mp4")
                 partial_png, completed_png_chunks = detect_resume_state(temp_chunks_dir, "png")
@@ -1498,31 +1503,11 @@ def build_seedvr2_callbacks(
                 # Try to compile video chunks with PROPER BLENDING if overlap detected
                 if completed_chunks and len(completed_chunks) > 0:
                     partial_target = collision_safe_path(temp_chunks_dir / "cancelled_partial.mp4")
-                    
-                    # Detect if chunks have overlap metadata (check for overlap markers in chunk names or metadata)
-                    # For now, check if chunk count > 1 and use blending as safer default
-                    use_blending = len(completed_chunks) > 1
-                    
-                    if use_blending:
-                        # Use proper blending merge (same as main pipeline)
-                        # Get FPS from first chunk
-                        first_chunk_fps = get_media_fps(str(completed_chunks[0])) if completed_chunks else 30.0
-                        
-                        # Estimate overlap frames (assume 0.5s overlap by default for PySceneDetect chunks)
-                        overlap_frames = int((first_chunk_fps or 30.0) * 0.5)
-                        
-                        success = concat_videos_with_blending(
-                            chunk_paths=completed_chunks,
-                            output_path=partial_target,
-                            overlap_frames=overlap_frames,
-                            fps=first_chunk_fps,
-                            on_progress=None  # Silent merge during cancel
-                        )
-                        merge_method = "blended" if success else "simple"
-                    else:
-                        # Single chunk or no overlap - simple concat
-                        success = concat_videos(completed_chunks, partial_target)
-                        merge_method = "simple"
+
+                    # Cancellation salvage should preserve quality/audio whenever possible.
+                    # Auto chunking forces overlap=0, so simple concat is the correct default.
+                    success = concat_videos(completed_chunks, partial_target)
+                    merge_method = "simple"
                     
                     if success and partial_target.exists():
                         # Copy to outputs folder with collision-safe naming
@@ -1750,22 +1735,100 @@ def build_seedvr2_callbacks(
             for n in plan.notes:
                 list_items.append(f"ℹ️ {n}")
 
-        msg_lines: List[str] = []
-        msg_lines.append('<div style="font-size: 1.15em; line-height: 1.8;">')
-        msg_lines.append("<br>".join(list_items))
-        msg_lines.append("</div>")
+        # Chunking info (Resolution tab global settings)
+        if detect_input_type(str(p)) == "video":
+            auto_chunk = bool(seed_controls.get("auto_chunk", True))
+            if auto_chunk:
+                scene_threshold = float(seed_controls.get("scene_threshold", 27.0) or 27.0)
+                min_scene_len = float(seed_controls.get("min_scene_len", 1.0) or 1.0)
+                auto_detect_scenes = bool(seed_controls.get("auto_detect_scenes", True))
+                scan = seed_controls.get("last_scene_scan") or {}
+                try:
+                    scan_path = normalize_path(scan.get("input_path")) if scan.get("input_path") else None
+                except Exception:
+                    scan_path = scan.get("input_path")
 
-        # Chunk estimate (PySceneDetect)
-        chunk_size = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
-        chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
-        if chunk_size > 0 and chunk_overlap < chunk_size and detect_input_type(str(p)) == "video":
-            dur = get_media_duration_seconds(str(p))
-            if dur:
-                import math
-                est_chunks = math.ceil(dur / max(0.001, chunk_size - chunk_overlap))
-                msg_lines.append(f"Chunk estimate: ~{est_chunks} chunks for {dur:.1f}s (size {chunk_size}s, overlap {chunk_overlap}s).")
+                cached_valid = (
+                    scan_path
+                    and scan_path == str(p)
+                    and abs(float(scan.get("scene_threshold", scene_threshold)) - scene_threshold) < 1e-6
+                    and abs(float(scan.get("min_scene_len", min_scene_len)) - min_scene_len) < 1e-6
+                    and "scene_count" in scan
+                )
+                cached_scene_count = int(scan.get("scene_count", 0) or 0) if cached_valid else 0
 
-        return gr.update(value="\n".join(msg_lines), visible=True), state
+                if cached_valid and cached_scene_count > 0:
+                    list_items.append(
+                        "🎬 <strong>Auto Chunk:</strong> detected "
+                        f"<strong>{cached_scene_count}</strong> scenes "
+                        f"(threshold={scene_threshold:g}, min_len={min_scene_len:g}s)."
+                    )
+                elif cached_valid and cached_scene_count <= 0:
+                    err = str(scan.get("error") or "").strip()
+                    if err:
+                        list_items.append(f"🎬 <strong>Auto Chunk:</strong> scene scan failed (cached). ({err})")
+                    else:
+                        list_items.append("🎬 <strong>Auto Chunk:</strong> scene scan failed (cached).")
+                else:
+                    if auto_detect_scenes:
+                        try:
+                            from shared.chunking import detect_scenes
+
+                            scenes = detect_scenes(
+                                str(p),
+                                threshold=scene_threshold,
+                                min_scene_len=min_scene_len,
+                            )
+                            scene_count = int(len(scenes or []))
+                            seed_controls["last_scene_scan"] = {
+                                "input_path": str(p),
+                                "scene_threshold": scene_threshold,
+                                "min_scene_len": min_scene_len,
+                                "scene_count": scene_count,
+                                "success": scene_count > 0,
+                            }
+                            state["seed_controls"] = seed_controls
+
+                            if scene_count > 0:
+                                list_items.append(
+                                    "🎬 <strong>Auto Chunk:</strong> detected "
+                                    f"<strong>{scene_count}</strong> scenes "
+                                    f"(threshold={scene_threshold:g}, min_len={min_scene_len:g}s)."
+                                )
+                            else:
+                                list_items.append("🎬 <strong>Auto Chunk:</strong> scene scan failed.")
+                        except Exception as e:
+                            seed_controls["last_scene_scan"] = {
+                                "input_path": str(p),
+                                "scene_threshold": scene_threshold,
+                                "min_scene_len": min_scene_len,
+                                "scene_count": 0,
+                                "success": False,
+                                "error": str(e),
+                            }
+                            state["seed_controls"] = seed_controls
+                            list_items.append(f"🎬 <strong>Auto Chunk:</strong> scene scan failed. ({str(e)})")
+                    else:
+                        list_items.append(
+                            "🎬 <strong>Auto Chunk:</strong> auto scene detection is disabled. "
+                            "Enable it in the Resolution tab or use the <strong>📊 Estimate Chunks</strong> button."
+                        )
+            else:
+                chunk_size = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
+                chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
+                if chunk_size > 0 and chunk_overlap < chunk_size:
+                    dur = get_media_duration_seconds(str(p))
+                    if dur:
+                        import math
+
+                        est_chunks = math.ceil(dur / max(0.001, chunk_size - chunk_overlap))
+                        list_items.append(
+                            f"🧩 <strong>Chunk estimate:</strong> ~{est_chunks} chunks for {dur:.1f}s "
+                            f"(size {chunk_size:g}s, overlap {chunk_overlap:g}s)."
+                        )
+
+        html = '<div style="font-size: 1.15em; line-height: 1.8;">' + "<br>".join(list_items) + "</div>"
+        return gr.update(value=html, visible=True), state
 
     def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False, state: Dict[str, Any] = None, progress=None):
         """Main processing action with streaming support and gr.Progress integration."""
@@ -1923,6 +1986,7 @@ def build_seedvr2_callbacks(
             settings["chunk_size_sec"] = chunk_size_sec
             settings["chunk_overlap_sec"] = chunk_overlap_sec
             settings["per_chunk_cleanup"] = per_chunk_cleanup
+            settings["frame_accurate_split"] = bool(seed_controls.get("frame_accurate_split", True))
 
             # NOTE: SeedVR2 CLI `--resolution` is now computed per-input from Upscale-x rules.
             # This happens inside _process_single_file() so it also applies to batch items.
@@ -2117,101 +2181,81 @@ def build_seedvr2_callbacks(
                     return
 
                 # Create batch processor
+                def _batch_progress_cb(bp):
+                    try:
+                        if progress and bp and bp.total_files:
+                            done = int(bp.completed_files + bp.failed_files + bp.skipped_files)
+                            total = int(bp.total_files or 1)
+                            desc = f"Batch: {done}/{total} files processed"
+                            if bp.current_file:
+                                desc += f" ({Path(bp.current_file).name})"
+                            progress(min(1.0, done / total), desc=desc)
+                    except Exception:
+                        pass
+
                 batch_processor = BatchProcessor(
-                    output_dir=batch_output_path if batch_output_path.exists() else output_dir,
+                    output_dir=str(batch_output_path) if batch_output_path.exists() else str(output_dir),
                     max_workers=1,  # Sequential processing for memory management
-                    telemetry_enabled=global_settings.get("telemetry", True)
+                    # SeedVR2 already writes run_summary.json via run_logger in the single-file pipeline
+                    # (and batch writes consolidated metadata at the end). Disable BatchProcessor's
+                    # own per-file summaries to avoid duplicates.
+                    telemetry_enabled=False,
+                    progress_callback=_batch_progress_cb,
                 )
 
                 # Create batch jobs
-                jobs = []
+                jobs: List[BatchJob] = []
                 for input_file in sorted(set(batch_files)):
-                    # For image-only batches, disable per-file telemetry (will write consolidated metadata at end)
+                    # For image-only batches, disable per-file telemetry (we will write one consolidated metadata file).
                     job_global_settings = global_settings.copy()
                     if is_image_only_batch:
-                        job_global_settings["telemetry"] = False  # Disable per-file metadata for images
-                    
-                    job = BatchJob(
-                        input_path=str(input_file),
-                        metadata={
-                            "settings": settings.copy(),
-                            "global_settings": job_global_settings,
-                            "face_apply": face_apply,
-                            "face_strength": face_strength,
-                            "seed_controls": seed_controls.copy(),
-                            "is_image": Path(input_file).suffix.lower() in SEEDVR2_IMAGE_EXTS,
-                        }
-                    )
-                    jobs.append(job)
+                        job_global_settings["telemetry"] = False
 
-                # Process batch with progress updates
-                def batch_progress_callback(progress_data):
-                    current_job = progress_data.get("current_job")
-                    overall_progress = progress_data.get("overall_progress", 0)
-                    completed_files = progress_data.get("completed_files", 0)
-                    status_msg = f"Batch processing: {overall_progress:.1f}% complete"
-                    if current_job:
-                        status_msg += f" - Processing: {Path(current_job).name}"
-
-                    # Update gr.Progress with actual progress
-                    if progress:
-                        progress(
-                            overall_progress / 100.0,
-                            desc=f"Batch: {completed_files}/{len(jobs)} files processed"
+                    jobs.append(
+                        BatchJob(
+                            input_path=str(input_file),
+                            metadata={
+                                "settings": settings.copy(),
+                                "global_settings": job_global_settings,
+                                "face_apply": face_apply,
+                                "face_strength": face_strength,
+                                "seed_controls": seed_controls.copy(),
+                                "is_image": Path(input_file).suffix.lower() in SEEDVR2_IMAGE_EXTS,
+                            },
                         )
-
-                    yield (
-                        status_msg,  # status_box
-                        f"Processing {len(jobs)} files...",  # log_box
-                        "",  # progress_indicator
-                        None,  # output_video
-                        None,  # output_image
-                        f"Batch: {completed_files}/{len(jobs)} completed",  # chunk_info
-                        "",  # resume_status
-                        "",  # chunk_progress
-                        "Batch processing in progress...",  # comparison_note
-                        None,  # image_slider
-                        gr.update(value="", visible=False),  # video_comparison_html
-                        gr.update(visible=False),  # chunk_gallery
-                        gr.update(visible=False),  # batch_gallery
-                        state  # shared_state
                     )
 
-                # Define processing function for each job
-                def process_single_batch_job(job: BatchJob, progress_cb):
+                # Define processing function for each job (reuses the single-file pipeline)
+                def process_single_batch_job(job: BatchJob) -> bool:
                     try:
-                        job.status = "processing"
-                        job.start_time = time.time()
-
                         # Process single file with current settings
                         single_settings = job.metadata["settings"].copy()
                         single_settings["input_path"] = job.input_path
                         single_settings["batch_enable"] = False  # Disable batch for individual processing
-                        
+
                         # Generate unique output path for this batch item to prevent collisions
-                        # Use collision_safe_path to ensure uniqueness
                         input_file = Path(job.input_path)
                         batch_output_folder = Path(batch_output_path) if batch_output_path.exists() else output_dir
-                        
+
                         # Determine output format
                         out_fmt = single_settings.get("output_format", "auto")
                         if out_fmt == "auto":
                             out_fmt = "mp4" if input_file.suffix.lower() in [".mp4", ".avi", ".mov", ".mkv"] else "png"
-                        
+
                         # Create unique output path with collision safety
                         from shared.path_utils import collision_safe_path, collision_safe_dir
+
                         if out_fmt == "png":
-                            # For PNG output, create a directory
                             output_name = f"{input_file.stem}_upscaled"
                             unique_output = collision_safe_dir(batch_output_folder / output_name)
                             single_settings["output_override"] = str(unique_output)
                         else:
-                            # For video output, create a file
                             output_name = f"{input_file.stem}_upscaled.{out_fmt}"
                             unique_output = collision_safe_path(batch_output_folder / output_name)
                             single_settings["output_override"] = str(unique_output)
 
-                        status, logs, output_video, output_image, chunk_info, chunk_summary, chunk_progress = _process_single_file(
+                        # Run single-file processing (no per-file streaming in batch)
+                        _status, logs, output_video, output_image, _chunk_info, _chunk_summary, _chunk_progress = _process_single_file(
                             runner,
                             single_settings,
                             job.metadata["global_settings"],
@@ -2221,35 +2265,30 @@ def build_seedvr2_callbacks(
                             run_logger,
                             output_dir,
                             False,  # not preview
-                            progress_cb
+                            None,   # progress_cb
                         )
 
                         if output_video or output_image:
                             job.output_path = output_video or output_image
-                            job.status = "completed"
-                        else:
-                            job.status = "failed"
-                            job.error_message = logs
+                            return True
 
-                        job.end_time = time.time()
+                        job.error_message = logs
+                        return False
 
                     except Exception as e:
-                        job.status = "failed"
                         job.error_message = str(e)
-                        job.end_time = time.time()
-
-                    return job
+                        return False
 
                 # Run batch processing
-                results = batch_processor.process_batch(
+                batch_result = batch_processor.process_batch(
                     jobs=jobs,
-                    process_func=process_single_batch_job,
-                    progress_callback=batch_progress_callback
+                    processor_func=process_single_batch_job,
+                    max_concurrent=1,
                 )
 
                 # Summarize results and collect output paths for gallery
-                completed = sum(1 for r in results if r.status == "completed")
-                failed = sum(1 for r in results if r.status == "failed")
+                completed = int(batch_result.completed_files)
+                failed = int(batch_result.failed_files)
                 
                 # Collect successful outputs for gallery
                 batch_outputs = []
@@ -2320,9 +2359,18 @@ def build_seedvr2_callbacks(
                 if progress:
                     progress(1.0, desc="Batch complete!")
 
+                # Compact failure summary for the log box
+                log_lines = [f"{summary_msg}"]
+                if failed:
+                    for j in [x for x in jobs if x.status == "failed"][:10]:
+                        name = Path(j.input_path).name
+                        err = (j.error_message or "").strip()
+                        err = (err[:180] + "…") if len(err) > 180 else err
+                        log_lines.append(f"❌ {name}: {err}" if err else f"❌ {name}")
+
                 yield (
                     f"✅ {summary_msg}",  # status_box
-                    f"Batch processing finished. {len(batch_outputs)} files saved to output folder.",  # log_box
+                    "\n".join(log_lines),  # log_box
                     "",  # progress_indicator
                     None,  # output_video
                     None,  # output_image

@@ -1019,47 +1019,90 @@ def seedvr2_tab(
     # Wire up all the event handlers
 
     # Input handling with sizing info updates (Upscale-x)
+    def _processing_banner_html(state) -> str:
+        seed_controls = (state or {}).get("seed_controls", {}) if isinstance(state, dict) else {}
+        auto_chunk = bool(seed_controls.get("auto_chunk", True))
+        auto_detect_scenes = bool(seed_controls.get("auto_detect_scenes", True))
+
+        if auto_chunk and auto_detect_scenes:
+            title = "Analyzing input (resolution + scene detection)…"
+            sub = (
+                "PySceneDetect scans the video to find scene cuts; on long videos this can take a while. "
+                "Disable <strong>Auto Detect Scenes</strong> in the Resolution tab to speed this up."
+            )
+        else:
+            title = "Analyzing input…"
+            sub = "Reading media metadata and calculating target sizing."
+
+        return (
+            '<div class="processing-banner">'
+            '<div class="processing-spinner"></div>'
+            '<div class="processing-col">'
+            f'<div class="processing-text">{title}</div>'
+            f'<div class="processing-sub">{sub}</div>'
+            "</div></div>"
+        )
+
     def cache_path_value(val, state):
         """Cache input path and refresh sizing info panel."""
         state["seed_controls"]["last_input_path"] = val if val else ""
         if val and str(val).strip():
+            # Show an immediate "working" banner so large files don't feel frozen.
+            yield gr.update(visible=False), state, gr.update(value=_processing_banner_html(state), visible=True)
             try:
                 calc_msg, updated_state = service["auto_res_on_input"](val, state)
                 if isinstance(calc_msg, dict):
                     calc_msg["visible"] = True
                 else:
                     calc_msg = gr.update(value=str(calc_msg), visible=True)
-                return gr.update(visible=False), updated_state, calc_msg
+                yield gr.update(visible=False), updated_state, calc_msg
+                return
             except Exception as e:
-                return gr.update(value=f"✅ Input cached (info error: {str(e)[:80]})", visible=True), state, gr.update(visible=False)
+                yield (
+                    gr.update(value=f"✅ Input cached (info error: {str(e)[:80]})", visible=True),
+                    state,
+                    gr.update(visible=False),
+                )
+                return
         # If input is empty, hide panels (clearing input should clear this info).
-        return gr.update(value="", visible=False), state, gr.update(value="", visible=False)
+        yield gr.update(value="", visible=False), state, gr.update(value="", visible=False)
+        return
 
     def cache_upload(val, state):
         """Cache uploaded file path and refresh sizing info panel."""
         state["seed_controls"]["last_input_path"] = val if val else ""
         if val:
+            # Show an immediate "working" banner so large files don't feel frozen.
+            yield val or "", gr.update(visible=False), state, gr.update(value=_processing_banner_html(state), visible=True)
             try:
                 calc_msg, updated_state = service["auto_res_on_input"](val, state)
                 if isinstance(calc_msg, dict):
                     calc_msg["visible"] = True
                 else:
                     calc_msg = gr.update(value=str(calc_msg), visible=True)
-                return val or "", gr.update(visible=False), updated_state, calc_msg
+                yield val or "", gr.update(visible=False), updated_state, calc_msg
+                return
             except Exception as e:
-                return val or "", gr.update(value=f"✅ File uploaded (info error: {str(e)[:80]})", visible=True), state, gr.update(visible=False)
+                yield (
+                    val or "",
+                    gr.update(value=f"✅ File uploaded (info error: {str(e)[:80]})", visible=True),
+                    state,
+                    gr.update(visible=False),
+                )
+                return
         # If upload is cleared, hide panels (don’t show a persistent message).
-        return val or "", gr.update(value="", visible=False), state, gr.update(value="", visible=False)
+        yield val or "", gr.update(value="", visible=False), state, gr.update(value="", visible=False)
+        return
 
     # Wire up input events with resolution auto-calculation
     input_file.upload(
-        fn=lambda val, state: cache_upload(val, state),
+        fn=cache_upload,
         inputs=[input_file, shared_state],
         outputs=[input_path, input_cache_msg, shared_state, auto_res_msg]
     )
 
     input_path.change(
-        fn=lambda val, state: cache_path_value(val, state),
+        fn=cache_path_value,
         inputs=[input_path, shared_state],
         outputs=[input_cache_msg, shared_state, auto_res_msg]
     )
@@ -1350,12 +1393,8 @@ def seedvr2_tab(
             )
         
         # User confirmed - proceed with cancellation
-        cancel_result = service["cancel_action"]()
-        return (
-            gr.update(value="⏹️ Cancellation requested. Subprocess will be terminated."),
-            gr.update(value="Cancellation signal sent. Process terminating..."),
-            state
-        )
+        status_upd, log_text = service["cancel_action"]()
+        return status_upd, log_text, state
     
     cancel_btn.click(
         fn=handle_cancel_with_confirmation,
@@ -1769,10 +1808,14 @@ def seedvr2_tab(
         
         # Get chunk settings from Resolution tab (via shared state)
         seed_controls = state.get("seed_controls", {})
+        auto_chunk = bool(seed_controls.get("auto_chunk", True))
         chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
+        chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0.0) or 0.0)
+        scene_threshold = float(seed_controls.get("scene_threshold", 27.0) or 27.0)
+        min_scene_len = float(seed_controls.get("min_scene_len", 1.0) or 1.0)
         
-        if chunk_size_sec <= 0:
-            # PySceneDetect chunking disabled
+        if (not auto_chunk) and chunk_size_sec <= 0:
+            # Chunking disabled
             return gr.update(value="", visible=False), state
         
         # Calculate chunk estimate
@@ -1787,23 +1830,31 @@ def seedvr2_tab(
             if not duration or duration <= 0:
                 return gr.update(value="⚠️ Could not detect video duration for chunk estimation", visible=True), state
             
-            chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0.5) or 0.5)
-            
-            # Estimate number of chunks
-            import math
-            effective_chunk_size = max(0.001, chunk_size_sec - chunk_overlap_sec)
-            estimated_chunks = math.ceil(duration / effective_chunk_size)
-            
-            # Build info message
-            info_lines = [
-                "### 📊 PySceneDetect Chunking Estimate",
-                f"**Video Duration:** {duration:.1f}s ({duration/60:.1f} min)",
-                f"**Chunk Size:** {chunk_size_sec}s with {chunk_overlap_sec}s overlap",
-                f"**Estimated Chunks:** ~{estimated_chunks} scenes/chunks",
-                f"**Processing:** Each chunk processed independently, then merged with frame blending",
-                "",
-                "💡 *Actual chunk count may vary based on scene detection (cuts, transitions)*"
-            ]
+            if auto_chunk:
+                info_lines = [
+                    "### 📊 Auto Chunk (PySceneDetect Scenes)",
+                    f"**Video Duration:** {duration:.1f}s ({duration/60:.1f} min)",
+                    f"**Scene Detection:** threshold={scene_threshold:g}, min_len={min_scene_len:g}s",
+                    f"**Overlap:** forced 0 (avoid blending across scene cuts)",
+                    "",
+                    "💡 *Chunk count depends on detected scene cuts. Use Static Chunk mode for predictable chunk length.*",
+                ]
+            else:
+                if chunk_size_sec > 0 and chunk_overlap_sec >= chunk_size_sec:
+                    return gr.update(value="⚠️ Static chunk overlap must be smaller than chunk size.", visible=True), state
+
+                # Estimate number of chunks
+                import math
+                effective_chunk_size = max(0.001, chunk_size_sec - chunk_overlap_sec)
+                estimated_chunks = math.ceil(duration / effective_chunk_size)
+
+                info_lines = [
+                    "### 📊 Static Chunk Estimate",
+                    f"**Video Duration:** {duration:.1f}s ({duration/60:.1f} min)",
+                    f"**Chunk Size:** {chunk_size_sec}s with {chunk_overlap_sec}s overlap",
+                    f"**Estimated Chunks:** ~{estimated_chunks} chunks",
+                    f"**Processing:** Each chunk processed independently, then merged (optional blending if overlap > 0)",
+                ]
             
             return gr.update(value="\n".join(info_lines), visible=True), state
             
@@ -1826,3 +1877,9 @@ def seedvr2_tab(
 
     # Note: In Gradio 6.2.0, component.update() is removed
     # Components are initialized with their default values in constructors above
+
+    return {
+        "inputs_list": inputs_list,
+        "preset_dropdown": preset_dropdown,
+        "preset_status": preset_status,
+    }

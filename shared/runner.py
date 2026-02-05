@@ -1688,6 +1688,46 @@ class Runner:
                 on_progress(f"Starting GAN upscaling with model: {model_name}\n")
                 on_progress(f"Input: {input_path}\n")
 
+            # Honor output overrides for chunking/batch workflows.
+            # The GAN runner primarily supports choosing an output directory, so when an explicit
+            # file path is provided we run into a safe directory and then move/rename the result.
+            output_override_raw = settings.get("output_override")
+            explicit_output_path: Optional[Path] = None
+            output_dir_for_run = Path(self.output_dir)
+            if output_override_raw:
+                try:
+                    override_path = Path(normalize_path(str(output_override_raw)))
+                    if override_path.exists() and override_path.is_dir():
+                        output_dir_for_run = override_path
+                    else:
+                        # Treat common media extensions as an explicit file-path override.
+                        file_exts = {
+                            ".mp4", ".mov", ".mkv", ".avi", ".webm", ".wmv", ".m4v", ".flv",
+                            ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+                        }
+                        if override_path.suffix.lower() in file_exts:
+                            explicit_output_path = override_path
+                            output_dir_for_run = override_path.parent
+                        else:
+                            # No extension: treat as a directory override.
+                            output_dir_for_run = override_path
+                except Exception:
+                    output_dir_for_run = Path(self.output_dir)
+                    explicit_output_path = None
+
+            # Safety: avoid writing the output into the same folder as the input when the
+            # GAN runner would otherwise overwrite the input filename (common for chunk files).
+            try:
+                input_dir = Path(input_path).parent.resolve()
+                if output_dir_for_run.resolve() == input_dir:
+                    output_dir_for_run = output_dir_for_run / "__gan_out"
+            except Exception:
+                pass
+            try:
+                output_dir_for_run.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
             # Run the GAN processing using proper runner
             result: GanResult = run_gan_upscale(
                 input_path=input_path,
@@ -1695,13 +1735,23 @@ class Runner:
                 settings=settings,
                 base_dir=self.base_dir,
                 temp_dir=self.temp_dir,
-                output_dir=self.output_dir,
+                output_dir=output_dir_for_run,
                 on_progress=on_progress,
                 cancel_event=None
             )
 
             # Output path comes from result
             output_path = result.output_path
+            if explicit_output_path and output_path and Path(output_path).exists():
+                try:
+                    explicit_output_path.parent.mkdir(parents=True, exist_ok=True)
+                    dest = collision_safe_path(explicit_output_path)
+                    shutil.move(str(output_path), str(dest))
+                    output_path = str(dest)
+                    result.output_path = output_path
+                except Exception:
+                    # Best-effort: keep the original output path on move failure.
+                    pass
 
             # Emit metadata if successful and enabled
             should_emit_metadata = self._telemetry_enabled and settings.get("save_metadata", True)

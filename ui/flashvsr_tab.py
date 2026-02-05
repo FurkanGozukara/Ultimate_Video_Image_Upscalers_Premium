@@ -107,7 +107,7 @@ def flashvsr_tab(
 
             with gr.Row():
                 input_file = gr.File(
-                    label="Upload Video or Image Folder",
+                    label="Upload video or image (optional)",
                     type="filepath",
                     file_types=["video", "image"]
                 )
@@ -131,6 +131,7 @@ def flashvsr_tab(
                 placeholder="C:/path/to/video.mp4 or C:/path/to/frames/",
                 info="Video file or image sequence folder"
             )
+            input_cache_msg = gr.Markdown("", visible=False)
             sizing_info = gr.Markdown("", visible=False, elem_classes=["resolution-info"])
             input_detection_result = gr.Markdown("", visible=False)
             
@@ -314,6 +315,13 @@ def flashvsr_tab(
         # Right Column: Output & Controls
         with gr.Column(scale=2):
             gr.Markdown("#### 🎯 Output & Actions")
+
+            output_override = gr.Textbox(
+                label="Output Override (folder or .mp4 file)",
+                value=values[1],
+                placeholder="Leave empty for auto naming",
+                info="Optional custom output location. A folder saves into that folder. A .mp4 file path renames the final output to that exact file.",
+            )
             
             status_box = gr.Markdown(value="Ready.")
             progress_indicator = gr.Markdown(value="", visible=True)
@@ -428,7 +436,7 @@ def flashvsr_tab(
     
     # Collect inputs
     inputs_list = [
-        input_path, gr.State(values[1]), scale, version, mode,
+        input_path, output_override, scale, version, mode,
         tiled_vae, tiled_dit, tile_size, overlap, unload_dit,
         color_fix, seed, dtype, device, fps_flashvsr,
         quality, attention, batch_enable, batch_input, batch_output
@@ -444,7 +452,12 @@ def flashvsr_tab(
     
     # Wire up events
     def cache_input(val, state):
-        state["seed_controls"]["last_input_path"] = val if val else ""
+        try:
+            state = state or {}
+            state.setdefault("seed_controls", {})
+            state["seed_controls"]["last_input_path"] = val if val else ""
+        except Exception:
+            pass
         return val or "", gr.update(value="✅ Input cached", visible=True), state
 
     def _build_input_detection_md(path_val: str) -> gr.update:
@@ -536,7 +549,7 @@ def flashvsr_tab(
     input_file.upload(
         fn=cache_input,
         inputs=[input_file, shared_state],
-        outputs=[input_path, preset_status, shared_state]
+        outputs=[input_path, input_cache_msg, shared_state]
     )
 
     # Preview + sizing + detection refresh on input changes
@@ -555,19 +568,34 @@ def flashvsr_tab(
     # When upload is cleared, also clear the textbox path so sizing/detection panels disappear.
     def clear_input_path_on_upload_clear(file_path, state):
         if file_path:
-            return gr.update(), state
+            return gr.update(), gr.update(), state
         try:
             state = state or {}
             state.setdefault("seed_controls", {})
             state["seed_controls"]["last_input_path"] = ""
         except Exception:
             pass
-        return "", state
+        return "", gr.update(value="", visible=False), state
 
     input_file.change(
         fn=clear_input_path_on_upload_clear,
         inputs=[input_file, shared_state],
-        outputs=[input_path, shared_state],
+        outputs=[input_path, input_cache_msg, shared_state],
+    )
+
+    def cache_input_path_only(path_val, state):
+        try:
+            state = state or {}
+            state.setdefault("seed_controls", {})
+            state["seed_controls"]["last_input_path"] = path_val if path_val else ""
+        except Exception:
+            pass
+        return gr.update(value="✅ Input path updated.", visible=True), state
+
+    input_path.change(
+        fn=cache_input_path_only,
+        inputs=[input_path, shared_state],
+        outputs=[input_cache_msg, shared_state],
     )
 
     input_path.change(
@@ -617,3 +645,8 @@ def flashvsr_tab(
         tab_name="flashvsr",
     )
 
+    return {
+        "inputs_list": inputs_list,
+        "preset_dropdown": preset_dropdown,
+        "preset_status": preset_status,
+    }

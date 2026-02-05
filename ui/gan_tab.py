@@ -782,7 +782,7 @@ def gan_tab(
     # NOTE: Legacy target_resolution is hidden; sizing is now driven by Upscale-x.
 
     cancel_btn.click(
-        fn=lambda ok, state: (service["cancel_action"](), state) if ok else (gr.update(value="⚠️ Enable 'Confirm cancel' to stop."), "", state),
+        fn=lambda ok, state: service["cancel_action"](state) if ok else (gr.update(value="⚠️ Enable 'Confirm cancel' to stop."), "", state),
         inputs=[cancel_confirm, shared_state],
         outputs=[status_box, log_box, shared_state]
     )
@@ -813,3 +813,9 @@ def gan_tab(
         shared_state=shared_state,
         tab_name="gan",
     )
+
+    return {
+        "inputs_list": inputs_list,
+        "preset_dropdown": preset_dropdown,
+        "preset_status": preset_status,
+    }

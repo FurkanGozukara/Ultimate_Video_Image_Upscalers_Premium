@@ -18,17 +18,26 @@ def resolution_defaults(models: List[str]) -> Dict[str, Any]:
         "model": models[0] if models else "",
         "auto_resolution": True,
         "enable_max_target": True,
+        # NEW: Auto-detect scene count (PySceneDetect) for info panels.
+        # This affects UI-only sizing/preview displays; it does NOT change processing unless auto_chunk is enabled.
+        "auto_detect_scenes": True,
+        # NEW (vNext): Auto chunking via PySceneDetect scenes (recommended default)
+        "auto_chunk": True,
+        # NEW: Frame-accurate splitting for chunking (lossless re-encode).
+        # OFF = faster stream-copy (keyframe-limited).
+        "frame_accurate_split": True,
         # NEW (vNext): Target sizing expressed as an upscale factor (relative to input)
         # Default 4x as requested.
         "upscale_factor": 4.0,
         # Max edge cap (LONG side). 0 = unlimited.
         "max_target_resolution": 0,
         "chunk_size": 0,
-        "chunk_overlap": 0.5,
+        # Default 0 because overlap is not meaningful for scene cuts (auto chunking).
+        "chunk_overlap": 0.0,
         "ratio_downscale_then_upscale": False,
         "per_chunk_cleanup": False,
         "scene_threshold": 27.0,  # PySceneDetect sensitivity
-        "min_scene_len": 2.0,  # Minimum scene length in seconds
+        "min_scene_len": 1.0,  # Minimum scene length in seconds
     }
 
 
@@ -36,12 +45,15 @@ RESOLUTION_ORDER: List[str] = [
     "model",
     "auto_resolution",
     "enable_max_target",
+    "auto_detect_scenes",
     "upscale_factor",
     "max_target_resolution",
+    "ratio_downscale_then_upscale",
+    "auto_chunk",
+    "frame_accurate_split",
+    "per_chunk_cleanup",
     "chunk_size",
     "chunk_overlap",
-    "ratio_downscale_then_upscale",
-    "per_chunk_cleanup",
     "scene_threshold",  # PySceneDetect sensitivity (for chunking)
     "min_scene_len",    # Minimum scene length for PySceneDetect
 ]
@@ -61,6 +73,9 @@ def _apply_resolution_preset(
     if current:
         base.update(current)
     merged = preset_manager.merge_config(base, preset)
+    # If auto chunking is enabled (PySceneDetect scenes), overlap is forced off.
+    if bool(merged.get("auto_chunk", True)):
+        merged["chunk_overlap"] = 0.0
     if merged.get("chunk_size", 0) and merged.get("chunk_overlap", 0) >= merged.get("chunk_size", 0):
         merged["chunk_overlap"] = max(0, merged.get("chunk_size", 0) - 1)
     return [merged[k] for k in RESOLUTION_ORDER]
@@ -257,7 +272,13 @@ def build_resolution_callbacks(
         except Exception as e:
             return f"❌ Error calculating resolution: {str(e)}", state
     
-    def calculate_chunk_estimate(input_path: str, chunk_size: float, chunk_overlap: float, state: Dict) -> Tuple[str, Dict]:
+    def calculate_chunk_estimate(
+        input_path: str,
+        auto_chunk: bool,
+        chunk_size: float,
+        chunk_overlap: float,
+        state: Dict,
+    ) -> Tuple[str, Dict]:
         """
         Estimate number of chunks and processing info.
         
@@ -267,12 +288,98 @@ def build_resolution_callbacks(
         if not input_path or not input_path.strip():
             return "⚠️ No input path provided", state
         
+        if auto_chunk:
+            # Note: this can be expensive on long videos (requires decoding frames).
+            # We run it only on explicit user action (Estimate Chunks button).
+            try:
+                input_info = detect_input(input_path)
+                if not input_info.is_valid:
+                    return f"⚠️ {input_info.error_message}", state
+                if input_info.input_type != "video":
+                    return (
+                        "ℹ️ Auto Chunk (PySceneDetect) is enabled, but scene counting applies to VIDEO inputs only.\n\n"
+                        f"- Detected input type: {input_info.input_type.upper()}\n"
+                        "- For non-video inputs, chunking uses folder/image chunking rules.",
+                        state,
+                    )
+
+                seed_controls = state.get("seed_controls", {})
+                scene_threshold = float(seed_controls.get("scene_threshold", 27.0) or 27.0)
+                min_scene_len = float(seed_controls.get("min_scene_len", 1.0) or 1.0)
+                norm_path = normalize_path(input_path)
+
+                # If we already scanned this exact input with the same settings, return cached result.
+                scan = seed_controls.get("last_scene_scan") or {}
+                try:
+                    scan_path = normalize_path(scan.get("input_path")) if scan.get("input_path") else None
+                except Exception:
+                    scan_path = scan.get("input_path")
+
+                cached_scene_count = int(scan.get("scene_count", 0) or 0)
+                if (
+                    scan_path
+                    and scan_path == norm_path
+                    and abs(float(scan.get("scene_threshold", scene_threshold)) - scene_threshold) < 1e-6
+                    and abs(float(scan.get("min_scene_len", min_scene_len)) - min_scene_len) < 1e-6
+                    and cached_scene_count > 0
+                ):
+                    dur = get_media_duration_seconds(norm_path) or 0.0
+                    avg = (float(dur) / cached_scene_count) if dur and cached_scene_count > 0 else 0.0
+
+                    msg = "✅ Auto Chunk (PySceneDetect) scan (cached).\n\n"
+                    msg += f"- Detected scenes: **{cached_scene_count}**\n"
+                    msg += f"- Settings: threshold={scene_threshold:g}, min scene len={min_scene_len:g}s (overlap forced 0)\n"
+                    if dur:
+                        msg += f"- Duration: ~{float(dur):.1f}s → avg scene ~{avg:.1f}s\n"
+                    if cached_scene_count == 1:
+                        msg += "- Note: single continuous scene → no physical split will occur.\n"
+                    return msg, state
+
+                from shared.chunking import detect_scenes
+
+                scenes = detect_scenes(
+                    norm_path,
+                    threshold=scene_threshold,
+                    min_scene_len=min_scene_len,
+                )
+                if not scenes:
+                    return (
+                        "⚠️ Could not detect scenes (PySceneDetect unavailable or detection failed).\n\n"
+                        "- Chunk count will be determined at run time using fallback chunking.\n"
+                        "- Tip: ensure `scenedetect` is installed in the venv.",
+                        state,
+                    )
+
+                # Cache last scan for info panels (SeedVR2/others can display without rescanning).
+                seed_controls["last_scene_scan"] = {
+                    "input_path": norm_path,
+                    "scene_threshold": scene_threshold,
+                    "min_scene_len": min_scene_len,
+                    "scene_count": int(len(scenes)),
+                }
+                state["seed_controls"] = seed_controls
+
+                dur = get_media_duration_seconds(norm_path) or 0.0
+                avg = (float(dur) / len(scenes)) if dur and len(scenes) > 0 else 0.0
+
+                msg = "✅ Auto Chunk (PySceneDetect) scan complete.\n\n"
+                msg += f"- Detected scenes: **{len(scenes)}**\n"
+                msg += f"- Settings: threshold={scene_threshold:g}, min scene len={min_scene_len:g}s (overlap forced 0)\n"
+                if dur:
+                    msg += f"- Duration: ~{float(dur):.1f}s → avg scene ~{avg:.1f}s\n"
+                if len(scenes) == 1:
+                    msg += "- Note: single continuous scene → no physical split will occur.\n"
+                msg += "\nℹ️ This scan decodes the video once on CPU; for long videos it may take a while."
+                return msg, state
+            except Exception as e:
+                return f"⚠️ Scene scan failed: {str(e)}", state
+
         if chunk_size <= 0:
-            return "ℹ️ Chunking disabled (chunk size = 0)", state
+            return "ℹ️ Chunking disabled (Auto Chunk off, chunk size = 0)", state
         
         try:
             # Get chunk estimate
-            chunk_count, duration, info = calculate_chunk_count(input_path, chunk_size, 2.0)
+            chunk_count, duration, info = calculate_chunk_count(input_path, chunk_size, 1.0)
             
             if chunk_count == 0:
                 return info, state
@@ -344,13 +451,17 @@ def build_resolution_callbacks(
         seed_controls["max_resolution_val"] = int(settings_dict.get("max_target_resolution", 0) or 0)
         seed_controls["enable_max_target"] = settings_dict.get("enable_max_target", True)
         seed_controls["auto_resolution"] = settings_dict.get("auto_resolution", True)  # kept for backward compat
+        seed_controls["auto_detect_scenes"] = bool(settings_dict.get("auto_detect_scenes", True))
+        seed_controls["auto_chunk"] = bool(settings_dict.get("auto_chunk", True))
+        seed_controls["frame_accurate_split"] = bool(settings_dict.get("frame_accurate_split", True))
         seed_controls["chunk_size_sec"] = settings_dict.get("chunk_size", 0)
-        seed_controls["chunk_overlap_sec"] = settings_dict.get("chunk_overlap", 0)
+        # Overlap is only meaningful for static chunking; force 0 when auto chunking is enabled.
+        seed_controls["chunk_overlap_sec"] = 0.0 if seed_controls["auto_chunk"] else float(settings_dict.get("chunk_overlap", 0) or 0)
         # Repurposed: now controls "pre-downscale then upscale when clamped"
         seed_controls["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", False)
         seed_controls["per_chunk_cleanup"] = settings_dict.get("per_chunk_cleanup", False)
         seed_controls["scene_threshold"] = settings_dict.get("scene_threshold", 27.0)
-        seed_controls["min_scene_len"] = settings_dict.get("min_scene_len", 2.0)
+        seed_controls["min_scene_len"] = settings_dict.get("min_scene_len", 1.0)
         
         # FIXED: Also cache per-model for proper isolation as requested
         # Write to per-model cache so each model can have different resolution settings
@@ -361,12 +472,15 @@ def build_resolution_callbacks(
             model_cache["max_resolution_val"] = int(settings_dict.get("max_target_resolution", 0) or 0)
             model_cache["enable_max_target"] = settings_dict.get("enable_max_target", True)
             model_cache["auto_resolution"] = settings_dict.get("auto_resolution", True)
+            model_cache["auto_detect_scenes"] = bool(settings_dict.get("auto_detect_scenes", True))
+            model_cache["auto_chunk"] = bool(settings_dict.get("auto_chunk", True))
+            model_cache["frame_accurate_split"] = bool(settings_dict.get("frame_accurate_split", True))
             model_cache["chunk_size_sec"] = float(settings_dict.get("chunk_size", 0) or 0)
-            model_cache["chunk_overlap_sec"] = float(settings_dict.get("chunk_overlap", 0) or 0)
+            model_cache["chunk_overlap_sec"] = 0.0 if model_cache["auto_chunk"] else float(settings_dict.get("chunk_overlap", 0) or 0)
             model_cache["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", False)
             model_cache["per_chunk_cleanup"] = settings_dict.get("per_chunk_cleanup", False)
             model_cache["scene_threshold"] = float(settings_dict.get("scene_threshold", 27.0))
-            model_cache["min_scene_len"] = float(settings_dict.get("min_scene_len", 2.0))
+            model_cache["min_scene_len"] = float(settings_dict.get("min_scene_len", 1.0))
         
         state["seed_controls"] = seed_controls
         
@@ -374,9 +488,14 @@ def build_resolution_callbacks(
         status_msg += f"- Upscale Factor: {seed_controls['upscale_factor_val']}x\n"
         status_msg += f"- Max Resolution: {seed_controls['max_resolution_val']}px\n"
         status_msg += f"- Auto-Resolution: {seed_controls['auto_resolution']}\n"
-        if seed_controls['chunk_size_sec'] > 0:
-            status_msg += f"- Chunking: {seed_controls['chunk_size_sec']}s (overlap: {seed_controls['chunk_overlap_sec']}s)\n"
+        status_msg += f"- Auto Detect Scenes (info): {seed_controls.get('auto_detect_scenes', True)}\n"
+        if seed_controls.get("auto_chunk", True):
+            status_msg += "- Chunking: Auto (PySceneDetect scenes, overlap forced 0)\n"
+            status_msg += f"- Split: {'Frame-accurate (lossless)' if seed_controls.get('frame_accurate_split', True) else 'Fast (keyframe-limited)'}\n"
             status_msg += f"- Scene Detection: threshold={seed_controls['scene_threshold']}, min_len={seed_controls['min_scene_len']}s\n"
+        elif seed_controls['chunk_size_sec'] > 0:
+            status_msg += f"- Chunking: Static {seed_controls['chunk_size_sec']}s (overlap: {seed_controls['chunk_overlap_sec']}s)\n"
+            status_msg += f"- Split: {'Frame-accurate (lossless)' if seed_controls.get('frame_accurate_split', True) else 'Fast (keyframe-limited)'}\n"
         if model_name:
             status_msg += f"\n💾 Settings also saved for model: {model_name}"
         
@@ -414,7 +533,7 @@ def build_resolution_callbacks(
         model_cache["ratio_downscale"] = ratio_down
         model_cache["per_chunk_cleanup"] = per_cleanup
         model_cache["scene_threshold"] = float(scene_thresh or 27.0)
-        model_cache["min_scene_len"] = float(min_scene or 2.0)
+        model_cache["min_scene_len"] = float(min_scene or 1.0)
         return gr.update(value=f"Resolution options cached for {model}."), state
 
     return {

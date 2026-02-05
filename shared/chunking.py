@@ -1,4 +1,5 @@
 import os
+import math
 import shutil
 import subprocess
 import tempfile
@@ -40,9 +41,9 @@ def _has_scenedetect() -> bool:
 def detect_scenes(
     video_path: str, 
     threshold: float = 27.0, 
-    min_scene_len: float = 2.0,
+    min_scene_len: float = 1.0,
     fade_detection: bool = False,
-    overlap_sec: float = 0.5,
+    overlap_sec: float = 0.0,
     on_progress: Optional[Callable[[str], None]] = None
 ) -> List[Tuple[float, float]]:
     """
@@ -65,59 +66,67 @@ def detect_scenes(
         return []
 
     try:
-        from scenedetect import VideoManager, SceneManager
-        from scenedetect.detectors import ContentDetector, ThresholdDetector
-        from scenedetect.video_splitter import split_video_ffmpeg
-        
+        # PySceneDetect 0.6+ API (VideoManager is deprecated).
+        from scenedetect import open_video, SceneManager
+        from scenedetect.detectors import ContentDetector
+
         if on_progress:
             on_progress(f"Detecting scenes: threshold={threshold}, min_len={min_scene_len}s\n")
 
-        # Create video manager
-        video_manager = VideoManager([video_path])
+        video = open_video(video_path)
+        fps = float(getattr(video, "frame_rate", None) or 30.0)
+        min_scene_frames = max(1, int(round(float(min_scene_len) * fps)))
+
         scene_manager = SceneManager()
-        
-        # Add content detector with proper threshold
-        scene_manager.add_detector(
-            ContentDetector(
-                threshold=threshold,
-                min_scene_len=int(min_scene_len * video_manager.get_framerate())
-            )
-        )
-        
-        # Optionally add fade detector
+        scene_manager.add_detector(ContentDetector(threshold=float(threshold), min_scene_len=min_scene_frames))
+
+        # Optional fade detector (best-effort).
         if fade_detection:
-            scene_manager.add_detector(
-                ThresholdDetector(
-                    threshold=12,  # Default fade threshold
-                    min_scene_len=int(min_scene_len * video_manager.get_framerate()),
-                    fade_bias=0.0
+            try:
+                from scenedetect.detectors import ThresholdDetector
+
+                scene_manager.add_detector(
+                    ThresholdDetector(
+                        threshold=12,  # Default fade threshold
+                        min_scene_len=min_scene_frames,
+                        fade_bias=0.0,
+                    )
                 )
-            )
-        
-        # Start video manager
-        video_manager.set_downscale_factor()
-        video_manager.start()
-        
-        # Detect scenes
-        scene_manager.detect_scenes(frame_source=video_manager, show_progress=False)
-        
-        # Get scene list
-        scene_list = scene_manager.get_scene_list()
-        
-        # Release video manager
-        video_manager.release()
-        
-        # Convert to (start_sec, end_sec) tuples
-        ranges = []
-        for scene in scene_list:
-            start_frame, end_frame = scene
-            start_sec = start_frame.get_seconds()
-            end_sec = end_frame.get_seconds()
-            ranges.append((start_sec, end_sec))
-        
+            except Exception:
+                pass
+
+        scene_manager.detect_scenes(video=video, show_progress=False)
+        scene_list = scene_manager.get_scene_list(start_in_scene=True)
+
+        ranges: List[Tuple[float, float]] = []
+        for start_tc, end_tc in scene_list:
+            ranges.append((float(start_tc.get_seconds()), float(end_tc.get_seconds())))
+
+        # If we somehow end up with an empty list, treat the whole video as one scene.
+        if not ranges:
+            try:
+                from .path_utils import get_media_duration_seconds
+
+                duration = get_media_duration_seconds(video_path)
+                if duration and duration > 0:
+                    ranges = [(0.0, float(duration))]
+            except Exception:
+                pass
+
+        # Overlap is generally not desirable for scene cuts; only apply if explicitly requested.
+        if overlap_sec and overlap_sec > 0 and ranges:
+            try:
+                from .path_utils import get_media_duration_seconds
+
+                duration = get_media_duration_seconds(video_path)
+                if duration and duration > 0:
+                    ranges = apply_overlap_to_scenes(ranges, float(overlap_sec), float(duration))
+            except Exception:
+                pass
+
         if on_progress:
             on_progress(f"✅ Detected {len(ranges)} scenes\n")
-        
+
         return ranges
         
     except ImportError as e:
@@ -218,27 +227,308 @@ def fallback_scenes(video_path: str, chunk_seconds: float = 60.0, overlap_second
     return scenes
 
 
-def split_video(video_path: str, scenes: List[Tuple[float, float]], work_dir: Path) -> List[Path]:
+def split_video(
+    video_path: str,
+    scenes: List[Tuple[float, float]],
+    work_dir: Path,
+    precise: bool = True,
+    preserve_quality: bool = True,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> List[Path]:
     work_dir.mkdir(parents=True, exist_ok=True)
     chunk_paths: List[Path] = []
-    for idx, (start, end) in enumerate(scenes, 1):
+
+    if shutil.which("ffmpeg") is None:
+        if on_progress:
+            on_progress("⚠️ ffmpeg not found in PATH; skipping chunk splitting.\n")
+        return [Path(video_path)]
+
+    # If PySceneDetect says "1 scene" and it spans the whole file, don't physically split.
+    # This avoids unnecessary remux/transcode and improves robustness for short clips.
+    if len(scenes) == 1:
+        try:
+            from .path_utils import get_media_duration_seconds
+
+            total_dur = float(get_media_duration_seconds(video_path) or 0.0)
+            s0, e0 = float(scenes[0][0]), float(scenes[0][1])
+            fps_guess = float(get_media_fps(video_path) or 30.0)
+            tol = max(0.02, 1.0 / max(1.0, fps_guess))  # within ~1 frame
+            if total_dur > 0 and abs(s0 - 0.0) <= tol and abs(e0 - total_dur) <= tol:
+                return [Path(video_path)]
+        except Exception:
+            pass
+
+    def _is_decodable(p: Path) -> bool:
+        try:
+            if not p.exists() or p.stat().st_size < 1024:
+                return False
+            cap = cv2.VideoCapture(str(p))
+            if not cap.isOpened():
+                return False
+            ok, frame = cap.read()
+            cap.release()
+            return bool(ok) and frame is not None
+        except Exception:
+            return False
+
+    def _probe_pix_fmt(src: str) -> Optional[str]:
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=pix_fmt",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    src,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            pix = (proc.stdout or "").strip()
+            return pix if pix else None
+        except Exception:
+            return None
+
+    # Filter invalid scenes and optionally frame-align boundaries for precision.
+    fps_for_align = float(get_media_fps(video_path) or 30.0) if precise else 0.0
+
+    normalized_scenes: List[Tuple[float, float]] = []
+    for start, end in scenes:
+        try:
+            start_f = float(start)
+            end_f = float(end)
+        except Exception:
+            continue
+
+        if precise and fps_for_align and fps_for_align > 0:
+            # Align to frame boundaries to avoid float rounding drift and ensure frame-level accuracy.
+            # Use floor for start and ceil for end to avoid gaps.
+            start_frame = int(math.floor(start_f * fps_for_align + 1e-9))
+            end_frame = int(math.ceil(end_f * fps_for_align - 1e-9))
+            if end_frame <= start_frame:
+                end_frame = start_frame + 1
+            start_f = max(0.0, start_frame / fps_for_align)
+            end_f = max(start_f, end_frame / fps_for_align)
+
+        if (end_f - start_f) > 0:
+            normalized_scenes.append((start_f, end_f))
+
+    if not normalized_scenes:
+        return [Path(video_path)]
+
+    src_pix_fmt = _probe_pix_fmt(video_path) if preserve_quality else None
+    for idx, (start_f, end_f) in enumerate(normalized_scenes, 1):
         out = work_dir / f"chunk_{idx:04d}.mp4"
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-ss",
-            str(start),
-            "-to",
-            str(end),
-            "-c",
-            "copy",
-            str(out),
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if out.exists():
+        duration = max(0.0, end_f - start_f)
+        if duration <= 0:
+            continue
+
+        def _run_ffmpeg(cmd: List[str]) -> None:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def _split_copy() -> None:
+            # IMPORTANT: `-ss` must be BEFORE `-i` when stream-copying or ffmpeg can output empty files.
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(start_f),
+                "-i",
+                video_path,
+                "-t",
+                str(duration),
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
+                str(out),
+            ]
+            _run_ffmpeg(cmd)
+
+        def _split_copy_video_only() -> None:
+            # Stream-copy video only. Useful when audio codecs cannot be muxed into MP4.
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(start_f),
+                "-i",
+                video_path,
+                "-t",
+                str(duration),
+                "-map",
+                "0:v:0",
+                "-c:v",
+                "copy",
+                "-an",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
+                str(out),
+            ]
+            _run_ffmpeg(cmd)
+
+        def _split_precise_lossless(pix_fmt: Optional[str]) -> None:
+            # Frame-accurate trimming requires re-encoding (stream-copy is keyframe-limited).
+            # Use lossless x264 to preserve input quality as much as possible.
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(start_f),
+                "-i",
+                video_path,
+                "-t",
+                str(duration),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-qp",
+                "0",
+                "-c:a",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
+            ]
+            if pix_fmt:
+                cmd += ["-pix_fmt", pix_fmt]
+            cmd += [str(out)]
+            _run_ffmpeg(cmd)
+
+        def _split_precise_lossless_video_only(pix_fmt: Optional[str]) -> None:
+            # Lossless re-encode video only. Useful when audio codecs cannot be muxed into MP4.
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(start_f),
+                "-i",
+                video_path,
+                "-t",
+                str(duration),
+                "-map",
+                "0:v:0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-qp",
+                "0",
+                "-an",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
+            ]
+            if pix_fmt:
+                cmd += ["-pix_fmt", pix_fmt]
+            cmd += [str(out)]
+            _run_ffmpeg(cmd)
+
+        # Strategy:
+        # - precise=True: prefer lossless re-encode (frame-accurate), fall back to stream copy.
+        # - precise=False: prefer stream copy (bit-exact), fall back to lossless re-encode if needed.
+        try:
+            out.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        if on_progress:
+            mode = "precise-lossless" if precise else "stream-copy"
+            on_progress(f"Splitting chunk {idx}/{len(scenes)} ({mode})...\n")
+
+        if precise:
+            _split_precise_lossless(src_pix_fmt)
+            if not _is_decodable(out) and src_pix_fmt:
+                # Retry without forcing pixel format (better compatibility with non-x264 pix_fmts).
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_precise_lossless(None)
+            if not _is_decodable(out):
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_precise_lossless_video_only(src_pix_fmt)
+                if not _is_decodable(out) and src_pix_fmt:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    _split_precise_lossless_video_only(None)
+            if not _is_decodable(out):
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_copy()
+            if not _is_decodable(out):
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_copy_video_only()
+        else:
+            _split_copy()
+            if not _is_decodable(out):
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_copy_video_only()
+            if not _is_decodable(out):
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_precise_lossless(src_pix_fmt)
+                if not _is_decodable(out) and src_pix_fmt:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    _split_precise_lossless(None)
+            if not _is_decodable(out):
+                try:
+                    out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _split_precise_lossless_video_only(src_pix_fmt)
+                if not _is_decodable(out) and src_pix_fmt:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    _split_precise_lossless_video_only(None)
+
+        if _is_decodable(out):
             chunk_paths.append(out)
+
+    # Safety: never return a partial set of chunks. If splitting failed for any scene,
+    # fall back to processing the original video as a single chunk.
+    if len(chunk_paths) != len(normalized_scenes):
+        if on_progress:
+            on_progress("⚠️ Split produced an incomplete set of chunks; falling back to single-pass input.\n")
+        return [Path(video_path)]
+
     return chunk_paths
 
 
@@ -289,7 +579,9 @@ def concat_videos(chunk_paths: List[Path], output_path: Path) -> bool:
     txt = output_path.parent / "concat.txt"
     with txt.open("w", encoding="utf-8") as f:
         for p in chunk_paths:
-            f.write(f"file '{p.as_posix()}'\n")
+            # Use absolute POSIX paths. ffmpeg resolves relative entries relative to the concat file location,
+            # which can break when outputs and temp chunks live in different folders (common in this app).
+            f.write(f"file '{p.resolve().as_posix()}'\n")
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(txt), "-c", "copy", str(output_path)]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return proc.returncode == 0 and output_path.exists()
@@ -473,11 +765,18 @@ def detect_resume_state(work_dir: Path, output_format: str) -> Tuple[Optional[Pa
                     completed_chunks.append(chunk_file)
             return partial_dir, completed_chunks
     else:
+        # Video: detect completed per-chunk outputs to support cancel salvage and best-effort resume.
+        completed_chunks = sorted(work_dir.glob("chunk_*_out.mp4"))
+
+        # If a stitched partial exists inside the chunks dir, prefer it as the "partial indicator".
         partial_candidates = list(work_dir.glob("*_partial.mp4"))
         if partial_candidates:
             partial_file = partial_candidates[0]
-            # For video, we can't easily resume chunk-by-chunk, so return empty completed list
-            return partial_file, []
+            return partial_file, completed_chunks
+
+        # If we have any completed chunk outputs, consider this resumable even without a stitched partial.
+        if completed_chunks:
+            return work_dir, completed_chunks
 
     return None, []
 
@@ -495,7 +794,9 @@ def check_resume_available(temp_dir: Path, output_format: str) -> Tuple[bool, st
 
     if output_format == "png" and completed_chunks:
         return True, f"Found {len(completed_chunks)} completed chunks ready to resume."
-    elif output_format != "png" and partial_path.exists():
+    elif output_format != "png" and completed_chunks:
+        return True, f"Found {len(completed_chunks)} completed chunk outputs ready to stitch/resume."
+    elif output_format != "png" and partial_path and partial_path.exists():
         return True, "Found partial video output ready to resume from."
     else:
         return False, "Partial output found but no completed chunks to resume from."
@@ -588,15 +889,31 @@ def chunk_and_process(
 
     # Predict final output locations for partial/cancel handling
     global_override = settings.get("output_override") or global_output_dir
-    predicted_final = resolve_output_location(
-        input_path=input_path,
-        output_format=output_format,
-        global_output_dir=global_override,
-        batch_mode=False,
-        png_padding=settings.get("png_padding"),
-        png_keep_basename=settings.get("png_keep_basename", False),
-    )
-    predicted_final_path = Path(predicted_final)
+    explicit_final_path: Optional[Path] = None
+    if global_override and output_format != "png":
+        try:
+            cand = Path(normalize_path(str(global_override)))
+            video_exts = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".wmv", ".m4v", ".flv"}
+            if cand.exists() and cand.is_dir():
+                explicit_final_path = None
+            elif cand.suffix.lower() in video_exts:
+                explicit_final_path = cand
+        except Exception:
+            explicit_final_path = None
+
+    if explicit_final_path is not None:
+        predicted_final_path = explicit_final_path
+    else:
+        predicted_final = resolve_output_location(
+            input_path=input_path,
+            output_format=output_format,
+            global_output_dir=global_override,
+            batch_mode=False,
+            png_padding=settings.get("png_padding"),
+            png_keep_basename=settings.get("png_keep_basename", False),
+            original_filename=settings.get("_original_filename"),
+        )
+        predicted_final_path = Path(predicted_final)
     if output_format == "png":
         # For PNG sequences, ensure we point to a directory; single-image PNG still gets a sibling folder for partials
         base_dir = (
@@ -653,7 +970,15 @@ def chunk_and_process(
             scenes = fallback_scenes(input_path, chunk_seconds=effective_seconds, overlap_seconds=max(0.0, chunk_overlap))
         on_progress(f"Detected {len(scenes)} scenes for chunking\n")
 
-        chunk_paths = split_video(input_path, scenes, work)
+        precise_split = bool(settings.get("frame_accurate_split", True))
+        chunk_paths = split_video(
+            input_path,
+            scenes,
+            work,
+            precise=precise_split,
+            preserve_quality=True,
+            on_progress=on_progress,
+        )
         on_progress(f"Split into {len(chunk_paths)} chunks\n")
 
     output_chunks: List[Path] = []
@@ -740,6 +1065,9 @@ def chunk_and_process(
         # Only update progress when chunk completes (not during processing to avoid UI spam)
         chunk_settings = settings.copy()
         chunk_settings["input_path"] = str(chunk)
+        # Some pipelines (e.g., FlashVSR+) support preprocessing via `_effective_input_path`.
+        # Ensure per-chunk runs always point to the chunk itself.
+        chunk_settings["_effective_input_path"] = str(chunk)
         # Direct chunk outputs to temp; choose dir for PNG exports
         if output_format == "png":
             chunk_settings["output_override"] = str(work / f"{chunk.stem}_out")
@@ -755,6 +1083,11 @@ def chunk_and_process(
             res = runner.run_gan(chunk_settings, on_progress=None)
         elif model_type == "rife":
             res = runner.run_rife(chunk_settings, on_progress=None)
+        elif model_type == "flashvsr":
+            if hasattr(runner, "run_flashvsr"):
+                res = runner.run_flashvsr(chunk_settings, on_progress=None)
+            else:
+                raise AttributeError("chunk_and_process: model_type='flashvsr' requires runner.run_flashvsr() or a custom process_func")
         else:
             # Fallback to seedvr2 for backward compatibility
             res = runner.run_seedvr2(chunk_settings, on_progress=None, preview_only=False)
@@ -841,6 +1174,22 @@ def chunk_and_process(
             }
         )
 
+        # Optional: free disk space by deleting the *input* chunk file after it is processed.
+        # This is safe because we only concatenate processed outputs, not the split inputs.
+        if per_chunk_cleanup:
+            try:
+                chunk_path = Path(chunk)
+                if chunk_path.is_file():
+                    work_root = work.resolve()
+                    try:
+                        parent_resolved = chunk_path.resolve().parent
+                    except Exception:
+                        parent_resolved = chunk_path.parent
+                    if parent_resolved == work_root:
+                        chunk_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     if output_format == "png":
         # Aggregate chunk PNG outputs into a collision-safe parent directory
         target_dir = resolve_output_location(
@@ -850,6 +1199,7 @@ def chunk_and_process(
             batch_mode=False,
             png_padding=settings.get("png_padding"),
             png_keep_basename=settings.get("png_keep_basename", False),
+            original_filename=settings.get("_original_filename"),
         )
         target_dir = collision_safe_dir(Path(target_dir))
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -878,15 +1228,20 @@ def chunk_and_process(
             pass
         return 0, log_blob, str(target_dir), len(chunk_paths)
 
-    final_path = resolve_output_location(
-        input_path=input_path,
-        output_format="mp4",
-        global_output_dir=global_override,
-        batch_mode=False,
-        png_padding=settings.get("png_padding"),
-        png_keep_basename=settings.get("png_keep_basename", False),
-    )
-    final_path = collision_safe_path(Path(final_path))
+    if explicit_final_path is not None:
+        final_path = collision_safe_path(explicit_final_path)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        final_path = resolve_output_location(
+            input_path=input_path,
+            output_format="mp4",
+            global_output_dir=global_override,
+            batch_mode=False,
+            png_padding=settings.get("png_padding"),
+            png_keep_basename=settings.get("png_keep_basename", False),
+            original_filename=settings.get("_original_filename"),
+        )
+        final_path = collision_safe_path(Path(final_path))
     
     # Use blending concat if overlap specified
     overlap_frames_for_blend = int(chunk_overlap * (get_media_fps(input_path) or 30.0)) if chunk_overlap > 0 else 0
@@ -904,7 +1259,7 @@ def chunk_and_process(
     if per_chunk_cleanup:
         shutil.rmtree(work, ignore_errors=True)
     # Write chunk metadata
-    meta_path = final_path.parent / "chunk_metadata.json"
+    meta_path = final_path.parent / f"{final_path.stem}_chunk_metadata.json"
     try:
         import json
         with meta_path.open("w", encoding="utf-8") as f:

@@ -545,6 +545,15 @@ def build_flashvsr_callbacks(
                 face_apply = bool(global_settings.get("face_global", False))
                 face_strength = float(global_settings.get("face_strength", 0.5))
 
+                # Universal chunking (Resolution tab) applies to FlashVSR+ batch runs too.
+                auto_chunk = bool(seed_controls.get("auto_chunk", True))
+                chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
+                chunk_overlap_sec = 0.0 if auto_chunk else float(seed_controls.get("chunk_overlap_sec", 0) or 0)
+                per_chunk_cleanup = bool(seed_controls.get("per_chunk_cleanup", False))
+                scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
+                min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
+                frame_accurate_split = bool(seed_controls.get("frame_accurate_split", True))
+
                 logs: List[str] = []
                 outputs: List[str] = []
                 last_input_path: Optional[str] = None
@@ -583,15 +592,72 @@ def build_flashvsr_callbacks(
 
                     _apply_vnext_preprocess(item_settings, item_path)
 
-                    result = run_flashvsr(
-                        item_settings,
-                        base_dir,
-                        on_progress=None,
-                        cancel_event=_flashvsr_cancel_event,
-                        process_handle=None,
-                    )
+                    effective_for_chunk = normalize_path(item_settings.get("_effective_input_path") or item_path)
+                    should_chunk_video = (detect_input_type(effective_for_chunk) == "video") and (auto_chunk or chunk_size_sec > 0)
 
-                    outp = result.output_path
+                    chunk_count_item = 0
+                    if should_chunk_video:
+                        from shared.chunking import chunk_and_process
+                        from shared.runner import RunResult
+
+                        class _CancelProbe:
+                            def is_canceled(self) -> bool:
+                                return bool(_flashvsr_cancel_event.is_set())
+
+                        chunk_settings = item_settings.copy()
+                        chunk_settings["input_path"] = effective_for_chunk
+                        chunk_settings["frame_accurate_split"] = frame_accurate_split
+
+                        # For batch output, prefer an explicit file name to match FlashVSR naming.
+                        try:
+                            out_base = Path(batch_out) if batch_out else Path(global_settings.get("output_dir", output_dir))
+                            out_base.mkdir(parents=True, exist_ok=True)
+                            base_stem = Path(chunk_settings.get("_original_filename") or item_path).stem
+                            seed_val = int(chunk_settings.get("seed", 0) or 0)
+                            mode_val = str(chunk_settings.get("mode", "tiny") or "tiny")
+                            chunk_settings["output_override"] = str(out_base / f"FlashVSR_{mode_val}_{base_stem}_{seed_val}.mp4")
+                        except Exception:
+                            pass
+
+                        def _process_chunk(s: Dict[str, Any], on_progress=None) -> RunResult:
+                            r = run_flashvsr(
+                                s,
+                                base_dir,
+                                on_progress=on_progress,
+                                cancel_event=_flashvsr_cancel_event,
+                                process_handle=None,
+                            )
+                            return RunResult(r.returncode, r.output_path, r.log)
+
+                        rc, clog, final_output, chunk_count_item = chunk_and_process(
+                            runner=_CancelProbe(),
+                            settings=chunk_settings,
+                            scene_threshold=scene_threshold,
+                            min_scene_len=min_scene_len,
+                            temp_dir=Path(global_settings.get("temp_dir", temp_dir)),
+                            on_progress=lambda msg: None,
+                            chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
+                            chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
+                            per_chunk_cleanup=per_chunk_cleanup,
+                            allow_partial=True,
+                            global_output_dir=str(global_settings.get("output_dir", output_dir)),
+                            resume_from_partial=False,
+                            progress_tracker=None,
+                            process_func=_process_chunk,
+                            model_type="flashvsr",
+                        )
+                        result = RunResult(rc, final_output if final_output else None, clog)
+                        outp = result.output_path
+                    else:
+                        result = run_flashvsr(
+                            item_settings,
+                            base_dir,
+                            on_progress=None,
+                            cancel_event=_flashvsr_cancel_event,
+                            process_handle=None,
+                        )
+                        outp = result.output_path
+
                     if outp and Path(outp).exists():
                         # Optional face restoration (video-first)
                         if face_apply:
@@ -621,7 +687,10 @@ def build_flashvsr_callbacks(
 
                         outputs.append(outp)
                         last_output_path = outp
-                        logs.append(f"✅ [{idx}/{len(items)}] {Path(item_path).name} → {Path(outp).name}")
+                        if chunk_count_item:
+                            logs.append(f"✅ [{idx}/{len(items)}] {Path(item_path).name} → {Path(outp).name} ({int(chunk_count_item)} chunks)")
+                        else:
+                            logs.append(f"✅ [{idx}/{len(items)}] {Path(item_path).name} → {Path(outp).name}")
                     else:
                         if getattr(result, "returncode", 0) != 0:
                             maybe_set_vram_oom_alert(state, model_label="FlashVSR+", text=getattr(result, "log", ""), settings=item_settings)
@@ -640,6 +709,21 @@ def build_flashvsr_callbacks(
                                 "face_strength": face_strength,
                                 "pipeline": "flashvsr",
                                 "batch": True,
+                                **(
+                                    {
+                                        "chunking": {
+                                            "mode": "auto" if auto_chunk else "static",
+                                            "chunk_size_sec": 0.0 if auto_chunk else float(chunk_size_sec or 0),
+                                            "chunk_overlap_sec": 0.0 if auto_chunk else float(chunk_overlap_sec or 0),
+                                            "scene_threshold": float(scene_threshold or 27.0),
+                                            "min_scene_len": float(min_scene_len or 1.0),
+                                            "chunks": int(chunk_count_item or 0),
+                                            "frame_accurate_split": bool(frame_accurate_split),
+                                        }
+                                    }
+                                    if chunk_count_item
+                                    else {}
+                                ),
                             },
                         )
                     except Exception:
@@ -704,6 +788,20 @@ def build_flashvsr_callbacks(
             settings["_original_filename"] = Path(input_path).name
             settings["global_output_dir"] = str(output_dir)
             _apply_vnext_preprocess(settings, input_path)
+
+            # Pull universal PySceneDetect chunking settings from Resolution tab (global).
+            auto_chunk = bool(seed_controls.get("auto_chunk", True))
+            chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
+            chunk_overlap_sec = 0.0 if auto_chunk else float(seed_controls.get("chunk_overlap_sec", 0) or 0)
+            per_chunk_cleanup = bool(seed_controls.get("per_chunk_cleanup", False))
+            scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
+            min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
+            frame_accurate_split = bool(seed_controls.get("frame_accurate_split", True))
+            settings["frame_accurate_split"] = frame_accurate_split
+
+            # Chunk against the effective (preprocessed) input, but keep output naming from the original filename.
+            effective_for_chunk = normalize_path(settings.get("_effective_input_path") or input_path)
+            should_use_chunking = (detect_input_type(effective_for_chunk) == "video") and (auto_chunk or chunk_size_sec > 0)
             
             # Run FlashVSR+ in thread with cancel support
             result_holder = {}
@@ -712,14 +810,75 @@ def build_flashvsr_callbacks(
             
             def processing_thread():
                 try:
-                    result = run_flashvsr(
-                        settings,
-                        base_dir,
-                        on_progress=lambda msg: progress_queue.put(msg),
-                        cancel_event=_flashvsr_cancel_event,
-                        process_handle=process_handle
-                    )
-                    result_holder["result"] = result
+                    if should_use_chunking:
+                        from shared.chunking import chunk_and_process
+                        from shared.runner import RunResult
+
+                        # Minimal runner shim for cancellation checks inside chunk_and_process.
+                        class _CancelProbe:
+                            def is_canceled(self) -> bool:
+                                return bool(_flashvsr_cancel_event.is_set())
+
+                        chunk_settings = settings.copy()
+                        chunk_settings["input_path"] = effective_for_chunk
+
+                        # Default output path: match FlashVSR naming unless user overrides.
+                        if not (chunk_settings.get("output_override") or "").strip():
+                            try:
+                                out_base = Path(global_settings.get("output_dir", output_dir))
+                                base_stem = Path(chunk_settings.get("_original_filename") or input_path).stem
+                                seed_val = int(chunk_settings.get("seed", 0) or 0)
+                                mode_val = str(chunk_settings.get("mode", "tiny") or "tiny")
+                                chunk_settings["output_override"] = str(out_base / f"FlashVSR_{mode_val}_{base_stem}_{seed_val}.mp4")
+                            except Exception:
+                                pass
+
+                        def _process_chunk(s: Dict[str, Any], on_progress=None) -> RunResult:
+                            r = run_flashvsr(
+                                s,
+                                base_dir,
+                                on_progress=on_progress,
+                                cancel_event=_flashvsr_cancel_event,
+                                process_handle=None,
+                            )
+                            return RunResult(r.returncode, r.output_path, r.log)
+
+                        def _chunk_progress_cb(progress_val, desc=""):
+                            try:
+                                pct = int(float(progress_val) * 100)
+                                progress_queue.put(f"{pct}% {desc}".strip())
+                            except Exception:
+                                pass
+
+                        rc, clog, final_output, chunk_count = chunk_and_process(
+                            runner=_CancelProbe(),
+                            settings=chunk_settings,
+                            scene_threshold=scene_threshold,
+                            min_scene_len=min_scene_len,
+                            temp_dir=Path(global_settings.get("temp_dir", temp_dir)),
+                            on_progress=lambda msg: progress_queue.put(msg),
+                            chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
+                            chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
+                            per_chunk_cleanup=per_chunk_cleanup,
+                            allow_partial=True,
+                            global_output_dir=str(global_settings.get("output_dir", output_dir)),
+                            resume_from_partial=False,
+                            progress_tracker=_chunk_progress_cb,
+                            process_func=_process_chunk,
+                            model_type="flashvsr",
+                        )
+
+                        result_holder["result"] = RunResult(rc, final_output if final_output else None, clog)
+                        result_holder["chunk_count"] = int(chunk_count or 0)
+                    else:
+                        result = run_flashvsr(
+                            settings,
+                            base_dir,
+                            on_progress=lambda msg: progress_queue.put(msg),
+                            cancel_event=_flashvsr_cancel_event,
+                            process_handle=process_handle
+                        )
+                        result_holder["result"] = result
                 except Exception as e:
                     result_holder["error"] = str(e)
             
@@ -910,6 +1069,7 @@ def build_flashvsr_callbacks(
                     pass
             
             # Log run
+            chunk_count = int(result_holder.get("chunk_count") or 0)
             run_logger.write_summary(
                 Path(output_path) if output_path else output_dir,
                 {
@@ -920,10 +1080,32 @@ def build_flashvsr_callbacks(
                     "face_apply": face_apply,
                     "face_strength": face_strength,
                     "pipeline": "flashvsr",
+                    **(
+                        {
+                            "chunking": {
+                                "mode": "auto" if auto_chunk else "static",
+                                "chunk_size_sec": 0.0 if auto_chunk else float(chunk_size_sec or 0),
+                                "chunk_overlap_sec": 0.0 if auto_chunk else float(chunk_overlap_sec or 0),
+                                "scene_threshold": float(scene_threshold or 27.0),
+                                "min_scene_len": float(min_scene_len or 1.0),
+                                "chunks": chunk_count,
+                                "frame_accurate_split": bool(frame_accurate_split),
+                            }
+                        }
+                        if chunk_count > 0
+                        else {}
+                    ),
                 }
             )
             
-            status = "✅ FlashVSR+ upscaling complete" if result.returncode == 0 else f"⚠️ Exited with code {result.returncode}"
+            if chunk_count > 0:
+                status = (
+                    f"✅ FlashVSR+ chunked upscale complete ({chunk_count} chunks)"
+                    if result.returncode == 0
+                    else f"⚠️ Chunked upscale exited with code {result.returncode}"
+                )
+            else:
+                status = "✅ FlashVSR+ upscaling complete" if result.returncode == 0 else f"⚠️ Exited with code {result.returncode}"
             if result.returncode != 0 and maybe_set_vram_oom_alert(state, model_label="FlashVSR+", text=result.log, settings=settings):
                 status = "🚫 Out of VRAM (GPU) — see banner above"
                 show_vram_oom_modal(state, title="Out of VRAM (GPU) — FlashVSR+", duration=None)
@@ -980,4 +1162,3 @@ def build_flashvsr_callbacks(
         "open_outputs_folder": open_outputs_folder_flashvsr,
         "clear_temp_folder": clear_temp_folder_flashvsr,
     }
-

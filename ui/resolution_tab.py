@@ -100,23 +100,30 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         # Left Column: Settings
         with gr.Column(scale=2):
             gr.Markdown("#### 🎯 Resolution Settings")
-            
+             
             with gr.Group():
-                auto_resolution = gr.Checkbox(
-                    label="🔄 Auto-Resolution (Aspect Ratio Aware)",
-                    value=values[1],
-                    info="Automatically calculate optimal resolution maintaining aspect ratio"
-                )
+                with gr.Row():
+                    auto_resolution = gr.Checkbox(
+                        label="🔄 Auto-Resolution (Aspect Ratio Aware)",
+                        value=values[1],
+                        info="Automatically calculate optimal resolution maintaining aspect ratio"
+                    )
 
-                enable_max_target = gr.Checkbox(
-                    label="🎯 Enable Max Target Resolution",
-                    value=values[2],
-                    info="Apply maximum resolution cap to prevent excessive upscaling"
-                )
+                    enable_max_target = gr.Checkbox(
+                        label="🎯 Enable Max Target Resolution",
+                        value=values[2],
+                        info="Apply maximum resolution cap to prevent excessive upscaling"
+                    )
+
+                    auto_detect_scenes = gr.Checkbox(
+                        label="🎬 Auto Detect Scenes (on input)",
+                        value=values[3],
+                        info="When Auto Chunk is ON and input is a video, auto-scan scene cuts to show the scene count. Can be slow for long videos."
+                    )
 
                 upscale_factor = gr.Number(
                     label="Upscale x (any factor)",
-                    value=values[3],
+                    value=values[4],
                     precision=2,
                     info="Target scale factor relative to input (e.g., 4.0 = 4x). Works for both images and videos."
                 )
@@ -125,51 +132,92 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
                     max_target_resolution = gr.Slider(
                         label="Max Resolution (max edge, 0 = no cap)",
                         minimum=0, maximum=8192, step=16,
-                        value=values[4],
+                        value=values[5],
                         info="Caps the LONG side (max(width,height)) of the target. 0 = unlimited."
                     )
 
                     ratio_downscale_then_upscale = gr.Checkbox(
                         label="⬇️➡️⬆️ Pre-downscale then upscale (when capped)",
-                        value=values[7],
+                        value=values[6],
                         info="If max edge would reduce effective scale, downscale input first so the model still runs at the full Upscale x."
                     )
 
             gr.Markdown("#### 🎬 Scene Splitting & Chunking")
             
             with gr.Group():
-                chunk_size = gr.Slider(
-                    label="Chunk Size (seconds, 0=disabled)",
-                    minimum=0, maximum=600, step=10,
-                    value=values[5],
-                    info="Split long videos into chunks. 0=off, 60=1min chunks, 300=5min chunks. Uses PySceneDetect for intelligent scene detection."
-                )
+                with gr.Row():
+                    auto_chunk = gr.Checkbox(
+                        label="Auto Chunk (PySceneDetect Scenes)",
+                        value=values[7],
+                        info="Recommended. Splits by detected scene cuts (content-based). Uses scene sensitivity + minimum scene length."
+                    )
 
-                chunk_overlap = gr.Slider(
-                    label="Chunk Overlap (seconds)",
-                    minimum=0.0, maximum=5.0, step=0.1,
-                    value=values[6],
-                    info="Overlap between chunks for smooth transitions. 0.5-2s recommended"
-                )
-                
-                scene_threshold = gr.Slider(
-                    label="Scene Detection Sensitivity",
-                    minimum=5.0, maximum=50.0, step=1.0,
-                    value=values[9],
-                    info="PySceneDetect threshold. Lower = more scene cuts (sensitive), higher = fewer cuts. 27 = default balanced setting."
-                )
-                
-                min_scene_len = gr.Slider(
-                    label="Minimum Scene Length (seconds)",
-                    minimum=0.5, maximum=10.0, step=0.5,
-                    value=values[10],
-                    info="Minimum duration for a detected scene. Prevents very short chunks. 2.0s recommended."
-                )
+                    frame_accurate_split = gr.Checkbox(
+                        label="Frame-Accurate Split (Lossless)",
+                        value=values[8],
+                        info="Enabled: frame-accurate splitting via lossless re-encode (slower). Disabled: fast stream-copy splitting (keyframe-limited)."
+                    )
 
-                per_chunk_cleanup = gr.Checkbox(
-                    label="Clean Temp Files Per Chunk",
-                    value=values[8],
-                    info="Delete temporary files after each chunk (saves disk space)"
+                    per_chunk_cleanup = gr.Checkbox(
+                        label="Clean Temp Files Per Chunk",
+                        value=values[9],
+                        info="Delete temporary files after each chunk (saves disk space)"
+                    )
+
+                with gr.Row():
+                    chunk_size = gr.Slider(
+                        label="Chunk Size (seconds, 0=disabled)",
+                        minimum=0, maximum=600, step=10,
+                        value=values[10],
+                        interactive=not bool(values[7]),
+                        info="Static chunking only (when Auto Chunk is OFF). 0=off, 60=1min chunks, 300=5min chunks."
+                    )
+
+                    chunk_overlap = gr.Slider(
+                        label="Chunk Overlap (seconds)",
+                        minimum=0.0, maximum=5.0, step=0.1,
+                        value=0.0 if bool(values[7]) else values[11],
+                        interactive=not bool(values[7]),
+                        info="Static chunking only. Auto Chunk forces overlap to 0 to avoid blending across scene cuts."
+                    )
+
+                with gr.Row():
+                    scene_threshold = gr.Slider(
+                        label="Scene Detection Sensitivity",
+                        minimum=5.0, maximum=50.0, step=1.0,
+                        value=values[12],
+                        interactive=bool(values[7]),
+                        info="PySceneDetect ContentDetector threshold. Lower = more cuts, higher = fewer. 27 is a balanced default."
+                    )
+
+                    min_scene_len = gr.Slider(
+                        label="Minimum Scene Length (seconds)",
+                        minimum=0.5, maximum=10.0, step=0.5,
+                        value=values[13],
+                        interactive=bool(values[7]),
+                        info="Minimum duration for a detected scene. Prevents very short chunks. 1.0s recommended."
+                    )
+
+                def _toggle_chunk_mode(auto_enabled: bool):
+                    auto_enabled = bool(auto_enabled)
+                    if auto_enabled:
+                        chunk_overlap_update = gr.update(value=0.0, interactive=False)
+                    else:
+                        chunk_overlap_update = gr.update(interactive=True)
+                    return (
+                        gr.update(interactive=not auto_enabled),  # chunk_size
+                        chunk_overlap_update,  # chunk_overlap
+                        gr.update(interactive=auto_enabled),  # scene_threshold
+                        gr.update(interactive=auto_enabled),  # min_scene_len
+                    )
+
+                auto_chunk.change(
+                    fn=_toggle_chunk_mode,
+                    inputs=auto_chunk,
+                    outputs=[chunk_size, chunk_overlap, scene_threshold, min_scene_len],
+                    queue=False,
+                    show_progress="hidden",
+                    trigger_mode="always_last",
                 )
 
         # Right Column: Auto-Calculation & Preview
@@ -238,9 +286,11 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
 
     # Collect inputs - MUST match RESOLUTION_ORDER exactly
     inputs_list = [
-        model_selector, auto_resolution, enable_max_target, upscale_factor,
-        max_target_resolution, chunk_size, chunk_overlap, ratio_downscale_then_upscale,
-        per_chunk_cleanup, scene_threshold, min_scene_len
+        model_selector, auto_resolution, enable_max_target, auto_detect_scenes, upscale_factor,
+        max_target_resolution, ratio_downscale_then_upscale,
+        auto_chunk, frame_accurate_split, per_chunk_cleanup,
+        chunk_size, chunk_overlap,
+        scene_threshold, min_scene_len
     ]
 
     # UNIVERSAL PRESET EVENT WIRING
@@ -288,7 +338,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         
         return gr.update(value=info, visible=True), updated_state, gr.update(visible=False)
 
-    def calculate_chunks_wrapper(input_path, chunk_size, chunk_overlap, state):
+    def calculate_chunks_wrapper(input_path, auto_chunk_enabled, chunk_size, chunk_overlap, state):
         """Wrapper for chunk estimation"""
         if not input_path or not input_path.strip():
             input_path = state.get("seed_controls", {}).get("last_input_path", "")
@@ -297,6 +347,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
         
         info, updated_state = service["calculate_chunk_estimate"](
             input_path,
+            bool(auto_chunk_enabled),
             float(chunk_size),
             float(chunk_overlap),
             state
@@ -319,7 +370,7 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
 
     calc_chunks_btn.click(
         fn=calculate_chunks_wrapper,
-        inputs=[calc_input_path, chunk_size, chunk_overlap, shared_state],
+        inputs=[calc_input_path, auto_chunk, chunk_size, chunk_overlap, shared_state],
         outputs=[calc_result, shared_state, disk_space_warning]
     )
 
@@ -338,8 +389,14 @@ def resolution_tab(preset_manager, shared_state: gr.State, base_dir: Path):
     )
 
     # Auto-update calculation when settings change
-    for component in [upscale_factor, max_target_resolution, auto_resolution, enable_max_target, ratio_downscale_then_upscale]:
+    for component in [upscale_factor, max_target_resolution, auto_resolution, enable_max_target, auto_detect_scenes, ratio_downscale_then_upscale]:
         component.change(
             fn=lambda *args: gr.update(value="ℹ️ Settings changed. Click 'Calculate Resolution' to update.", visible=True),
             outputs=calc_result
         )
+
+    return {
+        "inputs_list": inputs_list,
+        "preset_dropdown": preset_dropdown,
+        "preset_status": preset_status,
+    }

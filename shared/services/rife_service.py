@@ -652,18 +652,21 @@ def build_rife_callbacks(
                 settings["output_format"] = cached_fmt
             
             # Pull PySceneDetect chunking settings from Resolution tab (universal chunking)
+            auto_chunk = bool(seed_controls.get("auto_chunk", True))
+            frame_accurate_split = bool(seed_controls.get("frame_accurate_split", True))
             chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)
-            chunk_overlap_sec = float(seed_controls.get("chunk_overlap_sec", 0) or 0)
+            chunk_overlap_sec = 0.0 if auto_chunk else float(seed_controls.get("chunk_overlap_sec", 0) or 0)
             per_chunk_cleanup = seed_controls.get("per_chunk_cleanup", False)
             # PySceneDetect parameters now managed centrally in Resolution tab
             scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
-            min_scene_len = float(seed_controls.get("min_scene_len", 2.0))
+            min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
+            settings["frame_accurate_split"] = frame_accurate_split
             
             # Determine if PySceneDetect chunking should be used
             from shared.path_utils import detect_input_type as detect_type
             input_type_check = detect_type(input_path)
             should_use_chunking = (
-                chunk_size_sec > 0 and
+                (auto_chunk or chunk_size_sec > 0) and
                 input_type_check == "video" and
                 not settings.get("batch_enable", False) and
                 not settings.get("img_mode", False)  # Don't chunk image sequences
@@ -673,13 +676,23 @@ def build_rife_callbacks(
             if should_use_chunking:
                 from shared.chunking import chunk_and_process
                 
-                yield ("⚙️ Starting PySceneDetect chunking for RIFE processing...", 
-                       "Initializing scene detection...", gr.update(value="Chunking...", visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                mode_label = "Auto Chunk (PySceneDetect scenes)" if auto_chunk else f"Static Chunk ({chunk_size_sec:g}s)"
+                init_desc = "Initializing scene detection..." if auto_chunk else "Initializing chunking..."
+                yield (
+                    f"⚙️ Starting {mode_label} for RIFE processing...",
+                    init_desc,
+                    gr.update(value="Chunking...", visible=True),
+                    None,
+                    gr.update(value=None),
+                    gr.update(value="", visible=False),
+                    state,
+                )
                 
                 # Prepare settings for chunking
                 settings["chunk_size_sec"] = chunk_size_sec
                 settings["chunk_overlap_sec"] = chunk_overlap_sec
                 settings["per_chunk_cleanup"] = per_chunk_cleanup
+                settings["frame_accurate_split"] = frame_accurate_split
                 
                 def chunk_progress_cb(progress_val, desc=""):
                     yield (f"⚙️ Chunking: {desc}", f"Processing chunks... {desc}", gr.update(value=desc, visible=True), None, gr.update(value=None), gr.update(value="", visible=False), state)
@@ -692,8 +705,8 @@ def build_rife_callbacks(
                     min_scene_len=min_scene_len,
                     temp_dir=temp_dir,
                     on_progress=lambda msg: None,
-                    chunk_seconds=chunk_size_sec,
-                    chunk_overlap=chunk_overlap_sec,
+                    chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
+                    chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
                     per_chunk_cleanup=per_chunk_cleanup,
                     allow_partial=True,
                     global_output_dir=str(output_dir),
@@ -726,7 +739,7 @@ def build_rife_callbacks(
                     elif not Path(final_output).is_dir():
                         image_slider_update = gr.update(value=(settings["input_path"], final_output), visible=True)
                 
-                meta_md = f"PySceneDetect chunking: {chunk_count} chunks processed\nOutput: {final_output}"
+                meta_md = f"Chunking ({'Auto scenes' if auto_chunk else 'Static'}): {chunk_count} chunks processed\nOutput: {final_output}"
                 
                 yield (status, clog, gr.update(value="", visible=False), final_output if final_output and Path(final_output).suffix.lower() in ('.mp4', '.avi', '.mov', '.mkv') else None, image_slider_update, video_comp_html_update, state)
                 return
@@ -758,9 +771,9 @@ def build_rife_callbacks(
 
                 # Create batch processor
                 batch_processor = BatchProcessor(
-                    output_dir=batch_output_path if batch_output_path.exists() else output_dir,
+                    output_dir=str(batch_output_path) if batch_output_path.exists() else str(output_dir),
                     max_workers=1,  # Sequential processing for memory management
-                    telemetry_enabled=global_settings.get("telemetry", True)
+                    telemetry_enabled=global_settings.get("telemetry", True),
                 )
 
                 # Create batch jobs
@@ -777,71 +790,126 @@ def build_rife_callbacks(
                     )
                     jobs.append(job)
 
-                # Process batch with progress updates
-                def batch_progress_callback(progress_data):
-                    current_job = progress_data.get("current_job")
-                    overall_progress = progress_data.get("overall_progress", 0)
-                    status_msg = f"Batch RIFE processing: {overall_progress:.1f}% complete"
-                    if current_job:
-                        status_msg += f" - Processing: {Path(current_job).name}"
-
-                    yield (status_msg, f"Processing {len(jobs)} videos...", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
-
-                # Define processing function for each job
-                def process_single_rife_job(job: BatchJob, progress_cb):
+                # Define processing function for each job (reuses the single-file runner)
+                def process_single_rife_job(job: BatchJob) -> bool:
                     try:
-                        job.status = "processing"
-                        job.start_time = time.time()
-
                         # Process single file with current settings
                         single_settings = job.metadata["settings"].copy()
                         single_settings["input_path"] = job.input_path
                         single_settings["batch_enable"] = False  # Disable batch for individual processing
+                        single_settings["output_override"] = None  # Will be set per-item for batch
 
-                        result = runner.run_rife(single_settings, on_progress=lambda x: progress_cb(x) if progress_cb else None)
+                        # Generate unique output path for this batch item to prevent collisions
+                        from shared.path_utils import collision_safe_path, collision_safe_dir
+                        batch_output_folder = Path(batch_output_path) if batch_output_path.exists() else output_dir
+                        batch_output_folder.mkdir(parents=True, exist_ok=True)
+
+                        # Determine desired container extension (best-effort; RIFE runner uses output path suffix)
+                        out_ext = str(single_settings.get("output_format") or "mp4")
+                        if out_ext == "auto":
+                            out_ext = "mp4"
+
+                        if bool(single_settings.get("png_output")):
+                            unique_dir = collision_safe_dir(batch_output_folder / f"{Path(job.input_path).stem}_upscaled")
+                            single_settings["output_override"] = str(unique_dir)
+                        else:
+                            unique_out = collision_safe_path(
+                                batch_output_folder / f"{Path(job.input_path).stem}_upscaled.{out_ext.lstrip('.')}"
+                            )
+                            single_settings["output_override"] = str(unique_out)
+
+                        # Apply universal chunking (Resolution tab) for batch videos, same as single-file runs.
+                        from shared.path_utils import detect_input_type as _detect_type
+                        should_chunk = (_detect_type(job.input_path) == "video") and (auto_chunk or chunk_size_sec > 0)
+                        if should_chunk:
+                            from shared.chunking import chunk_and_process
+
+                            rc, clog, final_output, _chunk_count = chunk_and_process(
+                                runner=runner,
+                                settings=single_settings,
+                                scene_threshold=scene_threshold,
+                                min_scene_len=min_scene_len,
+                                temp_dir=temp_dir,
+                                on_progress=lambda msg: None,
+                                chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
+                                chunk_overlap=0.0 if auto_chunk else chunk_overlap_sec,
+                                per_chunk_cleanup=per_chunk_cleanup,
+                                allow_partial=True,
+                                global_output_dir=str(output_dir),
+                                resume_from_partial=False,
+                                progress_tracker=None,
+                                process_func=None,
+                                model_type="rife",
+                            )
+
+                            if final_output and Path(final_output).exists():
+                                job.output_path = final_output
+                                ok = (rc == 0)
+                                if not ok:
+                                    job.error_message = clog
+
+                                # Apply face restoration if enabled (on final output)
+                                if job.metadata["face_apply"] and Path(job.output_path).exists():
+                                    restored = restore_video(
+                                        job.output_path,
+                                        strength=job.metadata["face_strength"],
+                                        on_progress=None
+                                    )
+                                    if restored:
+                                        job.output_path = restored
+                                return ok
+
+                            job.error_message = clog
+                            return False
+
+                        result = runner.run_rife(single_settings, on_progress=None)
 
                         if result.output_path and Path(result.output_path).exists():
                             job.output_path = result.output_path
-                            job.status = "completed"
+                            ok = True
 
                             # Apply face restoration if enabled
                             if job.metadata["face_apply"] and Path(job.output_path).exists():
                                 restored = restore_video(
                                     job.output_path,
                                     strength=job.metadata["face_strength"],
-                                    on_progress=lambda x: progress_cb(f"Applying face restoration...") if progress_cb else None
+                                    on_progress=None
                                 )
                                 if restored:
                                     job.output_path = restored
                         else:
-                            job.status = "failed"
                             job.error_message = result.log
+                            ok = False
 
-                        job.end_time = time.time()
-
+                        return ok
                     except Exception as e:
-                        job.status = "failed"
                         job.error_message = str(e)
-                        job.end_time = time.time()
-
-                    return job
+                        return False
 
                 # Run batch processing
-                results = batch_processor.process_batch(
+                batch_result = batch_processor.process_batch(
                     jobs=jobs,
-                    process_func=process_single_rife_job,
-                    progress_callback=batch_progress_callback
+                    processor_func=process_single_rife_job,
+                    max_concurrent=1,
                 )
 
                 # Summarize results
-                completed = sum(1 for r in results if r.status == "completed")
-                failed = sum(1 for r in results if r.status == "failed")
+                completed = int(batch_result.completed_files)
+                failed = int(batch_result.failed_files)
 
                 summary_msg = f"RIFE batch complete: {completed}/{len(jobs)} succeeded"
                 if failed > 0:
                     summary_msg += f", {failed} failed"
 
-                yield (f"✅ {summary_msg}", f"Batch processing finished. Check output folder for results.", gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
+                log_lines = [summary_msg]
+                if failed:
+                    for j in [x for x in jobs if x.status == "failed"][:10]:
+                        name = Path(j.input_path).name
+                        err = (j.error_message or "").strip()
+                        err = (err[:180] + "…") if len(err) > 180 else err
+                        log_lines.append(f"❌ {name}: {err}" if err else f"❌ {name}")
+
+                yield (f"✅ {summary_msg}", "\n".join(log_lines), gr.update(value="", visible=False), None, gr.update(value=None), gr.update(value="", visible=False), state)
                 return
 
             # Single file processing with streaming updates
