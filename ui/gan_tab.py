@@ -10,7 +10,7 @@ from typing import Dict, Any
 from shared.services.gan_service import (
     build_gan_callbacks, GAN_ORDER
 )
-from shared.video_comparison_slider import create_video_comparison_html
+from shared.video_comparison_slider import create_video_comparison_html, get_video_comparison_js_on_load
 
 from ui.universal_preset_section import (
     universal_preset_section,
@@ -391,6 +391,7 @@ def gan_tab(
             video_comparison_html = gr.HTML(
                 label="🎬 Video Comparison Slider",
                 value="",
+                js_on_load=get_video_comparison_js_on_load(),
                 visible=False
             )
 

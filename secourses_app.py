@@ -926,7 +926,14 @@ def main():
     # Enable Gradio queue so built-in toast notifications (gr.Info/gr.Warning/gr.Error) can work
     # and to improve streaming/progress consistency.
     demo.queue()
-    demo.launch(inbrowser=True)
+    launch_allowed_paths = sorted(
+        {
+            str(Path(BASE_DIR).resolve()),
+            str(Path(output_dir).resolve()),
+            str(Path(temp_dir).resolve()),
+        }
+    )
+    demo.launch(inbrowser=True, allowed_paths=launch_allowed_paths)
 
 
 if __name__ == "__main__":

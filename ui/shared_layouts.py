@@ -7,6 +7,7 @@ consistency across tabs and prevent code duplication.
 
 import gradio as gr
 from typing import Callable, List, Optional, Tuple, Any
+from shared.video_comparison_slider import get_video_comparison_js_on_load
 
 
 def two_column_layout(
@@ -164,6 +165,7 @@ def create_output_section(
     video_comparison_html = gr.HTML(
         label="🎬 Video Comparison Slider",
         value="",
+        js_on_load=get_video_comparison_js_on_load(),
         visible=False
     )
     

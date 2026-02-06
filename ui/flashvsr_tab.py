@@ -19,6 +19,7 @@ from ui.universal_preset_section import (
 )
 from shared.universal_preset import dict_to_values
 from ui.media_preview import preview_updates
+from shared.video_comparison_slider import get_video_comparison_js_on_load
 
 
 def flashvsr_tab(
@@ -357,6 +358,7 @@ def flashvsr_tab(
             video_comparison_html = gr.HTML(
                 label="🎬 Video Comparison",
                 value="",
+                js_on_load=get_video_comparison_js_on_load(),
                 visible=False
             )
             

@@ -7,9 +7,13 @@ Notes:
   in updated HTML payloads.
 """
 
+import hashlib
+import os
 from pathlib import Path
-from typing import Optional
 import random
+import shutil
+import tempfile
+from typing import Optional
 import urllib.parse
 
 
@@ -36,6 +40,67 @@ def get_video_comparison_js_on_load() -> str:
     observer.observe(element, { childList: true, subtree: true });
     executeInlineScripts();
     """
+
+
+def _get_gradio_upload_root() -> Path:
+    """
+    Resolve Gradio's upload/cache directory used by /gradio_api/file=.
+    """
+    try:
+        from gradio.utils import get_upload_folder
+
+        return Path(get_upload_folder()).resolve()
+    except Exception:
+        fallback = os.environ.get("GRADIO_TEMP_DIR") or str(
+            (Path(tempfile.gettempdir()) / "gradio").resolve()
+        )
+        return Path(fallback).resolve()
+
+
+def _ensure_gradio_servable_file(file_path: str) -> str:
+    """
+    Ensure a media file can be served by Gradio's file route.
+
+    Gradio 6 blocks arbitrary absolute paths in custom HTML unless they are in
+    allowed paths or in its upload/cache directory. We stage external files into
+    the upload folder so `/gradio_api/file=...` works reliably.
+    """
+    src = Path(file_path).resolve()
+    if not src.exists():
+        return str(src)
+
+    upload_root = _get_gradio_upload_root()
+    try:
+        src.relative_to(upload_root)
+        return str(src)
+    except ValueError:
+        pass
+
+    try:
+        stat = src.stat()
+        cache_key = f"{src.as_posix()}|{stat.st_size}|{stat.st_mtime_ns}"
+        cache_dir = upload_root / hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached_file = cache_dir / src.name
+
+        if not cached_file.exists() or cached_file.stat().st_size != stat.st_size:
+            try:
+                if cached_file.exists():
+                    cached_file.unlink()
+                # Prefer hard-linking to avoid duplicating large video files.
+                os.link(src, cached_file)
+            except Exception:
+                temp_name = (
+                    f"{src.name}.{os.getpid()}.{random.randint(1000, 9999)}.tmp"
+                )
+                temp_file = cache_dir / temp_name
+                shutil.copy2(src, temp_file)
+                os.replace(temp_file, cached_file)
+
+        return str(cached_file)
+    except Exception:
+        # Fallback to original path; launch(allowed_paths=...) may still permit it.
+        return str(src)
 
 
 def create_video_comparison_html(
@@ -67,10 +132,16 @@ def create_video_comparison_html(
 
     original_path = str(Path(original_video).resolve())
     upscaled_path = str(Path(upscaled_video).resolve())
+    original_served_path = _ensure_gradio_servable_file(original_path)
+    upscaled_served_path = _ensure_gradio_servable_file(upscaled_path)
 
     # Gradio 6.x file route.
-    original_path_encoded = urllib.parse.quote(original_path.replace("\\", "/"), safe=":/")
-    upscaled_path_encoded = urllib.parse.quote(upscaled_path.replace("\\", "/"), safe=":/")
+    original_path_encoded = urllib.parse.quote(
+        original_served_path.replace("\\", "/"), safe=":/"
+    )
+    upscaled_path_encoded = urllib.parse.quote(
+        upscaled_served_path.replace("\\", "/"), safe=":/"
+    )
     original_url = f"/gradio_api/file={original_path_encoded}"
     upscaled_url = f"/gradio_api/file={upscaled_path_encoded}"
 
@@ -155,6 +226,7 @@ def create_video_comparison_html(
         let ready1 = false;
         let ready2 = false;
         let syncTimer = null;
+        let readyWatchdog = null;
 
         const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -291,6 +363,10 @@ def create_video_comparison_html(
             if (which === 2) ready2 = true;
             renderTime();
             if (ready1 && ready2) {{
+                if (readyWatchdog) {{
+                    window.clearTimeout(readyWatchdog);
+                    readyWatchdog = null;
+                }}
                 if (loadingEl) loadingEl.style.display = "none";
                 syncTo(0);
             }}
@@ -304,6 +380,8 @@ def create_video_comparison_html(
         video2.addEventListener("loadedmetadata", () => markReady(2), {{ once: true }});
         video1.addEventListener("canplay", () => {{ if (!ready1) markReady(1); }}, {{ once: true }});
         video2.addEventListener("canplay", () => {{ if (!ready2) markReady(2); }}, {{ once: true }});
+        video1.addEventListener("loadeddata", () => {{ if (!ready1) markReady(1); }}, {{ once: true }});
+        video2.addEventListener("loadeddata", () => {{ if (!ready2) markReady(2); }}, {{ once: true }});
 
         video1.addEventListener("error", () => {{
             if (!loadingEl) return;
@@ -315,6 +393,21 @@ def create_video_comparison_html(
             loadingEl.innerHTML = "Error loading upscaled video";
             loadingEl.style.color = "#ff6b6b";
         }});
+
+        // If metadata is already available (cached browser state), mark ready now.
+        if (video1.readyState >= 1) markReady(1);
+        if (video2.readyState >= 1) markReady(2);
+
+        readyWatchdog = window.setTimeout(() => {{
+            if (ready1 && ready2) return;
+            if (!loadingEl) return;
+            const missing = [];
+            if (!ready1) missing.push("original");
+            if (!ready2) missing.push("upscaled");
+            loadingEl.style.display = "block";
+            loadingEl.innerHTML = `Still loading ${{missing.join(" and ")}} video...`;
+            loadingEl.style.color = "#ffb347";
+        }}, 5000);
 
         wrapper.addEventListener("pointerdown", (e) => {{
             isDragging = true;
