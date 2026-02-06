@@ -4,6 +4,7 @@ Handles all SeedVR2 processing logic, presets, and callbacks
 """
 
 import html
+import re
 import shutil
 import queue
 import subprocess
@@ -1205,7 +1206,16 @@ def _process_single_file(
             scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
             min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
             settings["frame_accurate_split"] = bool(seed_controls.get("frame_accurate_split", True))
-            
+
+            # Forward per-chunk SeedVR2 CLI progress (e.g. "Upscaling batch 6/13")
+            # so the Gradio UI can show intra-chunk percentages.
+            def _seedvr2_chunk_process(chunk_settings: Dict[str, Any], on_progress=None) -> RunResult:
+                return runner.run_seedvr2(
+                    chunk_settings,
+                    on_progress=(lambda x: progress_cb(x) if progress_cb else None),
+                    preview_only=False,
+                )
+
             rc, clog, final_out, chunk_count = chunk_and_process(
                 runner,
                 settings,
@@ -1220,7 +1230,7 @@ def _process_single_file(
                 allow_partial=True,
                 global_output_dir=str(output_dir),
                 progress_tracker=chunk_progress_callback,
-                process_func=None,  # Use default model_type routing
+                process_func=_seedvr2_chunk_process,
                 model_type="seedvr2",  # Explicitly specify SeedVR2 processing
             )
 
@@ -3105,12 +3115,51 @@ def build_seedvr2_callbacks(
             last_ui_update_time = 0
             ui_update_throttle = 0.25
             accumulated_messages = []
-            
+            active_stage_name = ""
+            active_stage_batch_current = 0
+            active_stage_batch_total = 0
+            active_stage_percent = 0.0
+            active_stage_chunk_idx = 1
+
+            ansi_escape_re = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
+            chunk_progress_re = re.compile(
+                r"(processing|completed)\s+chunk\s+(\d+)\s*/\s*(\d+)",
+                re.IGNORECASE,
+            )
+            stage_batch_re = re.compile(
+                r"\b(?P<stage>upscaling|decoding|encoding)\s+batch\s+(?P<current>\d+)\s*/\s*(?P<total>\d+)\b",
+                re.IGNORECASE,
+            )
+
+            def _normalize_stage(stage_raw: str) -> Tuple[str, str]:
+                stage_key = str(stage_raw or "").strip().lower()
+                if stage_key.startswith("decod"):
+                    return "decoding", "VAE Decoding"
+                if stage_key.startswith("encod"):
+                    return "encoding", "VAE Encoding"
+                if stage_key.startswith("upscal"):
+                    return "upscaling", "Upscaling"
+                return stage_key, (str(stage_raw).title() if stage_raw else "Processing")
+
+            def _chunk_fraction_from_stage(stage_key: str, batch_fraction: float) -> float:
+                batch_fraction = max(0.0, min(1.0, float(batch_fraction)))
+                if stage_key == "encoding":
+                    return 0.25 * batch_fraction
+                if stage_key == "upscaling":
+                    return 0.25 + 0.5 * batch_fraction
+                if stage_key == "decoding":
+                    return 0.75 + 0.25 * batch_fraction
+                return batch_fraction
+
             while proc_thread.is_alive() or not progress_queue.empty():
                 try:
                     update_type, data = progress_queue.get(timeout=0.1)
                     current_time = time.time()                    if update_type == "progress":
-                        message = str(data or "").strip()
+                        raw_message = str(data or "").strip()
+                        if not raw_message:
+                            continue
+
+                        message = ansi_escape_re.sub("", raw_message).strip()
                         if not message:
                             continue
 
@@ -3118,33 +3167,71 @@ def build_seedvr2_callbacks(
                         if len(accumulated_messages) > 200:
                             accumulated_messages = accumulated_messages[-200:]
 
-                        import re
-
-                        chunk_match = re.search(r"(processing|completed)\s+chunk\s+(\d+)\s*/\s*(\d+)", message, re.IGNORECASE)
-                        pct_match = re.search(r"(\d+(?:\.\d+)?)\s*%", message)
+                        message_lc = message.lower()
+                        chunk_match = chunk_progress_re.search(message)
+                        stage_match = stage_batch_re.search(message)
+                        pct_match = re.search(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*%", message)
                         pct_value = float(pct_match.group(1)) if pct_match else None
-
                         if chunk_match:
                             phase = str(chunk_match.group(1) or "").lower()
                             chunk_idx = int(chunk_match.group(2))
                             total_chunks_estimate = max(1, int(chunk_match.group(3)))
-                            active_chunk_idx = chunk_idx
+                            active_chunk_idx = max(1, chunk_idx)
+                            if phase == "processing" and active_stage_chunk_idx != active_chunk_idx:
+                                active_stage_name = ""
+                                active_stage_batch_current = 0
+                                active_stage_batch_total = 0
+                                active_stage_percent = 0.0
                             if phase == "completed":
                                 completed_chunk_count = max(completed_chunk_count, chunk_idx)
+                                if active_stage_chunk_idx <= chunk_idx:
+                                    active_stage_name = ""
+                                    active_stage_batch_current = 0
+                                    active_stage_batch_total = 0
+                                    active_stage_percent = 0.0
                             if pct_value is not None:
                                 last_progress_value = max(last_progress_value, min(0.999, pct_value / 100.0))
                             elif phase == "completed":
                                 last_progress_value = max(last_progress_value, completed_chunk_count / max(1, total_chunks_estimate))
                             else:
                                 last_progress_value = max(last_progress_value, max(0.0, (chunk_idx - 1) / max(1, total_chunks_estimate)))
-                        else:
-                            nm_match = re.search(r"(\d+)\s*/\s*(\d+)", message)
-                            if nm_match:
-                                current = int(nm_match.group(1))
-                                total = max(1, int(nm_match.group(2)))
-                                total_chunks_estimate = max(total_chunks_estimate, total)
-                                last_progress_value = max(last_progress_value, min(0.999, current / total))
-                            elif pct_value is not None:
+                        if stage_match:
+                            stage_key, stage_label = _normalize_stage(stage_match.group("stage"))
+                            batch_current = int(stage_match.group("current"))
+                            batch_total = max(1, int(stage_match.group("total")))
+                            batch_fraction = max(0.0, min(1.0, float(batch_current) / float(batch_total)))
+
+                            if active_chunk_idx <= 0:
+                                active_chunk_idx = max(1, completed_chunk_count + 1)
+                            if total_chunks_estimate < active_chunk_idx:
+                                total_chunks_estimate = active_chunk_idx
+
+                            active_stage_name = stage_label
+                            active_stage_batch_current = batch_current
+                            active_stage_batch_total = batch_total
+                            active_stage_percent = batch_fraction
+                            active_stage_chunk_idx = active_chunk_idx
+
+                            chunk_fraction = _chunk_fraction_from_stage(stage_key, batch_fraction)
+                            if total_chunks_estimate > 1:
+                                overall_fraction = (completed_chunk_count + chunk_fraction) / max(1, total_chunks_estimate)
+                            else:
+                                overall_fraction = chunk_fraction
+                            last_progress_value = max(last_progress_value, min(0.999, overall_fraction))
+                        elif not chunk_match:
+                            ratio_match = re.search(r"\b(\d+)\s*/\s*(\d+)\b", message)
+                            if ratio_match and any(tok in message_lc for tok in ("chunk", "frame", "step", "batch")):
+                                current = int(ratio_match.group(1))
+                                total = max(1, int(ratio_match.group(2)))
+                                if "chunk" in message_lc:
+                                    total_chunks_estimate = max(total_chunks_estimate, total)
+                                if total_chunks_estimate > 1 and "chunk" in message_lc:
+                                    last_progress_value = max(last_progress_value, min(0.999, current / total))
+                                elif total_chunks_estimate <= 1:
+                                    last_progress_value = max(last_progress_value, min(0.999, current / total))
+                            elif pct_value is not None and any(
+                                tok in message_lc for tok in ("progress", "processing chunk", "completed chunk", "done")
+                            ):
                                 last_progress_value = max(last_progress_value, min(0.999, pct_value / 100.0))
 
                         if progress:
@@ -3200,11 +3287,23 @@ def build_seedvr2_callbacks(
                         if chunk_video_paths and chunk_video_paths[0]:
                             chunk_preview_update = gr.update(value=chunk_video_paths[0], visible=True)
 
+                        stage_summary_short = ""
+                        stage_summary_line = ""
+                        if active_stage_name and active_stage_batch_total > 0:
+                            stage_pct = int(round(max(0.0, min(1.0, active_stage_percent)) * 100.0))
+                            stage_chunk = active_stage_chunk_idx if active_stage_chunk_idx > 0 else max(1, active_chunk_idx or 1)
+                            stage_summary_short = f"Chunk {stage_chunk} {active_stage_name} {stage_pct}%"
+                            stage_summary_line = (
+                                f"{stage_summary_short} "
+                                f"(batch {active_stage_batch_current}/{active_stage_batch_total})"
+                            )
+
                         is_key_event = (
-                            "processing chunk" in message.lower()
-                            or "completed chunk" in message.lower()
-                            or "error" in message.lower()
-                            or "failed" in message.lower()
+                            "processing chunk" in message_lc
+                            or "completed chunk" in message_lc
+                            or "error" in message_lc
+                            or "failed" in message_lc
+                            or bool(stage_match)
                         )
                         if (current_time - last_ui_update_time) < ui_update_throttle and not is_key_event:
                             continue
@@ -3217,21 +3316,43 @@ def build_seedvr2_callbacks(
                                 f"Processing... {completed_shown}/{total_chunks_estimate} chunks completed "
                                 f"({percent_done}%)"
                             )
-                            indicator_title = (
-                                f"Processing... ({completed_shown}/{total_chunks_estimate} chunks completed, "
-                                f"{percent_done}% done)"
-                            )
+                            if stage_summary_short:
+                                status_text = f"{status_text} | {stage_summary_short}"
+                                indicator_title = (
+                                    f"Processing... ({completed_shown}/{total_chunks_estimate} chunks completed, "
+                                    f"{percent_done}% done, {stage_summary_short})"
+                                )
+                            else:
+                                indicator_title = (
+                                    f"Processing... ({completed_shown}/{total_chunks_estimate} chunks completed, "
+                                    f"{percent_done}% done)"
+                                )
                         else:
-                            status_text = f"Processing... {percent_done}%"
-                            indicator_title = f"Processing... ({percent_done}% done)"
+                            if stage_summary_short:
+                                status_text = f"Processing... {stage_summary_short} (overall {percent_done}%)"
+                                indicator_title = f"Processing... ({stage_summary_short}, overall {percent_done}% done)"
+                            else:
+                                status_text = f"Processing... {percent_done}%"
+                                indicator_title = f"Processing... ({percent_done}% done)"
 
-                        chunk_status_text = (
-                            f"Chunks completed: {completed_shown}/{total_chunks_estimate}\n"
-                            f"Current chunk: {current_shown}/{total_chunks_estimate}\n"
-                            f"Latest: {message}"
-                            if total_chunks_estimate > 1
-                            else f"Latest: {message}"
-                        )
+                        if total_chunks_estimate > 1:
+                            chunk_status_lines = [
+                                f"Chunks completed: {completed_shown}/{total_chunks_estimate}",
+                                f"Current chunk: {current_shown}/{total_chunks_estimate}",
+                            ]
+                        else:
+                            chunk_status_lines = [f"Chunk {current_shown}/{max(1, total_chunks_estimate)}"]
+                        if stage_summary_line:
+                            chunk_status_lines.append(stage_summary_line)
+                        chunk_status_lines.append(f"Latest: {message}")
+                        chunk_status_text = "\n".join(chunk_status_lines)
+
+                        chunk_progress_lines: List[str] = []
+                        if stage_summary_line:
+                            chunk_progress_lines.append(stage_summary_line)
+                        tail_count = 11 if stage_summary_line else 12
+                        chunk_progress_lines.extend(accumulated_messages[-tail_count:])
+                        chunk_progress_text = "\n".join(chunk_progress_lines)
 
                         yield (
                             status_text,
@@ -3241,7 +3362,7 @@ def build_seedvr2_callbacks(
                             gr.update(value=None, visible=False),
                             chunk_status_text,
                             "",
-                            "\n".join(accumulated_messages[-12:]),
+                            chunk_progress_text,
                             gr.update(value="", visible=False),
                             gr.update(value=None, visible=False),
                             gr.update(value="", visible=False),
