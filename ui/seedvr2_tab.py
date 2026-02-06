@@ -671,7 +671,7 @@ def seedvr2_tab(
 
                     pre_downscale_then_upscale = gr.Checkbox(
                         label=" Pre-downscale then upscale (when capped)",
-                        value=bool(merged_defaults.get("pre_downscale_then_upscale", False)),
+                        value=bool(merged_defaults.get("pre_downscale_then_upscale", True)),
                         info="If max edge would reduce effective scale, downscale input first so the model still runs at the full Upscale x.",
                         scale=1,
                     )
@@ -1053,8 +1053,25 @@ def seedvr2_tab(
             "</div></div>"
         )
 
-    def cache_path_value(val, state):
+    def cache_path_value(val, scale_x, max_res_val, pre_down, state):
         """Cache input path and refresh sizing info panel."""
+        try:
+            state["seed_controls"]["upscale_factor_val"] = float(scale_x) if scale_x is not None else float(
+                state.get("seed_controls", {}).get("upscale_factor_val", 4.0) or 4.0
+            )
+        except Exception:
+            pass
+        try:
+            max_i = int(max_res_val) if max_res_val is not None else int(
+                state.get("seed_controls", {}).get("max_resolution_val", 0) or 0
+            )
+            state["seed_controls"]["max_resolution_val"] = max_i
+            if max_i > 0:
+                state["seed_controls"]["enable_max_target"] = True
+        except Exception:
+            pass
+        state["seed_controls"]["ratio_downscale"] = bool(pre_down)
+
         state["seed_controls"]["last_input_path"] = val if val else ""
         if val and str(val).strip():
             # Show an immediate "working" banner so large files don't feel frozen.
@@ -1078,8 +1095,25 @@ def seedvr2_tab(
         yield gr.update(value="", visible=False), state, gr.update(value="", visible=False)
         return
 
-    def cache_upload(val, state):
+    def cache_upload(val, scale_x, max_res_val, pre_down, state):
         """Cache uploaded file path and refresh sizing info panel."""
+        try:
+            state["seed_controls"]["upscale_factor_val"] = float(scale_x) if scale_x is not None else float(
+                state.get("seed_controls", {}).get("upscale_factor_val", 4.0) or 4.0
+            )
+        except Exception:
+            pass
+        try:
+            max_i = int(max_res_val) if max_res_val is not None else int(
+                state.get("seed_controls", {}).get("max_resolution_val", 0) or 0
+            )
+            state["seed_controls"]["max_resolution_val"] = max_i
+            if max_i > 0:
+                state["seed_controls"]["enable_max_target"] = True
+        except Exception:
+            pass
+        state["seed_controls"]["ratio_downscale"] = bool(pre_down)
+
         state["seed_controls"]["last_input_path"] = val if val else ""
         if val:
             # Show an immediate "working" banner so large files don't feel frozen.
@@ -1107,13 +1141,13 @@ def seedvr2_tab(
     # Wire up input events with resolution auto-calculation
     input_file.upload(
         fn=cache_upload,
-        inputs=[input_file, shared_state],
+        inputs=[input_file, upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
         outputs=[input_path, input_cache_msg, shared_state, auto_res_msg]
     )
 
     input_path.change(
         fn=cache_path_value,
-        inputs=[input_path, shared_state],
+        inputs=[input_path, upscale_factor, max_resolution, pre_downscale_then_upscale, shared_state],
         outputs=[input_cache_msg, shared_state, auto_res_msg]
     )
     
@@ -1137,6 +1171,20 @@ def seedvr2_tab(
         # vNext UX: a non-zero max_resolution means "cap enabled". Ensure the legacy flag can't block it.
         if max_i and max_i > 0:
             state["seed_controls"]["enable_max_target"] = True
+
+        # Also mirror into per-model cache for consistency when model-specific settings are used.
+        try:
+            model_name = state.get("seed_controls", {}).get("current_model")
+            if model_name:
+                cache_root = state["seed_controls"].setdefault("resolution_cache", {})
+                model_cache = cache_root.setdefault(model_name, {})
+                model_cache["upscale_factor_val"] = scale_f
+                model_cache["max_resolution_val"] = max_i
+                model_cache["ratio_downscale"] = bool(pre_down)
+                if max_i and max_i > 0:
+                    model_cache["enable_max_target"] = True
+        except Exception:
+            pass
 
         input_path_val = state.get("seed_controls", {}).get("last_input_path", "")
         if input_path_val:

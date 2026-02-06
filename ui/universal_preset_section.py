@@ -462,7 +462,7 @@ def sync_tab_to_shared_state(
             seed_controls["chunk_overlap_sec"] = 0.0
         else:
             seed_controls["chunk_overlap_sec"] = float(tab_dict.get("chunk_overlap", 0.0) or 0.0)
-        seed_controls["ratio_downscale"] = bool(tab_dict.get("ratio_downscale_then_upscale", False))
+        seed_controls["ratio_downscale"] = bool(tab_dict.get("ratio_downscale_then_upscale", True))
         seed_controls["per_chunk_cleanup"] = bool(tab_dict.get("per_chunk_cleanup", False))
         seed_controls["scene_threshold"] = float(tab_dict.get("scene_threshold", 27.0) or 27.0)
         seed_controls["min_scene_len"] = float(tab_dict.get("min_scene_len", 1.0) or 1.0)

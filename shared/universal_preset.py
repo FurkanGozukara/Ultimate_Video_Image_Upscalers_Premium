@@ -117,7 +117,7 @@ def get_all_defaults(base_dir: Path = None, models_list: List[str] = None) -> Di
             # vNext sizing
             "upscale_factor": 4.0,
             "max_resolution": 0,
-            "pre_downscale_then_upscale": False,
+            "pre_downscale_then_upscale": True,
         })
     
     # RIFE
@@ -352,7 +352,7 @@ def update_shared_state_from_preset(
     seed_controls["frame_accurate_split"] = bool(res_settings.get("frame_accurate_split", True))
     seed_controls["chunk_size_sec"] = res_settings.get("chunk_size", 0)
     seed_controls["chunk_overlap_sec"] = 0.0 if auto_chunk else float(res_settings.get("chunk_overlap", 0.0) or 0.0)
-    seed_controls["ratio_downscale"] = res_settings.get("ratio_downscale_then_upscale", False)
+    seed_controls["ratio_downscale"] = res_settings.get("ratio_downscale_then_upscale", True)
     seed_controls["enable_max_target"] = res_settings.get("enable_max_target", True)
     seed_controls["auto_resolution"] = res_settings.get("auto_resolution", True)
     seed_controls["per_chunk_cleanup"] = res_settings.get("per_chunk_cleanup", False)

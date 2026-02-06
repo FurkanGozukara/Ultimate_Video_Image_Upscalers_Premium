@@ -344,6 +344,104 @@ def main():
       50% { opacity: 1.0; }
       100% { opacity: 0.55; }
     }
+
+    /* SeedVR2 sizing and chunk analysis card */
+    .resolution-info .resolution-stats-shell {
+      border: 1px solid rgba(99, 102, 241, 0.26);
+      background: linear-gradient(135deg, rgba(15, 23, 42, 0.32), rgba(30, 64, 175, 0.10));
+      border-radius: 14px;
+      padding: 12px;
+      margin: 4px 0;
+    }
+    .resolution-info .resolution-stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .resolution-info .resolution-stats-col {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 0;
+    }
+    .resolution-info .resolution-stat-card {
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: rgba(15, 23, 42, 0.36);
+      border-radius: 12px;
+      padding: 10px 12px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+    .resolution-info .resolution-stat-card-title {
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      opacity: 0.9;
+      margin-bottom: 8px;
+      color: #c7d2fe;
+    }
+    .resolution-info .resolution-stat-row {
+      display: grid;
+      grid-template-columns: minmax(130px, 42%) minmax(0, 1fr);
+      gap: 10px;
+      align-items: baseline;
+      border-top: 1px dashed rgba(148, 163, 184, 0.18);
+      padding: 7px 0;
+    }
+    .resolution-info .resolution-stat-row:first-of-type {
+      border-top: none;
+      padding-top: 2px;
+    }
+    .resolution-info .resolution-stat-key {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.2px;
+      opacity: 0.75;
+    }
+    .resolution-info .resolution-stat-val {
+      font-size: 14px;
+      font-weight: 650;
+      word-break: break-word;
+      line-height: 1.35;
+    }
+    .resolution-info .resolution-stat-val.is-up {
+      color: #4ade80;
+      font-weight: 800;
+    }
+    .resolution-info .resolution-stat-val.is-down {
+      color: #fb7185;
+      font-weight: 800;
+    }
+    .resolution-info .resolution-stat-val.is-neutral {
+      color: #f8fafc;
+    }
+    .resolution-info .resolution-notes {
+      margin-top: 10px;
+      border-top: 1px solid rgba(148, 163, 184, 0.22);
+      padding-top: 9px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .resolution-info .resolution-note-item {
+      background: rgba(59, 130, 246, 0.14);
+      border: 1px solid rgba(59, 130, 246, 0.28);
+      border-radius: 9999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      line-height: 1.3;
+      max-width: 100%;
+      word-break: break-word;
+    }
+    @media (max-width: 1100px) {
+      .resolution-info .resolution-stats-grid {
+        grid-template-columns: 1fr;
+      }
+      .resolution-info .resolution-stat-row {
+        grid-template-columns: minmax(110px, 40%) minmax(0, 1fr);
+      }
+    }
     """
 
     # =========================================================================
@@ -467,7 +565,7 @@ def main():
                 "frame_accurate_split": bool(startup_res_settings.get("frame_accurate_split", True)),
                 "chunk_size_sec": startup_res_settings.get("chunk_size", 0),
                 "chunk_overlap_sec": startup_chunk_overlap_sec,
-                "ratio_downscale": startup_res_settings.get("ratio_downscale_then_upscale", False),
+                "ratio_downscale": startup_res_settings.get("ratio_downscale_then_upscale", True),
                 "enable_max_target": startup_res_settings.get("enable_max_target", True),
                 "auto_resolution": startup_res_settings.get("auto_resolution", True),
                 "per_chunk_cleanup": startup_res_settings.get("per_chunk_cleanup", False),

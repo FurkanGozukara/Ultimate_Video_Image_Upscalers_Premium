@@ -3,6 +3,7 @@ SeedVR2 Service Module - Complete Rewrite
 Handles all SeedVR2 processing logic, presets, and callbacks
 """
 
+import html
 import shutil
 import queue
 import subprocess
@@ -28,6 +29,7 @@ from shared.path_utils import (
     ffmpeg_set_fps,
     get_media_dimensions,
     get_media_duration_seconds,
+    get_media_fps,
     detect_input_type,
 )
 from shared.resolution_calculator import estimate_seedvr2_upscale_plan_from_dims
@@ -196,7 +198,7 @@ def seedvr2_defaults(model_name: Optional[str] = None, base_dir: Optional[Path] 
         "upscale_factor": 4.0,
         # NEW (vNext): when max edge would clamp the requested upscale, optionally downscale the input first,
         # then upscale with the full factor to reach the capped target (useful for fixed-scale models).
-        "pre_downscale_then_upscale": False,
+        "pre_downscale_then_upscale": True,
         "batch_size": default_batch_size,  # Apply model-specific default
         "uniform_batch_size": False,
         "seed": 42,
@@ -598,7 +600,7 @@ def _enforce_seedvr2_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any], s
                 pass
         # Repurposed global flag: "pre-downscale then upscale when capped"
         if "ratio_downscale" in seed_controls:
-            cfg["pre_downscale_then_upscale"] = bool(seed_controls.get("ratio_downscale", False))
+            cfg["pre_downscale_then_upscale"] = bool(seed_controls.get("ratio_downscale", True))
         # PySceneDetect chunking now ONLY controlled by Resolution tab
         # No more chunk_enable - chunking triggers automatically when chunk_size_sec > 0
         if "chunk_overlap_sec" in seed_controls:
@@ -942,7 +944,7 @@ def _process_single_file(
                 max_edge = 0
 
             scale_x = float(settings.get("upscale_factor") or seed_controls.get("upscale_factor_val") or 4.0)
-            pre_down = bool(settings.get("pre_downscale_then_upscale") or seed_controls.get("ratio_downscale", False))
+            pre_down = bool(settings.get("pre_downscale_then_upscale") or seed_controls.get("ratio_downscale", True))
 
             dims = get_media_dimensions(settings["input_path"])
             if dims:
@@ -969,7 +971,7 @@ def _process_single_file(
 
                     if progress_cb:
                         progress_cb(
-                            f" Preprocessing input: {w}{h}  {plan.preprocess_width}{plan.preprocess_height} ({plan.preprocess_scale:.3f})\n"
+                            f" Preprocessing input: {w}x{h} -> {plan.preprocess_width}x{plan.preprocess_height} (x{plan.preprocess_scale:.3f})\n"
                         )
 
                     pre_out: Optional[Path] = None
@@ -1766,8 +1768,151 @@ def build_seedvr2_callbacks(
         except Exception as e:
             return f"Error getting model status: {str(e)}"
 
+    def _format_int(value: Any) -> str:
+        """Format integer with separators for UI display."""
+        try:
+            return f"{int(value):,}"
+        except Exception:
+            return "n/a"
+
+    def _probe_video_frame_count(video_path: str) -> Tuple[Optional[int], str]:
+        """
+        Return total frame count for a video.
+
+        Returns:
+            (frame_count, source) where source is one of:
+            - "exact": ffprobe decoded frame count (`nb_read_frames`)
+            - "metadata": stream metadata (`nb_frames`)
+            - "estimated": duration * fps fallback
+            - "unknown": unavailable
+        """
+        def _parse_positive_int(raw_text: str) -> Optional[int]:
+            raw = str(raw_text or "").strip()
+            if not raw:
+                return None
+            for line in raw.splitlines():
+                token = line.strip()
+                if token.isdigit():
+                    val = int(token)
+                    if val > 0:
+                        return val
+            return None
+
+        # 1) Exact frame count (can be slower but most accurate).
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=nb_read_frames",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(video_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if proc.returncode == 0:
+                val = _parse_positive_int(proc.stdout)
+                if val is not None:
+                    return val, "exact"
+        except Exception:
+            pass
+
+        # 2) Stream metadata frame count (fast when present).
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=nb_frames",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(video_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode == 0:
+                val = _parse_positive_int(proc.stdout)
+                if val is not None:
+                    return val, "metadata"
+        except Exception:
+            pass
+
+        # 3) Fallback estimate.
+        try:
+            dur = get_media_duration_seconds(str(video_path))
+            fps = get_media_fps(str(video_path))
+            if dur and dur > 0 and fps and fps > 0:
+                return max(1, int(round(float(dur) * float(fps)))), "estimated"
+        except Exception:
+            pass
+
+        return None, "unknown"
+
+    def _calculate_scene_frame_stats(scenes: List[Tuple[float, float]], fps: Optional[float]) -> Dict[str, Any]:
+        """
+        Convert scene time ranges to frame-count stats using frame-accurate boundaries.
+        Mirrors the frame alignment logic used by chunk splitting.
+        """
+        if not scenes:
+            return {}
+
+        try:
+            fps_val = float(fps or 0.0)
+        except Exception:
+            fps_val = 0.0
+
+        if fps_val <= 0:
+            return {"scene_count": len(scenes)}
+
+        import math
+
+        frame_counts: List[int] = []
+        for start_sec, end_sec in scenes:
+            try:
+                start_f = float(start_sec)
+                end_f = float(end_sec)
+            except Exception:
+                continue
+
+            if end_f <= start_f:
+                continue
+
+            start_frame = int(math.floor(start_f * fps_val + 1e-9))
+            end_frame = int(math.ceil(end_f * fps_val - 1e-9))
+            if end_frame <= start_frame:
+                end_frame = start_frame + 1
+
+            frame_counts.append(max(1, end_frame - start_frame))
+
+        if not frame_counts:
+            return {"scene_count": len(scenes)}
+
+        avg_frames = float(sum(frame_counts)) / float(len(frame_counts))
+        return {
+            "scene_count": len(frame_counts),
+            "chunk_min_frames": int(min(frame_counts)),
+            "chunk_avg_frames": float(round(avg_frames, 1)),
+            "chunk_max_frames": int(max(frame_counts)),
+        }
+
     def _auto_res_from_input(input_path: str, state: Dict[str, Any]):
         """Compute dynamic sizing info for the new Upscale-x feature."""
+        state = state or {"seed_controls": {}}
+        state.setdefault("seed_controls", {})
         seed_controls = state.get("seed_controls", {})
         model_name = seed_controls.get("current_model") or defaults.get("dit_model")
         model_cache = seed_controls.get("resolution_cache", {}).get(model_name, {})
@@ -1787,9 +1932,15 @@ def build_seedvr2_callbacks(
         input_short = min(w, h)
         input_long = max(w, h)
 
-        # Pull settings from shared cache (Resolution tab or SeedVR2 tab)
-        enable_max = model_cache.get("enable_max_target", seed_controls.get("enable_max_target", True))
-        max_edge = int(model_cache.get("max_resolution_val") or seed_controls.get("max_resolution_val") or 0)
+        # Pull settings with explicit precedence:
+        # 1) live seed_controls (SeedVR2/Resolution tab current UI state),
+        # 2) per-model cache fallback,
+        # 3) service defaults.
+        enable_max = bool(seed_controls.get("enable_max_target", model_cache.get("enable_max_target", True)))
+        max_edge_raw = seed_controls.get("max_resolution_val")
+        if max_edge_raw is None:
+            max_edge_raw = model_cache.get("max_resolution_val", defaults.get("max_resolution", 0))
+        max_edge = int(max_edge_raw or 0)
         # vNext UX: non-zero max_edge means the cap is enabled.
         # Do NOT let the legacy enable_max_target flag silently disable a user-provided max_edge.
         if max_edge > 0:
@@ -1797,8 +1948,12 @@ def build_seedvr2_callbacks(
         if not enable_max:
             max_edge = 0
 
-        scale_x = float(model_cache.get("upscale_factor_val") or seed_controls.get("upscale_factor_val") or defaults.get("upscale_factor", 4.0) or 4.0)
-        pre_down = bool(model_cache.get("ratio_downscale") or seed_controls.get("ratio_downscale", False))
+        scale_raw = seed_controls.get("upscale_factor_val")
+        if scale_raw is None:
+            scale_raw = model_cache.get("upscale_factor_val", defaults.get("upscale_factor", 4.0))
+        scale_x = float(scale_raw or defaults.get("upscale_factor", 4.0) or 4.0)
+
+        pre_down = bool(seed_controls.get("ratio_downscale", model_cache.get("ratio_downscale", True)))
 
         plan = estimate_seedvr2_upscale_plan_from_dims(
             w,
@@ -1813,142 +1968,382 @@ def build_seedvr2_callbacks(
         out_short = min(out_w, out_h)
         out_long = max(out_w, out_h)
 
-        list_items: List[str] = []
-        list_items.append(f" <strong>Input:</strong> {w}{h} (short side: {input_short}px)")
+        input_kind = detect_input_type(str(p))
+        is_video_input = input_kind == "video"
+        input_format = (p.suffix or "").replace(".", "").upper() if p.suffix else "N/A"
 
-        target_line = f" <strong>Target setting:</strong> upscale {scale_x:g}x"
+        def _safe(text: Any) -> str:
+            return html.escape(str(text))
+
+        def _stat_row(label: str, value: str, value_class: str = "") -> str:
+            cls = "resolution-stat-val"
+            if value_class:
+                cls = f"{cls} {value_class}"
+            return (
+                '<div class="resolution-stat-row">'
+                f'<div class="resolution-stat-key">{_safe(label)}</div>'
+                f'<div class="{_safe(cls)}">{_safe(value)}</div>'
+                "</div>"
+            )
+
+        def _build_card(title: str, rows: List[str]) -> str:
+            body = "".join(rows) if rows else _stat_row("Info", "n/a")
+            return (
+                '<div class="resolution-stat-card">'
+                f'<div class="resolution-stat-card-title">{_safe(title)}</div>'
+                f"{body}"
+                "</div>"
+            )
+
+        sizing_rows: List[str] = []
+        runtime_rows: List[str] = []
+        input_rows: List[str] = []
+        chunk_rows: List[str] = []
+        notes: List[str] = []
+
+        sizing_rows.append(_stat_row("Input", f"{w}x{h} (short side: {input_short}px)"))
+
+        target_line = f"upscale {scale_x:g}x"
         if max_edge and max_edge > 0:
             target_line += f", max edge {max_edge}px"
         if max_edge and max_edge > 0 and plan.cap_ratio < 0.999999:
             target_line += f" (effective {plan.effective_scale:.2f}x)"
-        list_items.append(target_line)
+        sizing_rows.append(_stat_row("Target Setting", target_line))
+
+        # When max-edge cap reduces effective scale, show the cap-aware base size
+        # that corresponds to the requested upscale factor.
+        if scale_x > 0 and max_edge and max_edge > 0 and plan.cap_ratio < 0.999999:
+            if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
+                cap_base_line = (
+                    f"actual preprocess: downscaled to {plan.preprocess_width}x{plan.preprocess_height}px, "
+                    f"then upscaled {scale_x:g}x"
+                )
+            else:
+                cap_base_w = max(1, int(round(float(out_w) / float(scale_x))))
+                cap_base_h = max(1, int(round(float(out_h) / float(scale_x))))
+                cap_base_line = (
+                    f"equivalent cap-aware base: ~{cap_base_w}x{cap_base_h}px for {scale_x:g}x "
+                    f"(no actual preprocess unless checkbox is ON)"
+                )
+            sizing_rows.append(_stat_row("Cap-Aware Upscale Path", cap_base_line))
 
         if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
-            list_items.append(
-                f" <strong>Preprocess:</strong> {w}{h}  {plan.preprocess_width}{plan.preprocess_height} ({plan.preprocess_scale:.3f})"
+            sizing_rows.append(
+                _stat_row(
+                    "Preprocess",
+                    f"{w}x{h} -> {plan.preprocess_width}x{plan.preprocess_height} (x{plan.preprocess_scale:.3f})",
+                )
             )
 
         resized_short = min(plan.resize_width, plan.resize_height)
-        list_items.append(f" <strong>Resize result:</strong> {plan.resize_width}{plan.resize_height} (short side: {resized_short}px)")
+        sizing_rows.append(
+            _stat_row(
+                "Resize Result",
+                f"{plan.resize_width}x{plan.resize_height} (short side: {resized_short}px)",
+            )
+        )
 
         if plan.padded_width and plan.padded_height:
-            list_items.append(f" <strong>Padded for model (16):</strong> {plan.padded_width}{plan.padded_height} (padding trimmed after processing)")
+            sizing_rows.append(
+                _stat_row(
+                    "Padded for Model (16)",
+                    f"{plan.padded_width}x{plan.padded_height} (trimmed after processing)",
+                )
+            )
 
-        list_items.append(f" <strong>Final saved output:</strong> {out_w}{out_h} (trimmed to even numbers)")
+        sizing_rows.append(
+            _stat_row(
+                "Final Saved Output",
+                f"{int(out_w)}x{int(out_h)} (trimmed to even numbers)",
+            )
+        )
 
+        mode_class = "is-neutral"
         if out_short < input_short:
-            list_items.append(f" <strong>Mode:</strong> Downscaling (output short side {out_short}px < input short side {input_short}px)")
-            list_items.append(" <strong>Tip:</strong> Set Upscale x  1.0 and/or increase Max Resolution to avoid downscaling.")
+            mode_line = f"Downscaling vs original input ({out_short}px < {input_short}px short side)"
+            mode_class = "is-down"
+            notes.append("Tip: set Upscale x >= 1.0 and/or increase Max Resolution to avoid downscaling.")
         elif out_short > input_short:
-            list_items.append(f" <strong>Mode:</strong> Upscaling (output short side {out_short}px > input short side {input_short}px)")
+            mode_line = f"Upscaling vs original input ({out_short}px > {input_short}px short side)"
+            mode_class = "is-up"
         else:
-            list_items.append(" <strong>Mode:</strong> Keep size (output short side matches input short side)")
+            mode_line = "Keep size vs original input (output short side matches input)"
+
+        runtime_rows.append(_stat_row("Mode", mode_line, value_class=mode_class))
 
         if max_edge and max_edge > 0 and plan.cap_ratio < 0.999999:
+            if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
+                runtime_rows.append(
+                    _stat_row(
+                        "Actual Preprocess",
+                        f"ON: input is pre-downscaled to {plan.preprocess_width}x{plan.preprocess_height} before model pass",
+                    )
+                )
+            else:
+                runtime_rows.append(
+                    _stat_row(
+                        "Actual Preprocess",
+                        "OFF: input is NOT pre-downscaled; cap is enforced during CLI resize via --max_resolution",
+                    )
+                )
+
             requested_long = int(round(input_long * scale_x))
-            list_items.append(f" <strong>Max edge clamp:</strong> requested long side ~{requested_long}px  capped to ~{out_long}px (ratio {plan.cap_ratio:.3f})")
+            if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
+                clamp_line = (
+                    f"original request ~{requested_long}px long side; preprocess+upscale path saved ~{out_long}px "
+                    f"(ratio {plan.cap_ratio:.3f})"
+                )
+            else:
+                clamp_line = (
+                    f"requested ~{requested_long}px long side (from original input), "
+                    f"capped to ~{out_long}px (ratio {plan.cap_ratio:.3f})"
+                )
+            runtime_rows.append(
+                _stat_row(
+                    "Max Edge Clamp",
+                    clamp_line,
+                )
+            )
 
         if plan.seedvr2_resolution is not None:
-            list_items.append(f" <strong>SeedVR2 CLI:</strong> --resolution {plan.seedvr2_resolution} --max_resolution {max_edge if max_edge > 0 else 0}")
+            cli_line = f"--resolution {plan.seedvr2_resolution} --max_resolution {max_edge if max_edge > 0 else 0}"
+            if max_edge and max_edge > 0 and plan.cap_ratio < 0.999999:
+                if plan.pre_downscale_then_upscale and plan.preprocess_scale < 0.999999:
+                    cli_line += " (preprocess path)"
+                else:
+                    cli_line += " (direct cap path, no preprocess)"
+            runtime_rows.append(
+                _stat_row(
+                    "SeedVR2 CLI",
+                    cli_line,
+                )
+            )
 
         if plan.notes:
-            for n in plan.notes:
-                list_items.append(f" {n}")
+            notes.extend([str(n) for n in plan.notes if str(n).strip()])
 
-        # Chunking info (Resolution tab global settings)
-        if detect_input_type(str(p)) == "video":
+        input_rows.append(_stat_row("Input Detected", f"{input_kind.upper()}"))
+        input_rows.append(_stat_row("Format", input_format))
+
+        duration_sec: Optional[float] = None
+        fps_val: Optional[float] = None
+        total_frames: Optional[int] = None
+        frame_count_source = "unknown"
+
+        if is_video_input:
+            cache_key = str(p)
+            try:
+                stat = p.stat()
+                cache_key = f"{str(p)}|{int(stat.st_size)}|{int(stat.st_mtime_ns)}"
+            except Exception:
+                pass
+
+            frame_cache = seed_controls.get("last_video_probe") or {}
+            if frame_cache.get("cache_key") == cache_key:
+                duration_sec = frame_cache.get("duration_sec")
+                fps_val = frame_cache.get("fps")
+                total_frames = frame_cache.get("total_frames")
+                frame_count_source = str(frame_cache.get("frame_count_source") or "unknown")
+            else:
+                duration_sec = get_media_duration_seconds(str(p))
+                fps_val = get_media_fps(str(p))
+                total_frames, frame_count_source = _probe_video_frame_count(str(p))
+                seed_controls["last_video_probe"] = {
+                    "cache_key": cache_key,
+                    "duration_sec": duration_sec,
+                    "fps": fps_val,
+                    "total_frames": total_frames,
+                    "frame_count_source": frame_count_source,
+                }
+                state["seed_controls"] = seed_controls
+
+            if duration_sec and duration_sec > 0:
+                input_rows.append(_stat_row("Duration", f"{float(duration_sec):.2f}s"))
+            else:
+                input_rows.append(_stat_row("Duration", "Unavailable"))
+
+            if fps_val and fps_val > 0:
+                input_rows.append(_stat_row("FPS", f"{float(fps_val):.3f}".rstrip("0").rstrip(".")))
+            else:
+                input_rows.append(_stat_row("FPS", "Unavailable"))
+
+            if total_frames is not None and int(total_frames) > 0:
+                frame_src_label = {
+                    "exact": "exact",
+                    "metadata": "stream metadata",
+                    "estimated": "estimated",
+                }.get(frame_count_source, "unknown")
+                input_rows.append(_stat_row("Total Frames", f"{_format_int(total_frames)} ({frame_src_label})"))
+            else:
+                input_rows.append(_stat_row("Total Frames", "Unavailable"))
+
+            # Chunking info (Resolution tab global settings)
             auto_chunk = bool(seed_controls.get("auto_chunk", True))
             if auto_chunk:
                 scene_threshold = float(seed_controls.get("scene_threshold", 27.0) or 27.0)
                 min_scene_len = float(seed_controls.get("min_scene_len", 1.0) or 1.0)
                 auto_detect_scenes = bool(seed_controls.get("auto_detect_scenes", True))
                 scan = seed_controls.get("last_scene_scan") or {}
+
                 try:
                     scan_path = normalize_path(scan.get("input_path")) if scan.get("input_path") else None
                 except Exception:
                     scan_path = scan.get("input_path")
 
                 cached_valid = (
-                    scan_path
+                    bool(scan_path)
                     and scan_path == str(p)
                     and abs(float(scan.get("scene_threshold", scene_threshold)) - scene_threshold) < 1e-6
                     and abs(float(scan.get("min_scene_len", min_scene_len)) - min_scene_len) < 1e-6
                     and "scene_count" in scan
                 )
-                cached_scene_count = int(scan.get("scene_count", 0) or 0) if cached_valid else 0
 
-                if cached_valid and cached_scene_count > 0:
-                    list_items.append(
-                        " <strong>Auto Chunk:</strong> detected "
-                        f"<strong>{cached_scene_count}</strong> scenes "
-                        f"(threshold={scene_threshold:g}, min_len={min_scene_len:g}s)."
-                    )
-                elif cached_valid and cached_scene_count <= 0:
-                    err = str(scan.get("error") or "").strip()
-                    if err:
-                        list_items.append(f" <strong>Auto Chunk:</strong> scene scan failed (cached). ({err})")
-                    else:
-                        list_items.append(" <strong>Auto Chunk:</strong> scene scan failed (cached).")
-                else:
-                    if auto_detect_scenes:
-                        try:
-                            from shared.chunking import detect_scenes
+                scene_count = int(scan.get("scene_count", 0) or 0) if cached_valid else 0
+                chunk_min_frames = scan.get("chunk_min_frames") if cached_valid else None
+                chunk_avg_frames = scan.get("chunk_avg_frames") if cached_valid else None
+                chunk_max_frames = scan.get("chunk_max_frames") if cached_valid else None
+                scene_scan_error = str(scan.get("error") or "").strip() if cached_valid else ""
 
-                            scenes = detect_scenes(
-                                str(p),
-                                threshold=scene_threshold,
-                                min_scene_len=min_scene_len,
-                            )
-                            scene_count = int(len(scenes or []))
-                            seed_controls["last_scene_scan"] = {
-                                "input_path": str(p),
-                                "scene_threshold": scene_threshold,
-                                "min_scene_len": min_scene_len,
-                                "scene_count": scene_count,
-                                "success": scene_count > 0,
-                            }
-                            state["seed_controls"] = seed_controls
+                missing_scene_stats = (
+                    scene_count > 0
+                    and (chunk_min_frames is None or chunk_avg_frames is None or chunk_max_frames is None)
+                )
 
-                            if scene_count > 0:
-                                list_items.append(
-                                    " <strong>Auto Chunk:</strong> detected "
-                                    f"<strong>{scene_count}</strong> scenes "
-                                    f"(threshold={scene_threshold:g}, min_len={min_scene_len:g}s)."
-                                )
-                            else:
-                                list_items.append(" <strong>Auto Chunk:</strong> scene scan failed.")
-                        except Exception as e:
-                            seed_controls["last_scene_scan"] = {
-                                "input_path": str(p),
-                                "scene_threshold": scene_threshold,
-                                "min_scene_len": min_scene_len,
-                                "scene_count": 0,
-                                "success": False,
-                                "error": str(e),
-                            }
-                            state["seed_controls"] = seed_controls
-                            list_items.append(f" <strong>Auto Chunk:</strong> scene scan failed. ({str(e)})")
-                    else:
-                        list_items.append(
-                            " <strong>Auto Chunk:</strong> auto scene detection is disabled. "
-                            "Enable it in the Resolution tab or use the <strong> Estimate Chunks</strong> button."
+                if (not cached_valid or missing_scene_stats) and auto_detect_scenes:
+                    try:
+                        from shared.chunking import detect_scenes
+
+                        scenes = detect_scenes(
+                            str(p),
+                            threshold=scene_threshold,
+                            min_scene_len=min_scene_len,
                         )
+                        scene_stats = _calculate_scene_frame_stats(scenes or [], fps_val)
+                        scene_count = int(scene_stats.get("scene_count", len(scenes or [])) or 0)
+                        chunk_min_frames = scene_stats.get("chunk_min_frames")
+                        chunk_avg_frames = scene_stats.get("chunk_avg_frames")
+                        chunk_max_frames = scene_stats.get("chunk_max_frames")
+                        scene_scan_error = ""
+
+                        scan_payload: Dict[str, Any] = {
+                            "input_path": str(p),
+                            "scene_threshold": scene_threshold,
+                            "min_scene_len": min_scene_len,
+                            "scene_count": scene_count,
+                            "success": scene_count > 0,
+                        }
+                        if chunk_min_frames is not None:
+                            scan_payload["chunk_min_frames"] = int(chunk_min_frames)
+                        if chunk_avg_frames is not None:
+                            scan_payload["chunk_avg_frames"] = float(chunk_avg_frames)
+                        if chunk_max_frames is not None:
+                            scan_payload["chunk_max_frames"] = int(chunk_max_frames)
+                        if total_frames is not None:
+                            scan_payload["total_frames"] = int(total_frames)
+
+                        seed_controls["last_scene_scan"] = scan_payload
+                        state["seed_controls"] = seed_controls
+                    except Exception as e:
+                        scene_count = 0
+                        chunk_min_frames = None
+                        chunk_avg_frames = None
+                        chunk_max_frames = None
+                        scene_scan_error = str(e)
+                        seed_controls["last_scene_scan"] = {
+                            "input_path": str(p),
+                            "scene_threshold": scene_threshold,
+                            "min_scene_len": min_scene_len,
+                            "scene_count": 0,
+                            "success": False,
+                            "error": str(e),
+                        }
+                        state["seed_controls"] = seed_controls
+
+                chunk_rows.append(_stat_row("Chunk Mode", "Auto Scene Detect (PySceneDetect)"))
+                chunk_rows.append(
+                    _stat_row(
+                        "Scene Settings",
+                        f"threshold={scene_threshold:g}, min_len={min_scene_len:g}s, overlap=0",
+                    )
+                )
+
+                if scene_count > 0:
+                    chunk_rows.append(_stat_row("Detected Scenes", _format_int(scene_count)))
+                    has_all_chunk_stats = True
+                    if chunk_min_frames is not None:
+                        chunk_rows.append(_stat_row("Min Frames / Chunk", _format_int(chunk_min_frames)))
+                    else:
+                        has_all_chunk_stats = False
+                    if chunk_avg_frames is not None:
+                        chunk_rows.append(_stat_row("Avg Frames / Chunk", f"{float(chunk_avg_frames):.1f}"))
+                    else:
+                        has_all_chunk_stats = False
+                    if chunk_max_frames is not None:
+                        chunk_rows.append(_stat_row("Max Frames / Chunk", _format_int(chunk_max_frames)))
+                    else:
+                        has_all_chunk_stats = False
+                    if not has_all_chunk_stats:
+                        chunk_rows.append(_stat_row("Chunk Frame Stats", "Unavailable for current cached scan."))
+                elif scene_scan_error:
+                    chunk_rows.append(_stat_row("Auto Chunk Status", f"Scene scan failed: {scene_scan_error}"))
+                elif not auto_detect_scenes:
+                    chunk_rows.append(_stat_row("Auto Chunk Status", "Auto scene detection is disabled in Resolution tab."))
+                else:
+                    chunk_rows.append(_stat_row("Auto Chunk Status", "Scene scan failed."))
             else:
                 chunk_size = float(model_cache.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0) or 0))
                 chunk_overlap = float(model_cache.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0) or 0))
-                if chunk_size > 0 and chunk_overlap < chunk_size:
-                    dur = get_media_duration_seconds(str(p))
-                    if dur:
-                        import math
 
-                        est_chunks = math.ceil(dur / max(0.001, chunk_size - chunk_overlap))
-                        list_items.append(
-                            f" <strong>Chunk estimate:</strong> ~{est_chunks} chunks for {dur:.1f}s "
-                            f"(size {chunk_size:g}s, overlap {chunk_overlap:g}s)."
+                chunk_rows.append(_stat_row("Chunk Mode", "Static"))
+                if chunk_size <= 0:
+                    chunk_rows.append(_stat_row("Chunking", "Disabled (chunk size = 0)"))
+                elif chunk_overlap >= chunk_size:
+                    chunk_rows.append(_stat_row("Chunking", "Invalid settings: overlap must be smaller than chunk size."))
+                else:
+                    import math
+
+                    if duration_sec and duration_sec > 0:
+                        est_chunks = math.ceil(float(duration_sec) / max(0.001, chunk_size - chunk_overlap))
+                        chunk_rows.append(_stat_row("Estimated Chunks", f"~{_format_int(est_chunks)}"))
+                        chunk_rows.append(
+                            _stat_row(
+                                "Window",
+                                f"{chunk_size:g}s with {chunk_overlap:g}s overlap",
+                            )
                         )
+                    if fps_val and fps_val > 0:
+                        est_chunk_frames = max(1, int(round(float(chunk_size) * float(fps_val))))
+                        chunk_rows.append(_stat_row("Approx Frames / Chunk", _format_int(est_chunk_frames)))
+        else:
+            chunk_rows.append(_stat_row("Chunk Stats", "Chunk frame stats are available for video inputs."))
 
-        html = '<div style="font-size: 1.15em; line-height: 1.8;">' + "<br>".join(list_items) + "</div>"
-        return gr.update(value=html, visible=True), state
+        left_cards = [
+            _build_card("Sizing", sizing_rows),
+            _build_card("Runtime", runtime_rows),
+        ]
+        right_cards = [
+            _build_card("Input Stats", input_rows),
+            _build_card("Chunk Stats", chunk_rows),
+        ]
+
+        notes_html = ""
+        if notes:
+            note_items = "".join(
+                f'<div class="resolution-note-item">{_safe(note)}</div>' for note in notes if str(note).strip()
+            )
+            if note_items:
+                notes_html = f'<div class="resolution-notes">{note_items}</div>'
+
+        html_block = (
+            '<div class="resolution-stats-shell">'
+            '<div class="resolution-stats-grid">'
+            f'<div class="resolution-stats-col">{"".join(left_cards)}</div>'
+            f'<div class="resolution-stats-col">{"".join(right_cards)}</div>'
+            "</div>"
+            f"{notes_html}"
+            "</div>"
+        )
+        return gr.update(value=html_block, visible=True), state
 
     def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False, state: Dict[str, Any] = None, progress=None):
         """Main processing action with streaming support and gr.Progress integration."""
@@ -1992,6 +2387,25 @@ def build_seedvr2_callbacks(
 
             # Parse settings
             settings = dict(zip(SEEDVR2_ORDER, list(args)))
+
+            # Sync live SeedVR2 sizing controls into shared cache before guardrails.
+            # Prevents stale global/per-model cached values from overriding current UI controls.
+            try:
+                seed_controls["upscale_factor_val"] = float(settings.get("upscale_factor") or seed_controls.get("upscale_factor_val") or 4.0)
+            except Exception:
+                pass
+            try:
+                live_max_res = int(settings.get("max_resolution") or 0)
+                seed_controls["max_resolution_val"] = live_max_res
+                if live_max_res > 0:
+                    seed_controls["enable_max_target"] = True
+            except Exception:
+                pass
+            seed_controls["ratio_downscale"] = bool(
+                settings.get("pre_downscale_then_upscale", seed_controls.get("ratio_downscale", True))
+            )
+            state["seed_controls"] = seed_controls
+
             settings = _enforce_seedvr2_guardrails(settings, defaults, state=state)  # Pass state for resolution tab integration
 
             # Validate inputs - now extracts original filename from upload
@@ -2002,6 +2416,15 @@ def build_seedvr2_callbacks(
                 settings["batch_input_path"]
             )
             settings["input_path"] = normalize_path(input_path)
+            # Ensure original filename is always available for output naming.
+            # Gradio may provide only a path string (without FileData.orig_name).
+            if original_filename and str(original_filename).strip():
+                original_filename = Path(str(original_filename).strip()).name
+            elif settings["input_path"]:
+                original_filename = Path(settings["input_path"]).name
+            else:
+                original_filename = None
+
             settings["_original_filename"] = original_filename  # Store for output naming
             state["seed_controls"]["last_input_path"] = settings["input_path"]
             state["seed_controls"]["_original_filename"] = original_filename
@@ -2132,7 +2555,7 @@ def build_seedvr2_callbacks(
                 except Exception:
                     pass
             if "ratio_downscale" in seed_controls:
-                settings["pre_downscale_then_upscale"] = bool(seed_controls.get("ratio_downscale", False))
+                settings["pre_downscale_then_upscale"] = bool(seed_controls.get("ratio_downscale", True))
 
             enable_max_target = seed_controls.get("enable_max_target", True)
             chunk_size_sec = float(seed_controls.get("chunk_size_sec", 0) or 0)

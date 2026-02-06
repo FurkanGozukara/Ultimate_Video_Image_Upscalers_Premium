@@ -34,7 +34,7 @@ def resolution_defaults(models: List[str]) -> Dict[str, Any]:
         "chunk_size": 0,
         # Default 0 because overlap is not meaningful for scene cuts (auto chunking).
         "chunk_overlap": 0.0,
-        "ratio_downscale_then_upscale": False,
+        "ratio_downscale_then_upscale": True,
         "per_chunk_cleanup": False,
         "scene_threshold": 27.0,  # PySceneDetect sensitivity
         "min_scene_len": 1.0,  # Minimum scene length in seconds
@@ -400,7 +400,7 @@ def build_resolution_callbacks(
                     max_edge = 0
 
                 plan = estimate_seedvr2_upscale_plan_from_dims(
-                    w, h, upscale_factor=scale_x, max_edge=max_edge, pre_downscale_then_upscale=bool(seed_controls.get("ratio_downscale", False))
+                    w, h, upscale_factor=scale_x, max_edge=max_edge, pre_downscale_then_upscale=bool(seed_controls.get("ratio_downscale", True))
                 ) if w and h else None
 
                 result = ResolutionResult(
@@ -458,7 +458,7 @@ def build_resolution_callbacks(
         # Overlap is only meaningful for static chunking; force 0 when auto chunking is enabled.
         seed_controls["chunk_overlap_sec"] = 0.0 if seed_controls["auto_chunk"] else float(settings_dict.get("chunk_overlap", 0) or 0)
         # Repurposed: now controls "pre-downscale then upscale when clamped"
-        seed_controls["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", False)
+        seed_controls["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", True)
         seed_controls["per_chunk_cleanup"] = settings_dict.get("per_chunk_cleanup", False)
         seed_controls["scene_threshold"] = settings_dict.get("scene_threshold", 27.0)
         seed_controls["min_scene_len"] = settings_dict.get("min_scene_len", 1.0)
@@ -477,7 +477,7 @@ def build_resolution_callbacks(
             model_cache["frame_accurate_split"] = bool(settings_dict.get("frame_accurate_split", True))
             model_cache["chunk_size_sec"] = float(settings_dict.get("chunk_size", 0) or 0)
             model_cache["chunk_overlap_sec"] = 0.0 if model_cache["auto_chunk"] else float(settings_dict.get("chunk_overlap", 0) or 0)
-            model_cache["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", False)
+            model_cache["ratio_downscale"] = settings_dict.get("ratio_downscale_then_upscale", True)
             model_cache["per_chunk_cleanup"] = settings_dict.get("per_chunk_cleanup", False)
             model_cache["scene_threshold"] = float(settings_dict.get("scene_threshold", 27.0))
             model_cache["min_scene_len"] = float(settings_dict.get("min_scene_len", 1.0))

@@ -18,6 +18,7 @@ venv/
 Real-ESRGAN/
 open-model-database
 .mp4
+*.png
 .jpg
 *.jpg
 *.mp4
