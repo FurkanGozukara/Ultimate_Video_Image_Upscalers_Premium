@@ -282,6 +282,28 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                     info="Highlight differences between original and upscaled"
                 )
 
+            gr.Markdown("---")
+            gr.Markdown("#### Comparison Video Generation")
+            gr.Markdown("*Generate a side-by-side or stacked video comparing original input vs upscaled output*")
+
+            with gr.Group():
+                generate_comparison_video = gr.Checkbox(
+                    label="Generate Input vs Output Comparison Video",
+                    value=values[21] if len(values) > 21 else True,
+                    info="Create a merged video showing original input (scaled up) beside the upscaled output. "
+                         "The original input is scaled to match the output resolution before merging."
+                )
+
+                comparison_video_layout = gr.Dropdown(
+                    label="Comparison Video Layout",
+                    choices=["auto", "horizontal", "vertical"],
+                    value=values[22] if len(values) > 22 else "auto",
+                    info="Layout for comparison video:\n"
+                         "• auto: Choose based on aspect ratio (landscape → horizontal, portrait → vertical)\n"
+                         "• horizontal: Side-by-side (left: original, right: upscaled)\n"
+                         "• vertical: Stacked (top: original, bottom: upscaled)"
+                )
+
         # Metadata & Logging
         with gr.TabItem("📊 Metadata & Logging"):
             gr.Markdown("#### Output Metadata & Telemetry")
@@ -289,27 +311,27 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
             with gr.Group():
                 save_metadata = gr.Checkbox(
                     label="Save Processing Metadata",
-                    value=values[21],
+                    value=values[23] if len(values) > 23 else True,
                     info="Embed processing info in output files"
                 )
 
                 metadata_format = gr.Dropdown(
                     label="Metadata Format",
                     choices=["json", "xml", "exif", "none"],
-                    value=values[22],
+                    value=values[24] if len(values) > 24 else "json",
                     info="Format for embedded metadata"
                 )
 
                 telemetry_enabled = gr.Checkbox(
                     label="Enable Run Telemetry",
-                    value=values[23],
+                    value=values[25] if len(values) > 25 else True,
                     info="Log processing stats for troubleshooting"
                 )
 
                 log_level = gr.Dropdown(
                     label="Log Verbosity",
                     choices=["error", "warning", "info", "debug"],
-                    value=values[24],
+                    value=values[26] if len(values) > 26 else "info",
                     info="Detail level for processing logs"
                 )
 
@@ -373,13 +395,14 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
 
         cache_status = gr.Markdown("")
 
-    # Collect inputs for callbacks
+    # Collect inputs for callbacks (must match OUTPUT_ORDER exactly)
     inputs_list = [
         output_format, png_sequence_enabled, png_padding, png_keep_basename,
         fps_override, video_codec, video_quality, video_preset, two_pass_encoding,
         skip_first_frames, load_cap, pixel_format, audio_codec, audio_bitrate,
         temporal_padding, frame_interpolation, comparison_mode, pin_reference,
         fullscreen_enabled, comparison_zoom, show_difference,
+        generate_comparison_video, comparison_video_layout,  # NEW: Comparison video options
         save_metadata, metadata_format, telemetry_enabled, log_level
     ]
 
@@ -473,7 +496,26 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
         show_progress="hidden",
         trigger_mode="always_last",
     )
-     
+
+    # Comparison video generation - auto-cache on change
+    generate_comparison_video.change(
+        fn=lambda val, state: service["cache_generate_comparison_video"](val, state),
+        inputs=[generate_comparison_video, shared_state],
+        outputs=[cache_status, shared_state],
+        queue=False,
+        show_progress="hidden",
+        trigger_mode="always_last",
+    )
+
+    comparison_video_layout.change(
+        fn=lambda val, state: service["cache_comparison_video_layout"](val, state),
+        inputs=[comparison_video_layout, shared_state],
+        outputs=[cache_status, shared_state],
+        queue=False,
+        show_progress="hidden",
+        trigger_mode="always_last",
+    )
+
     # Codec info updates
     video_codec.change(
         fn=service["update_codec_info"],

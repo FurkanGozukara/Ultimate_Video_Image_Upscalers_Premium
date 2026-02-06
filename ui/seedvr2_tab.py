@@ -13,7 +13,7 @@ from shared.services.seedvr2_service import (
     seedvr2_defaults, SEEDVR2_ORDER, build_seedvr2_callbacks
 )
 from shared.models.seedvr2_meta import get_seedvr2_model_names
-from shared.video_comparison_slider import create_video_comparison_html
+from shared.video_comparison_slider import get_video_comparison_js_on_load
 from shared.ui_validators import validate_batch_size_seedvr2
 from ui.universal_preset_section import (
     universal_preset_section,
@@ -746,6 +746,7 @@ def seedvr2_tab(
             video_comparison_html = gr.HTML(
                 label="Video Comparison Slider",
                 value="",
+                js_on_load=get_video_comparison_js_on_load(),
                 visible=False
             )
 
@@ -756,16 +757,22 @@ def seedvr2_tab(
             
             # Chunk thumbnail gallery - Shows completed chunks as they finish
             with gr.Accordion("Completed Chunks Gallery", open=True):
-                gr.Markdown("*Completed chunks appear here during processing. Click a video to preview.*")
+                gr.Markdown("*Completed chunks appear here during processing. Click a thumbnail to preview the video.*")
                 chunk_gallery = gr.Gallery(
                     label="Completed Chunks",
                     visible=False,
                     columns=4,
                     rows=2,
-                    height="auto",
+                    height=200,
                     object_fit="contain",
-                    buttons=[],
-                    allow_preview=True
+                    allow_preview=False  # Disable built-in preview, use our video player instead
+                )
+                # Video player for previewing selected chunk
+                chunk_preview_video = gr.Video(
+                    label="Chunk Preview",
+                    visible=False,
+                    height=360,
+                    autoplay=True
                 )
 
             log_box = gr.Textbox(
@@ -1372,7 +1379,7 @@ def seedvr2_tab(
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
-            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, batch_gallery, shared_state
+            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, chunk_preview_video, batch_gallery, shared_state
         ]
     )
 
@@ -1381,7 +1388,7 @@ def seedvr2_tab(
         inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
-            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, batch_gallery, shared_state
+            chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, chunk_preview_video, batch_gallery, shared_state
         ]
     )
 
@@ -1392,17 +1399,19 @@ def seedvr2_tab(
             return (
                 gr.update(value=" Cancellation not confirmed. Enable 'Confirm cancel' checkbox and click again."),
                 gr.update(value="Cancellation requires confirmation. Please enable the checkbox above."),
+                gr.update(),
+                gr.update(),
                 state
             )
         
         # User confirmed - proceed with cancellation
-        status_upd, log_text = service["cancel_action"]()
-        return status_upd, log_text, state
+        status_upd, log_text, vid_upd, img_upd = service["cancel_action"]()
+        return status_upd, log_text, vid_upd, img_upd, state
     
     cancel_btn.click(
         fn=handle_cancel_with_confirmation,
         inputs=[cancel_confirm, shared_state],
-        outputs=[status_box, log_box, shared_state]
+        outputs=[status_box, log_box, output_video, output_image, shared_state]
     )
 
     # Utility buttons
@@ -1880,6 +1889,28 @@ def seedvr2_tab(
 
     # Note: In Gradio 6.2.0, component.update() is removed
     # Components are initialized with their default values in constructors above
+
+    # Chunk gallery select handler - play video when thumbnail is clicked
+    def on_chunk_gallery_select(evt: gr.SelectData, state):
+        """Play the selected chunk video when user clicks a thumbnail"""
+        try:
+            selected_index = evt.index
+            chunk_video_paths = (state or {}).get("seed_controls", {}).get("chunk_video_paths", [])
+
+            if chunk_video_paths and 0 <= selected_index < len(chunk_video_paths):
+                video_path = chunk_video_paths[selected_index]
+                if video_path and Path(video_path).exists():
+                    return gr.update(value=video_path, visible=True)
+
+            return gr.update(visible=False)
+        except Exception:
+            return gr.update(visible=False)
+
+    chunk_gallery.select(
+        fn=on_chunk_gallery_select,
+        inputs=[shared_state],
+        outputs=[chunk_preview_video]
+    )
 
     return {
         "inputs_list": inputs_list,

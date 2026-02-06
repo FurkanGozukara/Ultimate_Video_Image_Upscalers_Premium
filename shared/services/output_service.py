@@ -33,6 +33,8 @@ def output_defaults(models: List[str]) -> Dict[str, Any]:
         "fullscreen_enabled": True,
         "comparison_zoom": 100,
         "show_difference": False,
+        "generate_comparison_video": True,  # Generate input vs output comparison video
+        "comparison_video_layout": "auto",  # auto, horizontal, or vertical
         "save_metadata": True,
         "metadata_format": "json",
         "telemetry_enabled": True,
@@ -62,6 +64,8 @@ OUTPUT_ORDER: List[str] = [
     "fullscreen_enabled",
     "comparison_zoom",
     "show_difference",
+    "generate_comparison_video",
+    "comparison_video_layout",
     "save_metadata",
     "metadata_format",
     "telemetry_enabled",
@@ -227,6 +231,16 @@ def build_output_callbacks(
         state["seed_controls"]["overwrite_existing_batch_val"] = bool(val)
         return gr.update(value="Batch overwrite preference cached."), state
 
+    def cache_generate_comparison_video(val, state):
+        """Cache preference for generating input vs output comparison video."""
+        state["seed_controls"]["generate_comparison_video_val"] = bool(val)
+        return gr.update(value="Comparison video generation preference cached."), state
+
+    def cache_comparison_video_layout(val, state):
+        """Cache preference for comparison video layout (auto, horizontal, vertical)."""
+        state["seed_controls"]["comparison_video_layout_val"] = val
+        return gr.update(value=f"Comparison video layout set to: {val}"), state
+
     def apply_to_pipeline(*args):
         """Apply all output settings to pipeline at once"""
         state = args[-1]
@@ -249,9 +263,13 @@ def build_output_callbacks(
         # Wire metadata and telemetry settings
         seed_controls["save_metadata_val"] = settings_dict.get("save_metadata", True)
         seed_controls["telemetry_enabled_val"] = settings_dict.get("telemetry_enabled", True)
+        # Wire comparison video generation settings
+        seed_controls["generate_comparison_video_val"] = settings_dict.get("generate_comparison_video", True)
+        seed_controls["comparison_video_layout_val"] = settings_dict.get("comparison_video_layout", "auto")
         state["seed_controls"] = seed_controls
-        
-        status = f"✅ Applied output settings\n- Format: {seed_controls['output_format_val']}\n- Comparison: {seed_controls['comparison_mode_val']}\n- Metadata: {seed_controls['save_metadata_val']}"
+
+        comp_video_status = "enabled" if seed_controls["generate_comparison_video_val"] else "disabled"
+        status = f"Applied output settings\n- Format: {seed_controls['output_format_val']}\n- Comparison: {seed_controls['comparison_mode_val']}\n- Comparison Video: {comp_video_status}\n- Metadata: {seed_controls['save_metadata_val']}"
         return gr.update(value=status), state
 
     def pin_reference_frame(image_path, state):
@@ -309,6 +327,8 @@ def build_output_callbacks(
         "cache_skip": lambda *args: cache_skip(*args[:-1], args[-1]),
         "cache_cap": lambda *args: cache_cap(*args[:-1], args[-1]),
         "cache_overwrite_batch": lambda *args: cache_overwrite_batch(*args[:-1], args[-1]),
+        "cache_generate_comparison_video": lambda *args: cache_generate_comparison_video(*args[:-1], args[-1]),
+        "cache_comparison_video_layout": lambda *args: cache_comparison_video_layout(*args[:-1], args[-1]),
         "apply_to_pipeline": apply_to_pipeline,
         "pin_reference_frame": pin_reference_frame,
         "unpin_reference": unpin_reference,

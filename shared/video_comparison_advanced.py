@@ -544,31 +544,214 @@ def auto_select_comparison_layout(
 ) -> str:
     """
     Automatically select best comparison layout based on video properties.
-    
+
     Returns:
         "slider", "side_by_side", or "stacked"
     """
     from .path_utils import get_media_dimensions
-    
+
     try:
         # Get dimensions
         in_w, in_h = get_media_dimensions(input_video)
         out_w, out_h = get_media_dimensions(output_video)
-        
+
         if not in_w or not in_h or not out_w or not out_h:
             return "slider"  # Default
-        
+
         # If resolutions are very different, use stacked
         if abs(in_w - out_w) > 100 or abs(in_h - out_h) > 100:
             return "stacked"
-        
+
         # If both are high resolution (>1080p), use slider
         if min(in_w, in_h) > 1080 and min(out_w, out_h) > 1080:
             return "slider"
-        
+
         # Otherwise, side-by-side works well
         return "side_by_side"
-        
+
     except Exception:
         return "slider"
+
+
+def create_input_vs_output_comparison_video(
+    original_input_video: str,
+    upscaled_output_video: str,
+    comparison_output: Optional[str] = None,
+    layout: str = "auto",
+    label_input: str = "Original",
+    label_output: str = "Upscaled",
+    on_progress: Optional[callable] = None
+) -> Tuple[bool, str, str]:
+    """
+    Create a comparison video of original input vs upscaled output.
+
+    The original input is scaled UP to match the output resolution,
+    then both are merged horizontally or vertically based on aspect ratio.
+
+    Args:
+        original_input_video: Path to the ORIGINAL input video (before any downscaling)
+        upscaled_output_video: Path to the upscaled output video
+        comparison_output: Output path for comparison video (auto-generated if None)
+        layout: "auto" (choose based on aspect ratio), "horizontal", or "vertical"
+        label_input: Label for the input/original side
+        label_output: Label for the output/upscaled side
+        on_progress: Optional progress callback
+
+    Returns:
+        (success, comparison_video_path, error_message)
+    """
+    from .path_utils import normalize_path, get_media_dimensions
+    from .error_handling import check_ffmpeg_available
+
+    try:
+        if not check_ffmpeg_available():
+            return False, "", "FFmpeg not found in PATH"
+
+        input_path = Path(normalize_path(original_input_video))
+        output_path = Path(normalize_path(upscaled_output_video))
+
+        if not input_path.exists():
+            return False, "", f"Original input not found: {input_path}"
+        if not output_path.exists():
+            return False, "", f"Upscaled output not found: {output_path}"
+
+        # Get dimensions of both videos
+        in_dims = get_media_dimensions(str(input_path))
+        out_dims = get_media_dimensions(str(output_path))
+
+        if not in_dims or not out_dims:
+            return False, "", "Could not determine video dimensions"
+
+        in_w, in_h = in_dims
+        out_w, out_h = out_dims
+
+        # Determine layout based on aspect ratio if auto
+        # Goal: Choose merge direction that produces aspect ratio closest to 16:9 (1.78)
+        # since most monitors are 16:9
+        if layout == "auto":
+            target_ratio = 16.0 / 9.0  # 1.778
+
+            # Calculate resulting aspect ratios for each merge option
+            # Horizontal (side by side): width doubles
+            horizontal_ratio = (2 * out_w) / out_h if out_h > 0 else 2.0
+            # Vertical (stacked): height doubles
+            vertical_ratio = out_w / (2 * out_h) if out_h > 0 else 0.5
+
+            # Choose whichever is closer to 16:9
+            horizontal_distance = abs(horizontal_ratio - target_ratio)
+            vertical_distance = abs(vertical_ratio - target_ratio)
+
+            if horizontal_distance <= vertical_distance:
+                layout = "horizontal"
+            else:
+                layout = "vertical"
+
+        # Generate output path if not specified
+        if comparison_output is None:
+            comparison_output = str(output_path.parent / f"{output_path.stem}_comparison.mp4")
+        else:
+            comparison_output = normalize_path(comparison_output)
+
+        Path(comparison_output).parent.mkdir(parents=True, exist_ok=True)
+
+        if on_progress:
+            on_progress(f"Creating comparison video ({layout} layout)...\n")
+
+        # Build ffmpeg filter complex
+        # 1. Scale original input to match output resolution using lanczos for quality
+        # 2. Add labels to both videos
+        # 3. Merge based on layout
+
+        if layout == "horizontal":
+            # Side by side - each video takes half the final width
+            # Final video will be 2x the width of output video
+            filter_complex = (
+                f"[0:v]scale={out_w}:{out_h}:flags=lanczos,"
+                f"drawtext=text='{label_input}':x=10:y=10:fontsize=32:fontcolor=white:"
+                f"box=1:boxcolor=black@0.6:boxborderw=5[left];"
+                f"[1:v]drawtext=text='{label_output}':x=10:y=10:fontsize=32:fontcolor=white:"
+                f"box=1:boxcolor=black@0.6:boxborderw=5[right];"
+                f"[left][right]hstack=inputs=2[out]"
+            )
+        else:
+            # Stacked (vertical) - each video takes half the final height
+            # Final video will be 2x the height of output video
+            filter_complex = (
+                f"[0:v]scale={out_w}:{out_h}:flags=lanczos,"
+                f"drawtext=text='{label_input}':x=10:y=10:fontsize=32:fontcolor=white:"
+                f"box=1:boxcolor=black@0.6:boxborderw=5[top];"
+                f"[1:v]drawtext=text='{label_output}':x=10:y=10:fontsize=32:fontcolor=white:"
+                f"box=1:boxcolor=black@0.6:boxborderw=5[bottom];"
+                f"[top][bottom]vstack=inputs=2[out]"
+            )
+
+        # Build ffmpeg command
+        cmd = [
+            "ffmpeg",
+            "-y",  # Overwrite output
+            "-i", str(input_path),
+            "-i", str(output_path),
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
+            "-map", "1:a?",  # Use audio from upscaled output if available
+            "-c:v", "libx264",
+            "-crf", "18",
+            "-preset", "medium",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(comparison_output)
+        ]
+
+        if on_progress:
+            on_progress(f"Running ffmpeg for comparison video...\n")
+
+        # Run ffmpeg
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=1200  # 20 minutes timeout for large videos
+        )
+
+        if result.returncode == 0 and Path(comparison_output).exists():
+            if on_progress:
+                on_progress(f"Comparison video created: {comparison_output}\n")
+            return True, comparison_output, ""
+        else:
+            error = result.stderr or result.stdout or "Unknown ffmpeg error"
+            return False, "", f"FFmpeg error: {error[:500]}"
+
+    except subprocess.TimeoutExpired:
+        return False, "", "Comparison video generation timed out (>20 minutes)"
+    except Exception as e:
+        return False, "", f"Error creating comparison video: {str(e)}"
+
+
+def get_smart_comparison_layout(width: int, height: int) -> str:
+    """
+    Determine the best comparison layout based on output dimensions.
+
+    The goal is to produce a comparison video with aspect ratio closest to 16:9
+    since most monitors are 16:9.
+
+    Args:
+        width: Output video width
+        height: Output video height
+
+    Returns:
+        "horizontal" or "vertical" depending on which produces closer to 16:9
+    """
+    target_ratio = 16.0 / 9.0  # 1.778
+
+    # Calculate resulting aspect ratios for each merge option
+    horizontal_ratio = (2 * width) / height if height > 0 else 2.0
+    vertical_ratio = width / (2 * height) if height > 0 else 0.5
+
+    # Choose whichever is closer to 16:9
+    if abs(horizontal_ratio - target_ratio) <= abs(vertical_ratio - target_ratio):
+        return "horizontal"
+    else:
+        return "vertical"
 

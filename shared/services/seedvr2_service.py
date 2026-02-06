@@ -827,6 +827,7 @@ def _process_single_file(
     chunk_summary = "Single pass (no chunking)."
     chunk_progress_msg = ""
     status = "Processing exited unexpectedly"
+    audio_already_replaced = False
 
     # CONSOLE LOGGING: Print startup info so users can see what's happening
     print("\n" + "=" * 70, flush=True)
@@ -1221,10 +1222,19 @@ def _process_single_file(
                 model_type="seedvr2",  # Explicitly specify SeedVR2 processing
             )
 
-            status = "Chunked upscale complete" if rc == 0 else f"Chunked upscale ended early ({rc})"
             output_path = final_out if final_out else None
+            runner_canceled = bool(getattr(runner, "is_canceled", lambda: False)())
+            if rc == 0:
+                status = "Chunked upscale complete"
+            elif output_path and runner_canceled:
+                status = "Cancelled - partial upscale complete"
+            elif output_path:
+                status = f"Chunked upscale produced partial output ({rc})"
+            else:
+                status = f"Chunked upscale ended early ({rc})"
             output_video = output_path if output_path and output_path.lower().endswith(".mp4") else None
             output_image = None
+            audio_already_replaced = bool(output_video)
             local_logs.append(clog)
             
             # Enhanced summary showing both chunking methods if applicable
@@ -1346,52 +1356,59 @@ def _process_single_file(
             except Exception as e:
                 local_logs.append(f"FPS override failed: {str(e)}")
 
-        # Preserve audio (SeedVR2/face-restore pipelines often produce video-only outputs).
-        if output_video and Path(output_video).exists():
+        # Robust audio replacement: copy audio from original input to final output.
+        # This ensures 100% accurate audio from the original source.
+        if (not audio_already_replaced) and output_video and Path(output_video).exists():
             try:
-                from shared.audio_utils import ensure_audio_on_video
+                from shared.audio_utils import replace_audio_from_original
 
                 audio_src = settings.get("_original_input_path_before_preprocess") or settings.get("input_path")
-                if audio_src and Path(audio_src).exists():
-                    audio_codec = str(settings.get("audio_codec") or seed_controls.get("audio_codec_val") or "copy")
-                    audio_bitrate = settings.get("audio_bitrate") or seed_controls.get("audio_bitrate_val") or None
-                    _changed, _final, _err = ensure_audio_on_video(
-                        Path(output_video),
-                        Path(audio_src),
-                        audio_codec=audio_codec,
-                        audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
-                        force_replace=True,
+                if audio_src:
+                    audio_ok, audio_err = replace_audio_from_original(
+                        video_path=Path(output_video),
+                        original_input_path=Path(audio_src),
                         on_progress=(lambda x: progress_cb(x) if progress_cb else None),
                     )
-                    if _err:
-                        local_logs.append(f"Audio mux: {_err}")
-                    if _final and str(_final) != str(output_video):
-                        output_video = str(_final)
+                    if not audio_ok and audio_err:
+                        local_logs.append(f"Audio note: {audio_err}")
             except Exception as e:
-                local_logs.append(f"Audio mux failed: {str(e)}")
+                # Never fail the whole operation due to audio issues
+                local_logs.append(f"Audio replacement skipped: {str(e)}")
 
-        # Generate comparison video if enabled
-        comparison_mode = seed_controls.get("comparison_mode_val", "slider")
-        if comparison_mode in ["side_by_side", "stacked"] and output_video and Path(output_video).exists():
-            from shared.video_comparison_advanced import create_side_by_side_video, create_stacked_video
-            
-            input_video = settings.get("_original_input_path_before_preprocess") or settings["input_path"]
-            if Path(input_video).exists() and Path(input_video).suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']:
+        # Generate comparison video if enabled (new input vs output comparison feature)
+        generate_comparison_video = seed_controls.get("generate_comparison_video_val", True)
+        if generate_comparison_video and output_video and Path(output_video).exists():
+            from shared.video_comparison_advanced import create_input_vs_output_comparison_video
+
+            # Use original input before any downscaling/preprocessing
+            original_input = settings.get("_original_input_path_before_preprocess") or settings["input_path"]
+            video_exts = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
+
+            if Path(original_input).exists() and Path(original_input).suffix.lower() in video_exts:
+                comparison_layout = seed_controls.get("comparison_video_layout_val", "auto")
                 comparison_path = Path(output_video).parent / f"{Path(output_video).stem}_comparison.mp4"
-                
-                if comparison_mode == "side_by_side":
-                    success, comp_path, err = create_side_by_side_video(
-                        input_video, output_video, str(comparison_path)
-                    )
-                else:  # stacked
-                    success, comp_path, err = create_stacked_video(
-                        input_video, output_video, str(comparison_path)
-                    )
-                
+
+                if progress_cb:
+                    progress_cb("Generating input vs output comparison video...\n")
+
+                success, comp_path, err = create_input_vs_output_comparison_video(
+                    original_input_video=str(original_input),
+                    upscaled_output_video=str(output_video),
+                    comparison_output=str(comparison_path),
+                    layout=comparison_layout,
+                    label_input="Original",
+                    label_output="Upscaled",
+                    on_progress=progress_cb
+                )
+
                 if success:
                     local_logs.append(f"Comparison video created: {comp_path}")
+                    if progress_cb:
+                        progress_cb(f"Comparison video saved: {comp_path}\n")
                 else:
-                    local_logs.append(f"Comparison video failed: {err}")
+                    local_logs.append(f"Comparison video generation failed: {err}")
+                    if progress_cb:
+                        progress_cb(f"Comparison video failed: {err}\n")
 
     except Exception as e:
         import traceback
@@ -1581,9 +1598,23 @@ def build_seedvr2_callbacks(
         2) Recently completed batch outputs in outputs root
         3) Legacy temp-folder fallback (backward compatibility)
         """
+        def _cancel_media_updates(path: Optional[str]) -> Tuple[Any, Any]:
+            video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
+            image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+            try:
+                if path and Path(path).is_file():
+                    ext = Path(path).suffix.lower()
+                    if ext in video_exts:
+                        return gr.update(value=path, visible=True), gr.update(value=None, visible=False)
+                    if ext in image_exts:
+                        return gr.update(value=None, visible=False), gr.update(value=path, visible=True)
+            except Exception:
+                pass
+            return gr.update(value=None, visible=False), gr.update(value=None, visible=False)
+
         canceled = runner.cancel()
         if not canceled:
-            return gr.update(value="No active process to cancel"), ""
+            return gr.update(value="No active process to cancel"), "", gr.update(), gr.update()
 
         compiled_output: Optional[str] = None
         merge_method = "none"
@@ -1685,14 +1716,19 @@ def build_seedvr2_callbacks(
                 "latest_file": "Best-effort: Latest temp file copied (no proper merge)",
                 "latest_dir": "Best-effort: Latest temp directory copied (no proper merge)",
             }.get(merge_method, "Unknown merge method")
+            vid_upd, img_upd = _cancel_media_updates(compiled_output)
             return (
                 gr.update(value=f"Cancelled - Partial output saved: {Path(compiled_output).name}\nMerge method: {merge_info}"),
                 f"Partial results saved to: {compiled_output}\n\nMerge method: {merge_info}",
+                vid_upd,
+                img_upd,
             )
 
         return (
             gr.update(value="Cancelled - No partial outputs found"),
             "Processing was cancelled. No recoverable partial outputs were found in output runs or temp fallback.",
+            gr.update(),
+            gr.update(),
         )
 
     def open_outputs_folder_seedvr2(state: Dict[str, Any]):
@@ -1984,6 +2020,7 @@ def build_seedvr2_callbacks(
                     gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
+                    gr.update(visible=False),  # chunk_preview_video
                     gr.update(visible=False),  # batch_gallery
                     state  # shared_state
                 )
@@ -2010,6 +2047,7 @@ def build_seedvr2_callbacks(
                     gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
+                    gr.update(visible=False),  # chunk_preview_video
                     gr.update(visible=False),  # batch_gallery
                     state  # shared_state
                 )
@@ -2030,6 +2068,7 @@ def build_seedvr2_callbacks(
                     gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
+                    gr.update(visible=False),  # chunk_preview_video
                     gr.update(visible=False),  # batch_gallery
                     state  # shared_state
                 )
@@ -2052,6 +2091,7 @@ def build_seedvr2_callbacks(
                     gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
+                    gr.update(visible=False),  # chunk_preview_video
                     gr.update(visible=False),  # batch_gallery
                     state  # shared_state
                 )
@@ -2071,6 +2111,7 @@ def build_seedvr2_callbacks(
                     gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
+                    gr.update(visible=False),  # chunk_preview_video
                     gr.update(visible=False),  # batch_gallery
                     state  # shared_state
                 )
@@ -2172,6 +2213,7 @@ def build_seedvr2_callbacks(
                         gr.update(value=None, visible=False),  # image_slider
                         gr.update(value="", visible=False),  # video_comparison_html
                         gr.update(visible=False),  # chunk_gallery
+                        gr.update(visible=False),  # chunk_preview_video
                         gr.update(visible=False),  # batch_gallery
                         state  # shared_state
                     )
@@ -2205,6 +2247,7 @@ def build_seedvr2_callbacks(
                         gr.update(value=None, visible=False),  # image_slider
                         gr.update(value="", visible=False),  # video_comparison_html
                         gr.update(visible=False),  # chunk_gallery
+                        gr.update(visible=False),  # chunk_preview_video
                         gr.update(visible=False),  # batch_gallery
                         state  # shared_state
                     )
@@ -2254,6 +2297,7 @@ def build_seedvr2_callbacks(
                             gr.update(value=None, visible=False),  # image_slider
                             gr.update(value="", visible=False),  # video_comparison_html
                             gr.update(visible=False),  # chunk_gallery
+                            gr.update(visible=False),  # chunk_preview_video
                             gr.update(visible=False),  # batch_gallery
                             state  # shared_state
                         )
@@ -2274,6 +2318,7 @@ def build_seedvr2_callbacks(
                             gr.update(value=None, visible=False),  # image_slider
                             gr.update(value="", visible=False),  # video_comparison_html
                             gr.update(visible=False),  # chunk_gallery
+                            gr.update(visible=False),  # chunk_preview_video
                             gr.update(visible=False),  # batch_gallery
                             state  # shared_state
                         )
@@ -2296,6 +2341,7 @@ def build_seedvr2_callbacks(
                         gr.update(value=None, visible=False),  # image_slider
                         gr.update(value="", visible=False),  # video_comparison_html
                         gr.update(visible=False),  # chunk_gallery
+                        gr.update(visible=False),  # chunk_preview_video
                         gr.update(visible=False),  # batch_gallery
                         state  # shared_state
                     )
@@ -2544,6 +2590,7 @@ def build_seedvr2_callbacks(
                     gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
+                    gr.update(visible=False),  # chunk_preview_video
                     gr.update(value=batch_outputs[:50], visible=True) if batch_outputs else gr.update(visible=False),  # batch_gallery
                     state  # shared_state
                 )
@@ -2596,6 +2643,7 @@ def build_seedvr2_callbacks(
                 gr.update(value=None, visible=False),  # image_slider
                 gr.update(value="", visible=False),  # video_comparison_html
                 gr.update(visible=False),  # chunk_gallery
+                gr.update(visible=False),  # chunk_preview_video
                 gr.update(visible=False),  # batch_gallery
                 state  # shared_state
             )
@@ -2679,20 +2727,55 @@ def build_seedvr2_callbacks(
                         if progress:
                             progress(last_progress_value, desc=message[:100] if message else "Processing...")
 
+                        # Get chunk video paths and convert to thumbnails for gallery display
+                        # gr.Gallery in Gradio 6.x doesn't display videos well, so we use thumbnails
                         current_chunk_items = (state or {}).get("seed_controls", {}).get("chunk_gallery_items", [])
                         if not current_chunk_items:
                             current_chunk_items = (state or {}).get("seed_controls", {}).get("chunk_thumbnails", [])
+
+                        # Convert video paths to thumbnail images for gallery
+                        # Also store video paths for playback when chunk is selected
+                        gallery_display_items = []
+                        chunk_video_paths = []  # Store original video paths for preview playback
+                        if current_chunk_items:
+                            from shared.frame_utils import extract_video_thumbnail
+                            for idx, item in enumerate(current_chunk_items):
+                                if isinstance(item, str) and Path(item).exists():
+                                    if Path(item).suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.webm'}:
+                                        # Store original video path for preview
+                                        chunk_video_paths.append(item)
+                                        # Generate thumbnail for video
+                                        success, thumb_path, _ = extract_video_thumbnail(item, width=280)
+                                        if success and thumb_path:
+                                            gallery_display_items.append((thumb_path, f"Chunk {idx+1}"))
+                                        else:
+                                            # Fallback: use video path directly (may show as broken)
+                                            gallery_display_items.append((item, f"Chunk {idx+1}"))
+                                    else:
+                                        # Image file - use directly (no video preview)
+                                        gallery_display_items.append((item, f"Chunk {idx+1}"))
+                                        chunk_video_paths.append(None)
+
+                        # Store video paths in state for gallery selection handler
+                        if chunk_video_paths:
+                            state["seed_controls"]["chunk_video_paths"] = chunk_video_paths
+
                         chunk_gallery_update = (
                             gr.update(
-                                value=current_chunk_items,
-                                visible=len(current_chunk_items) > 0,
-                                columns=2,
+                                value=gallery_display_items if gallery_display_items else current_chunk_items,
+                                visible=len(gallery_display_items) > 0 or len(current_chunk_items) > 0,
+                                columns=4,
                                 rows=2,
-                                height=320,
+                                height=200,
                             )
-                            if current_chunk_items
+                            if gallery_display_items or current_chunk_items
                             else gr.update(visible=False)
                         )
+
+                        # Show first video in preview if available
+                        chunk_preview_update = gr.update(visible=False)
+                        if chunk_video_paths and chunk_video_paths[0]:
+                            chunk_preview_update = gr.update(value=chunk_video_paths[0], visible=True)
 
                         is_key_event = (
                             "processing chunk" in message.lower()
@@ -2740,6 +2823,7 @@ def build_seedvr2_callbacks(
                             gr.update(value=None, visible=False),
                             gr.update(value="", visible=False),
                             chunk_gallery_update,
+                            chunk_preview_update,  # chunk preview video
                             gr.update(visible=False),
                             state,
                         )
@@ -2788,6 +2872,7 @@ def build_seedvr2_callbacks(
                     gr.update(value=None, visible=False),  # image_slider
                     gr.update(value="", visible=False),  # video_comparison_html
                     gr.update(visible=False),  # chunk_gallery
+                    gr.update(visible=False),  # chunk_preview_video
                     gr.update(visible=False),  # batch_gallery
                     state  # shared_state
                 )
@@ -2842,20 +2927,31 @@ def build_seedvr2_callbacks(
 
             # Build video comparison HTML for videos
             video_comparison_html_update = gr.update(value="", visible=False)
-            if output_video and Path(output_video).exists():
-                original_path = original_path_for_compare or ""
-                if original_path and Path(original_path).exists():
-                    # Use new video comparison slider
-                    from shared.video_comparison_slider import create_video_comparison_html as create_vid_comp
-                    
-                    video_comp_html = create_vid_comp(
-                        original_video=original_path,
-                        upscaled_video=output_video,
-                        height=600,
-                        slider_position=50.0
-                    )
-                    video_comparison_html_update = gr.update(value=video_comp_html, visible=True)
-                image_slider_update = gr.update(value=None, visible=False)
+            try:
+                if output_video and Path(output_video).exists():
+                    original_path = original_path_for_compare or ""
+                    if original_path and Path(original_path).exists():
+                        # Use new video comparison slider
+                        from shared.video_comparison_slider import create_video_comparison_html as create_vid_comp
+
+                        video_comp_html = create_vid_comp(
+                            original_video=original_path,
+                            upscaled_video=output_video,
+                            height=600,
+                            slider_position=50.0
+                        )
+                        video_comparison_html_update = gr.update(value=video_comp_html, visible=True)
+                        print(f"[DEBUG] Video comparison slider created (original: {original_path})", flush=True)
+                    else:
+                        print(f"[DEBUG] Video comparison skipped - original path missing: {original_path}", flush=True)
+                    # For videos, hide the image slider
+                    image_slider_update = gr.update(value=None, visible=False)
+                else:
+                    print(f"[DEBUG] Video comparison skipped - output_video: {output_video}", flush=True)
+            except Exception as e:
+                import traceback
+                print(f"[ERROR] Video comparison HTML error: {str(e)}", flush=True)
+                print(f"[ERROR] Traceback: {traceback.format_exc()}", flush=True)
             
             # If no HTML comparison, use ImageSlider for images
             if not comparison_html and output_image and not output_video:
@@ -2868,19 +2964,43 @@ def build_seedvr2_callbacks(
 
             state["operation_status"] = "completed" if "complete" in str(status or "").lower() else "ready"
             
-            # Prepare final chunk gallery display
+            # Prepare final chunk gallery display with thumbnail images
+            # gr.Gallery in Gradio 6.x doesn't display videos well, so we convert to thumbnails
             final_chunk_items = (state or {}).get("seed_controls", {}).get("chunk_gallery_items", [])
             if not final_chunk_items:
                 final_chunk_items = (state or {}).get("seed_controls", {}).get("chunk_thumbnails", [])
+
+            # Convert video paths to thumbnail images for gallery
+            final_gallery_display = []
+            if final_chunk_items:
+                from shared.frame_utils import extract_video_thumbnail
+                for idx, item in enumerate(final_chunk_items):
+                    if isinstance(item, str) and Path(item).exists():
+                        if Path(item).suffix.lower() in {'.mp4', '.avi', '.mov', '.mkv', '.webm'}:
+                            # Generate thumbnail for video
+                            success, thumb_path, _ = extract_video_thumbnail(item, width=320)
+                            if success and thumb_path:
+                                final_gallery_display.append((thumb_path, f"Chunk {idx+1}"))
+                            else:
+                                final_gallery_display.append((item, f"Chunk {idx+1}"))
+                        else:
+                            final_gallery_display.append((item, f"Chunk {idx+1}"))
+
             final_chunk_gallery = gr.update(
-                value=final_chunk_items,
-                visible=len(final_chunk_items) > 0,
-                columns=2,
+                value=final_gallery_display if final_gallery_display else final_chunk_items,
+                visible=len(final_gallery_display) > 0 or len(final_chunk_items) > 0,
+                columns=4,
                 rows=2,
-                height=360
-            ) if final_chunk_items else gr.update(visible=False)
+                height=320
+            ) if final_gallery_display or final_chunk_items else gr.update(visible=False)
             
+            # Debug final state before yielding
+            print(f"[DEBUG] Final output_video: {output_video}", flush=True)
+            print(f"[DEBUG] Final output_video exists: {Path(output_video).exists() if output_video else False}", flush=True)
+
             vid_upd, img_upd = _media_updates(output_video, output_image)
+            print(f"[DEBUG] vid_upd: {vid_upd}", flush=True)
+
             yield (
                 status,  # status_box
                 logs,  # log_box
@@ -2894,6 +3014,7 @@ def build_seedvr2_callbacks(
                 image_slider_update,  # image_slider
                 video_comparison_html_update,  # video_comparison_html
                 final_chunk_gallery,  # chunk_gallery - SHOW completed chunk thumbnails!
+                gr.update(visible=False),  # chunk_preview_video - preview shown via gallery select
                 gr.update(visible=False),  # batch_gallery - Hide for single file
                 state  # shared_state
             )
@@ -2917,6 +3038,7 @@ def build_seedvr2_callbacks(
                 gr.update(value=None, visible=False),  # image_slider
                 gr.update(value="", visible=False),  # video_comparison_html
                 gr.update(visible=False),  # chunk_gallery
+                gr.update(visible=False),  # chunk_preview_video
                 gr.update(visible=False),  # batch_gallery
                 state  # shared_state
             )
