@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 from pathlib import Path
 
 from shared.preset_manager import PresetManager
+from shared.models.rife_meta import get_rife_default_model
 from shared.universal_preset import (
     TAB_CONFIGS,
     values_to_dict,
@@ -118,7 +119,12 @@ def create_universal_preset_callbacks(
         """
         if not preset_name or not preset_name.strip():
             defaults = get_all_defaults(base_dir, models_list)
-            tab_values = dict_to_values(tab_name, defaults.get(tab_name, {}))
+            seed_controls = (state or {}).get("seed_controls", {}) if isinstance(state, dict) else {}
+            current_tab_settings = seed_controls.get(f"{tab_name}_settings", {}) if isinstance(seed_controls, dict) else {}
+            if not isinstance(current_tab_settings, dict):
+                current_tab_settings = {}
+            source = current_tab_settings if current_tab_settings else defaults.get(tab_name, {})
+            tab_values = dict_to_values(tab_name, source, defaults.get(tab_name, {}))
             return (*tab_values, "ℹ️ No preset selected", state)
         
         try:
@@ -127,7 +133,12 @@ def create_universal_preset_callbacks(
             
             if not preset_data:
                 defaults = get_all_defaults(base_dir, models_list)
-                tab_values = dict_to_values(tab_name, defaults.get(tab_name, {}))
+                seed_controls = (state or {}).get("seed_controls", {}) if isinstance(state, dict) else {}
+                current_tab_settings = seed_controls.get(f"{tab_name}_settings", {}) if isinstance(seed_controls, dict) else {}
+                if not isinstance(current_tab_settings, dict):
+                    current_tab_settings = {}
+                source = current_tab_settings if current_tab_settings else defaults.get(tab_name, {})
+                tab_values = dict_to_values(tab_name, source, defaults.get(tab_name, {}))
                 return (*tab_values, f"⚠️ Preset '{preset_name}' not found", state)
             
             # Merge with defaults to fill any missing keys
@@ -185,7 +196,7 @@ def create_universal_preset_callbacks(
     def refresh_dropdown() -> gr.update:
         """Refresh the preset dropdown choices."""
         presets = get_presets_list()
-        return gr.update(choices=presets)
+        return gr.update(choices=presets, value=(presets[-1] if presets else None))
     
     def delete_preset(preset_name: str) -> Tuple:
         """Delete a universal preset."""
@@ -195,7 +206,8 @@ def create_universal_preset_callbacks(
         try:
             if preset_manager.delete_universal_preset(preset_name):
                 presets = get_presets_list()
-                return gr.update(choices=presets, value=""), f"✅ Deleted preset '{preset_name}'"
+                selected = presets[-1] if presets else None
+                return gr.update(choices=presets, value=selected), f"✅ Deleted preset '{preset_name}'"
             else:
                 return gr.update(), f"⚠️ Could not delete preset '{preset_name}'"
         except Exception as e:
@@ -249,6 +261,7 @@ def universal_preset_section(
     
     # Get list of presets
     presets = callbacks["get_presets_list"]()
+    selected_preset = current_preset if current_preset in presets else (presets[-1] if presets else None)
     
     with gr.Accordion("📦 Universal Preset (All Tabs)", open=open_accordion):
         gr.Markdown("""
@@ -259,7 +272,7 @@ def universal_preset_section(
         preset_dropdown = gr.Dropdown(
             label="Select Preset",
             choices=presets,
-            value=current_preset or "",
+            value=selected_preset,
             allow_custom_value=False,
             info="All your settings from every tab in one file"
         )
@@ -473,6 +486,15 @@ def sync_tab_to_shared_state(
         seed_controls["skip_first_frames_val"] = int(tab_dict.get("skip_first_frames", 0) or 0)
         seed_controls["load_cap_val"] = int(tab_dict.get("load_cap", 0) or 0)
         seed_controls["fps_override_val"] = float(tab_dict.get("fps_override", 0) or 0)
+        seed_controls["frame_interpolation_val"] = bool(tab_dict.get("frame_interpolation", False))
+        seed_controls["global_rife_enabled_val"] = bool(tab_dict.get("frame_interpolation", False))
+        seed_controls["global_rife_multiplier_val"] = tab_dict.get("global_rife_multiplier", "x2") or "x2"
+        model_name = str(tab_dict.get("global_rife_model", "") or "").strip() or get_rife_default_model()
+        tab_dict["global_rife_model"] = model_name
+        seed_controls["global_rife_model_val"] = model_name
+        precision = str(tab_dict.get("global_rife_precision", "fp32") or "fp32").lower()
+        seed_controls["global_rife_precision_val"] = "fp16" if precision == "fp16" else "fp32"
+        seed_controls["global_rife_cuda_device_val"] = tab_dict.get("global_rife_cuda_device", "") or ""
         seed_controls["output_format_val"] = tab_dict.get("output_format", "auto") or "auto"
         seed_controls["comparison_mode_val"] = tab_dict.get("comparison_mode", "slider") or "slider"
         seed_controls["pin_reference_val"] = bool(tab_dict.get("pin_reference", False))

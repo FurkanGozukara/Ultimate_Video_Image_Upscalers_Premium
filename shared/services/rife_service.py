@@ -46,11 +46,11 @@ def rife_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
     
     # Apply model-specific defaults if metadata available
     if model_meta:
-        default_precision = model_meta.default_precision
         recommended_uhd = model_meta.recommended_uhd_threshold
     else:
-        default_precision = "fp16"
         recommended_uhd = 2160
+    # Default requested by app UX: FP32.
+    default_precision = "fp32"
     
     return {
         "input_path": "",
@@ -63,7 +63,8 @@ def rife_defaults(model_name: Optional[str] = None) -> Dict[str, Any]:
         "fps_override": 0,  # Fixed: was "target_fps", should match RIFE_ORDER
         "scale": 1.0,
         "uhd_mode": False,
-        "fp16_mode": default_precision == "fp16",  # Fixed: was "rife_precision", should be boolean
+        # Kept as string to align with UI dropdown choices ("fp16"/"fp32").
+        "fp16_mode": default_precision,
         "png_output": False,
         "no_audio": False,
         "show_ffmpeg": False,
@@ -415,19 +416,21 @@ def _enforce_rife_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) -> D
     - Precision compatibility checks
     """
     cfg = cfg.copy()
+    if not str(cfg.get("model", "") or "").strip():
+        cfg["model"] = get_rife_default_model()
     
     # Get model metadata
-    model_name = cfg.get("rife_model", get_rife_default_model())
+    model_name = cfg.get("model", get_rife_default_model())
     model_meta = get_rife_metadata(model_name)
     
     if model_meta:
         # Enforce single GPU (RIFE is single-GPU optimized)
-        gpu_device_str = str(cfg.get("gpu_device", ""))
+        gpu_device_str = str(cfg.get("cuda_device", ""))
         if gpu_device_str and gpu_device_str not in ("", "cpu"):
             devices = [d.strip() for d in gpu_device_str.replace(" ", "").split(",") if d.strip()]
             if len(devices) > 1:
                 error_logger.warning(f"RIFE doesn't support multi-GPU - forcing single GPU (using first: {devices[0]})")
-                cfg["gpu_device"] = devices[0]
+                cfg["cuda_device"] = devices[0]
                 cfg["_multi_gpu_disabled_reason"] = "RIFE is single-GPU optimized"
         
         # Validate FPS multiplier against model limits
@@ -457,6 +460,25 @@ def _enforce_rife_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) -> D
             error_logger.warning(f"Invalid scale {scale}, resetting to 1.0")
     except (ValueError, TypeError):
         cfg["scale"] = 1.0
+
+    # Normalize precision value for dropdown/runtime compatibility.
+    precision_raw = cfg.get("fp16_mode", defaults.get("fp16_mode", "fp32"))
+    if isinstance(precision_raw, bool):
+        cfg["fp16_mode"] = "fp16" if precision_raw else "fp32"
+    else:
+        text = str(precision_raw).strip().lower()
+        cfg["fp16_mode"] = "fp16" if text in ("fp16", "true", "1", "yes", "on") else "fp32"
+
+    # Normalize FPS multiplier into xN format accepted by the UI dropdown.
+    fps_raw = str(cfg.get("fps_multiplier", "x2")).strip().lower()
+    if fps_raw.startswith("x"):
+        fps_raw = fps_raw[1:]
+    try:
+        fps_val = int(float(fps_raw))
+    except Exception:
+        fps_val = 2
+    fps_val = 1 if fps_val <= 1 else (2 if fps_val <= 2 else (4 if fps_val <= 4 else 8))
+    cfg["fps_multiplier"] = f"x{fps_val}"
     
     return cfg
 
@@ -565,6 +587,8 @@ def build_rife_callbacks(
             
             # Apply RIFE guardrails (single GPU, FPS limits, etc.)
             settings = _enforce_rife_guardrails(settings, defaults)
+            precision_raw = settings.get("fp16_mode", "fp32")
+            settings["fp16_mode"] = str(precision_raw).strip().lower() == "fp16"
             # Normalize fps multiplier to an int for runtime (UI uses strings like "x2").
             try:
                 fps_mult_raw = settings.get("fps_multiplier", 2)
@@ -978,8 +1002,7 @@ def build_rife_callbacks(
                         except Exception:
                             fps_mult_val = 1
                         should_run_rife_job = (
-                            bool(single_settings.get("rife_enabled", False))
-                            or fps_mult_val > 1
+                            fps_mult_val > 1
                             or float(single_settings.get("fps_override", 0.0) or 0.0) > 0.0
                             or float(single_settings.get("scale", 1.0) or 1.0) != 1.0
                             or bool(single_settings.get("png_output", False))
@@ -1103,8 +1126,7 @@ def build_rife_callbacks(
             # Determine processing workflow
             edit_mode = settings.get("edit_mode", "none")
             should_run_rife = (
-                bool(settings.get("rife_enabled", False))
-                or int(settings.get("fps_multiplier", 1) or 1) > 1
+                int(settings.get("fps_multiplier", 1) or 1) > 1
                 or float(settings.get("fps_override", 0.0) or 0.0) > 0.0
                 or float(settings.get("scale", 1.0) or 1.0) != 1.0
                 or bool(settings.get("png_output", False))

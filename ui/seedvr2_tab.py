@@ -8,6 +8,7 @@ UPDATED: Now uses Universal Preset System for all preset operations.
 import gradio as gr
 from pathlib import Path
 from typing import Dict, Any, List
+import copy
 
 from shared.services.seedvr2_service import (
     seedvr2_defaults, SEEDVR2_ORDER, build_seedvr2_callbacks
@@ -1960,8 +1961,32 @@ def seedvr2_tab(
         outputs=[chunk_preview_video]
     )
 
+    def refresh_auto_res_from_state(state):
+        """
+        Recompute sizing panel from shared state.
+        Used on tab switch so Output-tab changes (e.g., Global RIFE) are reflected immediately.
+        """
+        try:
+            state = state or {}
+            seed_controls = state.get("seed_controls", {}) if isinstance(state, dict) else {}
+            input_path_val = str(seed_controls.get("last_input_path", "") or "").strip()
+            if not input_path_val:
+                return gr.update(value="", visible=False)
+
+            # Use a copy to avoid mutating shared state during display-only refresh.
+            calc_msg, _ = service["auto_res_on_input"](input_path_val, copy.deepcopy(state))
+            if isinstance(calc_msg, dict):
+                calc_msg["visible"] = True
+                return calc_msg
+            text = str(calc_msg or "").strip()
+            return gr.update(value=text, visible=bool(text))
+        except Exception:
+            return gr.update(value="", visible=False)
+
     return {
         "inputs_list": inputs_list,
         "preset_dropdown": preset_dropdown,
         "preset_status": preset_status,
+        "auto_res_msg": auto_res_msg,
+        "refresh_auto_res": refresh_auto_res_from_state,
     }

@@ -27,6 +27,7 @@ from shared.logging_utils import RunLogger
 from shared.path_utils import get_default_output_dir, get_default_temp_dir
 from shared.preset_manager import PresetManager
 from shared.universal_preset import dict_to_values, get_all_defaults
+from shared.models.rife_meta import get_rife_default_model
 from shared.runner import Runner
 from shared.gradio_compat import check_gradio_version, check_required_features
 from ui.seedvr2_tab import seedvr2_tab
@@ -510,6 +511,11 @@ def main():
         # Extract tab settings from universal preset
         startup_res_settings = startup_preset.get("resolution", {})
         startup_output_settings = startup_preset.get("output", {})
+        startup_output_settings = dict(startup_output_settings) if isinstance(startup_output_settings, dict) else {}
+        startup_output_settings["global_rife_model"] = (
+            str(startup_output_settings.get("global_rife_model", "") or "").strip() or get_rife_default_model()
+        )
+        startup_preset["output"] = startup_output_settings
         startup_auto_chunk = bool((startup_res_settings or {}).get("auto_chunk", True))
         startup_res_settings = dict(startup_res_settings) if isinstance(startup_res_settings, dict) else {}
         startup_res_settings.setdefault("auto_chunk", startup_auto_chunk)
@@ -551,13 +557,23 @@ def main():
                 "skip_first_frames_val": startup_output_settings.get("skip_first_frames", 0),
                 "load_cap_val": startup_output_settings.get("load_cap", 0),
                 "fps_override_val": startup_output_settings.get("fps_override", 0),
+                "frame_interpolation_val": bool(startup_output_settings.get("frame_interpolation", False)),
+                "global_rife_enabled_val": bool(startup_output_settings.get("frame_interpolation", False)),
+                "global_rife_multiplier_val": startup_output_settings.get("global_rife_multiplier", "x2"),
+                "global_rife_model_val": startup_output_settings.get("global_rife_model", get_rife_default_model()),
+                "global_rife_precision_val": startup_output_settings.get("global_rife_precision", "fp32"),
+                "global_rife_cuda_device_val": startup_output_settings.get("global_rife_cuda_device", ""),
                 "output_format_val": startup_output_settings.get("output_format", "auto"),
                 "comparison_mode_val": startup_output_settings.get("comparison_mode", "slider"),
-                 "pin_reference_val": startup_output_settings.get("pin_reference", False),
-                 "fullscreen_val": startup_output_settings.get("fullscreen_enabled", True),
-                 "save_metadata_val": startup_output_settings.get("save_metadata", True),
-                 "telemetry_enabled_val": startup_output_settings.get("telemetry_enabled", True),
-                 "face_strength_val": global_settings.get("face_strength", 0.5),
+                "pin_reference_val": startup_output_settings.get("pin_reference", False),
+                "fullscreen_val": startup_output_settings.get("fullscreen_enabled", True),
+                "save_metadata_val": startup_output_settings.get("save_metadata", True),
+                "telemetry_enabled_val": startup_output_settings.get("telemetry_enabled", True),
+                "audio_codec_val": startup_output_settings.get("audio_codec", "copy"),
+                "audio_bitrate_val": startup_output_settings.get("audio_bitrate", ""),
+                "generate_comparison_video_val": startup_output_settings.get("generate_comparison_video", True),
+                "comparison_video_layout_val": startup_output_settings.get("comparison_video_layout", "auto"),
+                "face_strength_val": global_settings.get("face_strength", 0.5),
                 
                 # Resolution tab cached values
                 "auto_chunk": startup_auto_chunk,
@@ -837,12 +853,17 @@ def main():
                         tab_settings["chunk_overlap"] = 0.0
 
                 values = dict_to_values(tab_name, tab_settings, tab_defaults)
+                # Dropdown-safe fallbacks for historical presets/state corruption.
+                if tab_name == "rife" and len(values) > 5 and not str(values[5] or "").strip():
+                    values[5] = get_rife_default_model()
+                if tab_name == "output" and len(values) > 17 and not str(values[17] or "").strip():
+                    values[17] = get_rife_default_model()
 
                 current = seed_controls.get("current_preset_name") if isinstance(seed_controls, dict) else None
-                current = current or ""
                 presets = preset_manager.list_universal_presets()
-                dropdown_upd = gr.update(choices=presets, value=current or "")
-                status_text = f"✅ Synced from universal preset '{current}'" if current else "ℹ️ Synced from shared state"
+                selected = current if current in presets else (presets[-1] if presets else None)
+                dropdown_upd = gr.update(choices=presets, value=selected)
+                status_text = f"✅ Synced from universal preset '{selected}'" if selected else "ℹ️ Synced from shared state"
                 return (*values, dropdown_upd, gr.update(value=status_text))
 
             return _sync
@@ -859,10 +880,20 @@ def main():
                 temp_dir=temp_dir,
                 output_dir=output_dir
             )
-        tab_seedvr2.select(
+        seedvr2_tab_select_evt = tab_seedvr2.select(
             fn=_make_tab_sync("seedvr2"),
             inputs=[shared_state],
             outputs=seedvr2_ui["inputs_list"] + [seedvr2_ui["preset_dropdown"], seedvr2_ui["preset_status"]],
+            queue=False,
+            show_progress="hidden",
+            trigger_mode="always_last",
+        )
+        # Ensure sizing panel (including Output FPS + Global RIFE forecast) is refreshed
+        # when navigating back to SeedVR2 after changing Output-tab settings.
+        seedvr2_tab_select_evt.then(
+            fn=seedvr2_ui["refresh_auto_res"],
+            inputs=[shared_state],
+            outputs=[seedvr2_ui["auto_res_msg"]],
             queue=False,
             show_progress="hidden",
             trigger_mode="always_last",
@@ -958,6 +989,7 @@ def main():
         with gr.Tab("⚡ FlashVSR+ (Real-Time Diffusion)") as tab_flashvsr:
             flashvsr_ui = flashvsr_tab(
                 preset_manager=preset_manager,
+                runner=runner,
                 run_logger=run_logger,
                 global_settings=global_settings,
                 shared_state=shared_state,

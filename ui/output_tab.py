@@ -24,6 +24,10 @@ from shared.video_codec_options import (
     ENCODING_PRESETS,
     AUDIO_CODECS
 )
+from shared.video_comparison_slider import (
+    create_video_comparison_html,
+    get_video_comparison_js_on_load,
+)
 from ui.universal_preset_section import (
     universal_preset_section,
     wire_universal_preset_events,
@@ -84,6 +88,47 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     gr.Markdown("*Configure output formats, FPS handling, and comparison display options shared across all upscaler models*")
 
     overwrite_existing_batch_default = bool(seed_controls.get("overwrite_existing_batch_val", False))
+    global_rife_multiplier_value = str(values[16] or "x2").strip().lower()
+    if not global_rife_multiplier_value.startswith("x"):
+        global_rife_multiplier_value = f"x{global_rife_multiplier_value}"
+    if global_rife_multiplier_value not in {"x2", "x4", "x8"}:
+        global_rife_multiplier_value = "x2"
+
+    # Global RIFE controls (shared across all upscaler tabs).
+    with gr.Group():
+        gr.Markdown("#### 🌐 Global RIFE")
+        frame_interpolation = gr.Checkbox(
+            label="Global Enable RIFE",
+            value=values[15],
+            info="When enabled, each upscaler keeps its original output and also generates an additional RIFE FPS output (e.g., _2xFPS, _4xFPS)."
+        )
+        with gr.Row():
+            global_rife_multiplier = gr.Dropdown(
+                label="RIFE FPS Multiplier",
+                choices=["x2", "x4", "x8"],
+                value=global_rife_multiplier_value,
+                info="FPS increase applied to finalized video outputs."
+            )
+            global_rife_model = gr.Dropdown(
+                label="RIFE Model",
+                choices=rife_models if rife_models else ["rife-v4.6"],
+                value=values[17] if values[17] in (rife_models if rife_models else ["rife-v4.6"]) else (rife_models[0] if rife_models else "rife-v4.6"),
+                allow_custom_value=True,
+                info="Model used for global post-upscale frame interpolation."
+            )
+        with gr.Row():
+            global_rife_precision = gr.Dropdown(
+                label="RIFE Precision",
+                choices=["fp32", "fp16"],
+                value=values[18] if str(values[18]).lower() in {"fp32", "fp16"} else "fp32",
+                info="Default is fp32 for maximum compatibility."
+            )
+            global_rife_cuda_device = gr.Textbox(
+                label="RIFE CUDA Device Override",
+                value=values[19],
+                placeholder="Leave empty for default GPU (single GPU recommended)",
+                info="Optional single CUDA device ID for global RIFE post-process."
+            )
 
     with gr.Tabs():
         # Output Format Settings
@@ -239,11 +284,7 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                     info="Extra frames for temporal processing"
                 )
 
-                frame_interpolation = gr.Checkbox(
-                    label="Enable Frame Interpolation",
-                    value=values[15],
-                    info="Smooth motion between frames"
-                )
+                gr.Markdown("Global RIFE controls moved to top of this tab.")
 
         # Comparison Settings
         with gr.TabItem("🔍 Comparison Display"):
@@ -253,32 +294,32 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                 comparison_mode = gr.Dropdown(
                     label="Comparison Mode",
                     choices=["native", "slider", "side_by_side", "overlay"],
-                    value=values[16],
+                    value=values[20],
                     info="How to display before/after comparison"
                 )
 
                 pin_reference = gr.Checkbox(
                     label="Pin Reference Image",
-                    value=values[17],
+                    value=values[21],
                     info="Keep original as fixed reference when changing settings"
                 )
 
                 fullscreen_enabled = gr.Checkbox(
                     label="Enable Fullscreen Comparison",
-                    value=values[18],
+                    value=values[22],
                     info="Allow fullscreen viewing of comparisons"
                 )
 
                 comparison_zoom = gr.Slider(
                     label="Default Zoom Level",
                     minimum=25, maximum=400, step=25,
-                    value=values[19],
+                    value=values[23],
                     info="Default zoom percentage for comparison viewer"
                 )
 
                 show_difference = gr.Checkbox(
                     label="Show Difference Overlay",
-                    value=values[20],
+                    value=values[24],
                     info="Highlight differences between original and upscaled"
                 )
 
@@ -289,7 +330,7 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
             with gr.Group():
                 generate_comparison_video = gr.Checkbox(
                     label="Generate Input vs Output Comparison Video",
-                    value=values[21] if len(values) > 21 else True,
+                    value=values[25] if len(values) > 25 else True,
                     info="Create a merged video showing original input (scaled up) beside the upscaled output. "
                          "The original input is scaled to match the output resolution before merging."
                 )
@@ -297,12 +338,67 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                 comparison_video_layout = gr.Dropdown(
                     label="Comparison Video Layout",
                     choices=["auto", "horizontal", "vertical"],
-                    value=values[22] if len(values) > 22 else "auto",
+                    value=values[26] if len(values) > 26 else "auto",
                     info="Layout for comparison video:\n"
                          "• auto: Choose based on aspect ratio (landscape → horizontal, portrait → vertical)\n"
                          "• horizontal: Side-by-side (left: original, right: upscaled)\n"
                          "• vertical: Stacked (top: original, bottom: upscaled)"
                 )
+
+        # Direct manual video comparison
+        with gr.TabItem("🎞️ Direct Video Compare"):
+            gr.Markdown("#### Upload Any 2 Videos for Fullscreen Comparison")
+            gr.Markdown("*Use this independent viewer to compare any two videos, even outside processed outputs.*")
+
+            with gr.Row():
+                direct_video_a_upload = gr.File(
+                    label="Video A (Reference)",
+                    type="filepath",
+                    file_types=["video"]
+                )
+                direct_video_b_upload = gr.File(
+                    label="Video B (Compared)",
+                    type="filepath",
+                    file_types=["video"]
+                )
+
+            with gr.Row():
+                direct_video_a_path = gr.Textbox(
+                    label="Video A Path",
+                    placeholder="C:/path/to/video_a.mp4",
+                )
+                direct_video_b_path = gr.Textbox(
+                    label="Video B Path",
+                    placeholder="C:/path/to/video_b.mp4",
+                )
+
+            with gr.Row():
+                direct_compare_height = gr.Slider(
+                    label="Viewer Height",
+                    minimum=300,
+                    maximum=1000,
+                    step=20,
+                    value=620,
+                )
+                direct_compare_slider = gr.Slider(
+                    label="Initial Slider Position",
+                    minimum=0,
+                    maximum=100,
+                    step=1,
+                    value=50,
+                )
+
+            with gr.Row():
+                direct_compare_btn = gr.Button("🔍 Generate Comparison", variant="primary", size="lg")
+                direct_compare_clear_btn = gr.Button("🧹 Clear", size="lg")
+
+            direct_compare_status = gr.Markdown("")
+            direct_comparison_html = gr.HTML(
+                label="Direct Video Comparison",
+                value="",
+                js_on_load=get_video_comparison_js_on_load(),
+                visible=False,
+            )
 
         # Metadata & Logging
         with gr.TabItem("📊 Metadata & Logging"):
@@ -311,27 +407,27 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
             with gr.Group():
                 save_metadata = gr.Checkbox(
                     label="Save Processing Metadata",
-                    value=values[23] if len(values) > 23 else True,
+                    value=values[27] if len(values) > 27 else True,
                     info="Embed processing info in output files"
                 )
 
                 metadata_format = gr.Dropdown(
                     label="Metadata Format",
                     choices=["json", "xml", "exif", "none"],
-                    value=values[24] if len(values) > 24 else "json",
+                    value=values[28] if len(values) > 28 else "json",
                     info="Format for embedded metadata"
                 )
 
                 telemetry_enabled = gr.Checkbox(
                     label="Enable Run Telemetry",
-                    value=values[25] if len(values) > 25 else True,
+                    value=values[29] if len(values) > 29 else True,
                     info="Log processing stats for troubleshooting"
                 )
 
                 log_level = gr.Dropdown(
                     label="Log Verbosity",
                     choices=["error", "warning", "info", "debug"],
-                    value=values[26] if len(values) > 26 else "info",
+                    value=values[30] if len(values) > 30 else "info",
                     info="Detail level for processing logs"
                 )
 
@@ -400,7 +496,8 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
         output_format, png_sequence_enabled, png_padding, png_keep_basename,
         fps_override, video_codec, video_quality, video_preset, two_pass_encoding,
         skip_first_frames, load_cap, pixel_format, audio_codec, audio_bitrate,
-        temporal_padding, frame_interpolation, comparison_mode, pin_reference,
+        temporal_padding, frame_interpolation, global_rife_multiplier, global_rife_model,
+        global_rife_precision, global_rife_cuda_device, comparison_mode, pin_reference,
         fullscreen_enabled, comparison_zoom, show_difference,
         generate_comparison_video, comparison_video_layout,  # NEW: Comparison video options
         save_metadata, metadata_format, telemetry_enabled, log_level
@@ -453,16 +550,23 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     
     def cache_comparison_wrapper(comp_mode, state):
         return service["cache_comparison"](comp_mode, state)
+
+    def _update_text(upd):
+        if isinstance(upd, dict):
+            return str(upd.get("value", "") or "")
+        return str(upd or "")
     
     def cache_png_wrapper(padding, basename, state):
         msg1, state1 = service["cache_png_padding"](padding, state)
         msg2, state2 = service["cache_png_basename"](basename, state1)
-        return gr.update(value=msg1 + "\n" + msg2), state2
+        joined = "\n".join([m for m in [_update_text(msg1), _update_text(msg2)] if m.strip()])
+        return gr.update(value=joined), state2
     
     def cache_skip_wrapper(skip_val, cap_val, state):
         msg1, state1 = service["cache_skip"](skip_val, state)
         msg2, state2 = service["cache_cap"](cap_val, state1)
-        return gr.update(value=msg1 + "\n" + msg2), state2
+        joined = "\n".join([m for m in [_update_text(msg1), _update_text(msg2)] if m.strip()])
+        return gr.update(value=joined), state2
     
     cache_fps_btn.click(
         fn=cache_fps_wrapper,
@@ -552,6 +656,62 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
         fn=lambda *vals: service["apply_codec_preset"]("web", list(vals)),
         inputs=inputs_list,
         outputs=inputs_list
+    )
+
+    # Direct comparison events
+    def _upload_to_path(file_val):
+        if not file_val:
+            return ""
+        if isinstance(file_val, dict):
+            return str(file_val.get("path") or "")
+        return str(file_val)
+
+    direct_video_a_upload.change(
+        fn=_upload_to_path,
+        inputs=[direct_video_a_upload],
+        outputs=[direct_video_a_path],
+    )
+    direct_video_b_upload.change(
+        fn=_upload_to_path,
+        inputs=[direct_video_b_upload],
+        outputs=[direct_video_b_path],
+    )
+
+    def _build_direct_video_compare(path_a, path_b, height, slider_pos):
+        pa = str(path_a or "").strip()
+        pb = str(path_b or "").strip()
+        if not pa or not pb:
+            return gr.update(value="⚠️ Select both videos first."), gr.update(value="", visible=False)
+        if not Path(pa).exists() or not Path(pb).exists():
+            return gr.update(value="⚠️ One or both video paths do not exist."), gr.update(value="", visible=False)
+
+        html = create_video_comparison_html(
+            original_video=pa,
+            upscaled_video=pb,
+            height=int(height or 620),
+            slider_position=float(slider_pos or 50.0),
+        )
+        return (
+            gr.update(value="✅ Direct video comparison ready. Use fullscreen inside the viewer controls."),
+            gr.update(value=html, visible=True),
+        )
+
+    def _clear_direct_video_compare():
+        return (
+            "",
+            "",
+            gr.update(value=""),
+            gr.update(value="", visible=False),
+        )
+
+    direct_compare_btn.click(
+        fn=_build_direct_video_compare,
+        inputs=[direct_video_a_path, direct_video_b_path, direct_compare_height, direct_compare_slider],
+        outputs=[direct_compare_status, direct_comparison_html],
+    )
+    direct_compare_clear_btn.click(
+        fn=_clear_direct_video_compare,
+        outputs=[direct_video_a_path, direct_video_b_path, direct_compare_status, direct_comparison_html],
     )
 
     return {

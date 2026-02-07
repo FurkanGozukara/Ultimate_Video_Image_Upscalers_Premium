@@ -1620,8 +1620,32 @@ class Runner:
         cmd.extend(["--output", str(output_path)])
 
         # Model and device settings
-        if settings.get("model_dir"):
-            cmd.extend(["--model", settings["model_dir"]])
+        model_dir = settings.get("model_dir")
+        if not model_dir:
+            # Allow selecting a model name without requiring a manual directory override.
+            # RIFE expects --model as a directory under RIFE/, typically train_log/<model_name>.
+            model_name = str(settings.get("model", "") or "").strip()
+            if model_name:
+                # Prefer per-model folder when present.
+                named_dir = self.base_dir / "RIFE" / "train_log" / model_name
+                named_flownet = named_dir / "flownet.pkl"
+                # Fallback for legacy RIFE layout where flownet.pkl is directly in train_log/.
+                legacy_flownet = self.base_dir / "RIFE" / "train_log" / "flownet.pkl"
+
+                if named_flownet.exists():
+                    model_dir = f"train_log/{model_name}"
+                elif legacy_flownet.exists():
+                    model_dir = "train_log"
+                else:
+                    # Keep old behavior as a last resort (lets RIFE emit its own error details).
+                    model_dir = f"train_log/{model_name}"
+            else:
+                # No model name selected: try legacy default location.
+                legacy_flownet = self.base_dir / "RIFE" / "train_log" / "flownet.pkl"
+                if legacy_flownet.exists():
+                    model_dir = "train_log"
+        if model_dir:
+            cmd.extend(["--model", str(model_dir)])
         if settings.get("fp16_mode"):
             cmd.append("--fp16")
         if settings.get("uhd_mode"):

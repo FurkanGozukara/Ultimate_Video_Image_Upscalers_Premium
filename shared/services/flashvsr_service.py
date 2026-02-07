@@ -33,6 +33,8 @@ from shared.resolution_calculator import estimate_fixed_scale_upscale_plan_from_
 from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
 from shared.output_run_manager import prepare_single_video_run, batch_item_dir, downscaled_video_path
 from shared.ffmpeg_utils import scale_video
+from shared.global_rife import maybe_apply_global_rife
+from shared.chunk_preview import build_chunk_preview_payload
 
 # Cancel event for FlashVSR+ processing
 _flashvsr_cancel_event = threading.Event()
@@ -178,9 +180,16 @@ def _enforce_flashvsr_guardrails(cfg: Dict[str, Any], defaults: Dict[str, Any]) 
     - Valid version/mode/scale combinations
     """
     cfg = cfg.copy()
+    # Dropdown-safe normalization to avoid Gradio choice mismatches.
+    try:
+        cfg["scale"] = "2" if str(cfg.get("scale", defaults.get("scale", "4"))).strip() == "2" else "4"
+    except Exception:
+        cfg["scale"] = "4"
+    cfg["version"] = str(cfg.get("version", defaults.get("version", "10")) or "10")
+    cfg["mode"] = str(cfg.get("mode", defaults.get("mode", "tiny")) or "tiny")
     
     # Build model identifier and get metadata
-    model_id = f"v{cfg.get('version', '10')}_{cfg.get('mode', 'tiny')}_{cfg.get('scale', 4)}x"
+    model_id = f"v{cfg.get('version', '10')}_{cfg.get('mode', 'tiny')}_{cfg.get('scale', '4')}x"
     model_meta = get_flashvsr_metadata(model_id)
     
     if model_meta:
@@ -257,6 +266,7 @@ def _apply_flashvsr_preset(
 
 def build_flashvsr_callbacks(
     preset_manager: PresetManager,
+    runner,
     run_logger: RunLogger,
     global_settings: Dict[str, Any],
     shared_state: gr.State,
@@ -320,7 +330,8 @@ def build_flashvsr_callbacks(
 
     def safe_defaults():
         """Get safe default values."""
-        return [defaults[key] for key in FLASHVSR_ORDER]
+        normalized = _enforce_flashvsr_guardrails(defaults.copy(), defaults)
+        return [normalized[key] for key in FLASHVSR_ORDER]
 
     def run_action(upload, *args, preview_only: bool = False, state=None, progress=None):
         """Main processing action with gr.Progress integration and pre-flight checks."""
@@ -329,6 +340,13 @@ def build_flashvsr_callbacks(
             # Clear any previous VRAM OOM banner at the start of a new run.
             clear_vram_oom_alert(state)
             seed_controls = state.get("seed_controls", {})
+            seed_controls["flashvsr_chunk_preview"] = {
+                "message": "No chunk preview available yet.",
+                "gallery": [],
+                "videos": [],
+                "count": 0,
+            }
+            state["seed_controls"] = seed_controls
             settings_dict = _flashvsr_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
             
@@ -497,6 +515,21 @@ def build_flashvsr_callbacks(
                 except Exception:
                     pass
                 return gr.update(value=None, visible=False), gr.update(value=None, visible=False)
+
+            def _cache_chunk_preview(run_dir: Optional[Path]) -> None:
+                try:
+                    if not run_dir:
+                        seed_controls["flashvsr_chunk_preview"] = {
+                            "message": "No chunk preview available.",
+                            "gallery": [],
+                            "videos": [],
+                            "count": 0,
+                        }
+                    else:
+                        seed_controls["flashvsr_chunk_preview"] = build_chunk_preview_payload(str(run_dir))
+                    state["seed_controls"] = seed_controls
+                except Exception:
+                    pass
             
             # PRE-FLIGHT CHECKS (mirrors SeedVR2/GAN for consistency)
             from shared.error_handling import check_ffmpeg_available, check_disk_space
@@ -585,6 +618,7 @@ def build_flashvsr_callbacks(
                 outputs: List[str] = []
                 last_input_path: Optional[str] = None
                 last_output_path: Optional[str] = None
+                last_chunk_run_dir: Optional[Path] = None
                 batch_root = Path(batch_out) if batch_out else Path(global_settings.get("output_dir", output_dir))
                 try:
                     batch_root.mkdir(parents=True, exist_ok=True)
@@ -751,6 +785,22 @@ def build_flashvsr_callbacks(
                             if saved_pre:
                                 logs.append(f"🧩 Preprocessed input saved: {saved_pre}")
 
+                        if Path(outp).suffix.lower() in video_exts:
+                            rife_out, rife_msg = maybe_apply_global_rife(
+                                runner=runner,
+                                output_video_path=outp,
+                                seed_controls=seed_controls,
+                                on_log=(lambda m: logs.append(m.strip()) if m else None),
+                            )
+                            if rife_out and Path(rife_out).exists():
+                                logs.append(f"✅ Global RIFE output: {Path(rife_out).name}")
+                                outp = rife_out
+                            elif rife_msg:
+                                logs.append(f"⚠️ {rife_msg}")
+
+                        if chunk_count_item:
+                            last_chunk_run_dir = Path(item_settings.get("_run_dir") or item_out_dir)
+
                         outputs.append(outp)
                         last_output_path = outp
                         if chunk_count_item:
@@ -797,6 +847,8 @@ def build_flashvsr_callbacks(
 
                 if progress:
                     progress(1.0, desc=f"Batch complete ({len(outputs)}/{len(items)} succeeded)")
+
+                _cache_chunk_preview(last_chunk_run_dir)
 
                 # Track output path for pinned comparison feature (last output)
                 if last_output_path:
@@ -1176,6 +1228,25 @@ def build_flashvsr_callbacks(
                 except Exception as e:
                     log_buffer.append(f"âš ï¸ Audio mux failed: {str(e)}")
 
+            chunk_count = int(result_holder.get("chunk_count") or 0)
+            if chunk_count > 0:
+                _cache_chunk_preview(Path(settings.get("_run_dir") or global_settings.get("output_dir", output_dir)))
+            else:
+                _cache_chunk_preview(None)
+
+            # Global RIFE post-process (keep original + create *_xFPS).
+            if output_path and Path(output_path).exists() and Path(output_path).suffix.lower() in video_exts:
+                rife_out, rife_msg = maybe_apply_global_rife(
+                    runner=runner,
+                    output_video_path=output_path,
+                    seed_controls=seed_controls,
+                    on_log=(lambda m: log_buffer.append(m.strip()) if m else None),
+                )
+                if rife_out and Path(rife_out).exists():
+                    output_path = rife_out
+                elif rife_msg:
+                    log_buffer.append(rife_msg)
+
             # Create comparison
             html_comp, img_slider = create_unified_comparison(
                 input_path=input_path,
@@ -1195,7 +1266,6 @@ def build_flashvsr_callbacks(
                     pass
             
             # Log run
-            chunk_count = int(result_holder.get("chunk_count") or 0)
             run_logger.write_summary(
                 Path(output_path) if output_path else output_dir,
                 {
@@ -1239,7 +1309,7 @@ def build_flashvsr_callbacks(
             vid_upd, img_upd = _media_updates(output_path)
             yield (
                 status,
-                result.log,
+                ("\n".join(log_buffer[-400:]) if log_buffer else result.log),
                 vid_upd,
                 img_upd,
                 img_slider if img_slider else gr.update(visible=False),

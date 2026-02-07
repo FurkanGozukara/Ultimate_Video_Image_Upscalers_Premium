@@ -28,6 +28,8 @@ from shared.comparison_unified import create_unified_comparison, create_video_co
 from shared.video_comparison_slider import create_video_comparison_html
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
+from shared.global_rife import maybe_apply_global_rife
+from shared.chunk_preview import build_chunk_preview_payload
 
 
 GAN_MODEL_EXTS = {".pth", ".safetensors"}
@@ -751,6 +753,13 @@ def build_gan_callbacks(
         try:
             state = state or {"seed_controls": {}}
             seed_controls = state.get("seed_controls", {})
+            seed_controls["gan_chunk_preview"] = {
+                "message": "No chunk preview available yet.",
+                "gallery": [],
+                "videos": [],
+                "count": 0,
+            }
+            state["seed_controls"] = seed_controls
             # Clear any previous VRAM OOM banner at the start of a new run.
             clear_vram_oom_alert(state)
             cancel_event.clear()
@@ -1078,6 +1087,19 @@ def build_gan_callbacks(
                             if restored:
                                 outp = restored
 
+                        # Global RIFE post-process (adds *_xFPS output and keeps original).
+                        if outp and Path(outp).exists() and Path(outp).suffix.lower() in (".mp4", ".avi", ".mov", ".mkv", ".webm"):
+                            rife_out, rife_msg = maybe_apply_global_rife(
+                                runner=runner,
+                                output_video_path=outp,
+                                seed_controls=seed_controls,
+                                on_log=(lambda m: progress_cb(m) if progress_cb and m else None),
+                            )
+                            if rife_out and Path(rife_out).exists():
+                                outp = rife_out
+                            elif rife_msg and progress_cb:
+                                progress_cb(rife_msg)
+
                         # Update shared state output pointers.
                         if outp and Path(outp).exists():
                             try:
@@ -1106,6 +1128,11 @@ def build_gan_callbacks(
                                     },
                                 },
                             )
+                        except Exception:
+                            pass
+
+                        try:
+                            seed_controls["gan_chunk_preview"] = build_chunk_preview_payload(str(run_output_root))
                         except Exception:
                             pass
 
@@ -1229,6 +1256,21 @@ def build_gan_callbacks(
                                 result.output_path = final_out_path
                 except Exception:
                     pass
+
+                # Global RIFE post-process (adds *_xFPS output while keeping original).
+                if final_out_path and Path(final_out_path).exists() and Path(final_out_path).suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm"):
+                    rife_out, rife_msg = maybe_apply_global_rife(
+                        runner=runner,
+                        output_video_path=final_out_path,
+                        seed_controls=seed_controls,
+                        on_log=(lambda m: progress_cb(m) if progress_cb and m else None),
+                    )
+                    if rife_out and Path(rife_out).exists():
+                        final_out_path = rife_out
+                        result.output_path = final_out_path
+                        full_log = "\n".join([full_log, f"Global RIFE output: {rife_out}"])
+                    elif rife_msg:
+                        full_log = "\n".join([full_log, rife_msg])
 
                 # Save preprocessed input (if we created one) alongside outputs
                 pre_in = prepped_settings.get("_preprocessed_input_path")

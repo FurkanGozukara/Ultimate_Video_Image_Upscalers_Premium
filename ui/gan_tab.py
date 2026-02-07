@@ -130,7 +130,7 @@ def gan_tab(
                     label="Image/Video Path",
                     value=values[0],
                     placeholder="C:/path/to/image.jpg or C:/path/to/video.mp4",
-                    info="Direct path to file or folder of images"
+                    info="Direct path to image, video, or frame-sequence folder"
                 )
                 input_cache_msg = gr.Markdown("", visible=False)
                 sizing_info = gr.Markdown("", visible=False, elem_classes=["resolution-info"])
@@ -147,7 +147,7 @@ def gan_tab(
                     label="Batch Input Folder",
                     value=values[2],
                     placeholder="Folder containing images/videos",
-                    info="Directory with files to process"
+                    info="Directory with images, videos, or frame-sequence subfolders"
                 )
                 batch_output = gr.Textbox(
                     label="Batch Output Folder",
@@ -393,6 +393,22 @@ def gan_tab(
                 value="",
                 js_on_load=get_video_comparison_js_on_load(),
                 visible=False
+            )
+
+            chunk_status = gr.Markdown("", visible=False)
+            chunk_gallery = gr.Gallery(
+                label="🧩 Chunk Preview",
+                visible=False,
+                columns=4,
+                rows=2,
+                height=220,
+                object_fit="contain",
+            )
+            chunk_preview_video = gr.Video(
+                label="🎬 Selected Chunk",
+                interactive=False,
+                visible=False,
+                buttons=["download"],
             )
 
             # Last processed info
@@ -763,8 +779,47 @@ def gan_tab(
         buttons=["download"]
     )
 
+    def refresh_chunk_preview_ui(state):
+        preview = (state or {}).get("seed_controls", {}).get("gan_chunk_preview", {})
+        if not isinstance(preview, dict):
+            return gr.update(value="", visible=False), gr.update(value=[], visible=False), gr.update(value=None, visible=False)
+
+        gallery = preview.get("gallery") or []
+        videos = preview.get("videos") or []
+        message = str(preview.get("message") or "")
+
+        first_video = None
+        for v in videos:
+            if v and Path(v).exists():
+                first_video = v
+                break
+
+        return (
+            gr.update(value=message, visible=bool(message or gallery)),
+            gr.update(value=gallery, visible=bool(gallery)),
+            gr.update(value=first_video, visible=bool(first_video)),
+        )
+
+    def on_chunk_gallery_select(evt: gr.SelectData, state):
+        try:
+            idx = int(evt.index)
+            videos = (state or {}).get("seed_controls", {}).get("gan_chunk_preview", {}).get("videos", [])
+            if 0 <= idx < len(videos):
+                cand = videos[idx]
+                if cand and Path(cand).exists():
+                    return gr.update(value=cand, visible=True)
+        except Exception:
+            pass
+        return gr.update(value=None, visible=False)
+
+    chunk_gallery.select(
+        fn=on_chunk_gallery_select,
+        inputs=[shared_state],
+        outputs=[chunk_preview_video],
+    )
+
     # Main processing with gr.Progress - include input_file upload
-    upscale_btn.click(
+    run_evt = upscale_btn.click(
         fn=lambda upload, *args, progress=gr.Progress(): service["run_action"](upload, *args[:-1], preview_only=False, state=args[-1], progress=progress),
         inputs=[input_file] + inputs_list + [shared_state],
         outputs=[
@@ -772,14 +827,24 @@ def gan_tab(
             last_processed, image_slider, video_comparison_html, batch_gallery, shared_state
         ]
     )
+    run_evt.then(
+        fn=refresh_chunk_preview_ui,
+        inputs=[shared_state],
+        outputs=[chunk_status, chunk_gallery, chunk_preview_video],
+    )
 
-    preview_btn.click(
+    preview_evt = preview_btn.click(
         fn=lambda upload, *args, progress=gr.Progress(): service["run_action"](upload, *args[:-1], preview_only=True, state=args[-1], progress=progress),
         inputs=[input_file] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,
             last_processed, image_slider, video_comparison_html, batch_gallery, shared_state
         ]
+    )
+    preview_evt.then(
+        fn=refresh_chunk_preview_ui,
+        inputs=[shared_state],
+        outputs=[chunk_status, chunk_gallery, chunk_preview_video],
     )
     
     # NOTE: Legacy target_resolution is hidden; sizing is now driven by Upscale-x.

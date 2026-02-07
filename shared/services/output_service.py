@@ -7,6 +7,7 @@ from shared.video_codec_options import (
     get_pixel_format_info,
     get_recommended_settings
 )
+from shared.models.rife_meta import get_rife_default_model
 
 
 def output_defaults(models: List[str]) -> Dict[str, Any]:
@@ -27,7 +28,12 @@ def output_defaults(models: List[str]) -> Dict[str, Any]:
         "audio_bitrate": "",
         "load_cap": 0,
         "temporal_padding": 0,
+        # Repurposed legacy key as global cross-model RIFE switch.
         "frame_interpolation": False,
+        "global_rife_multiplier": "x2",
+        "global_rife_model": get_rife_default_model(),
+        "global_rife_precision": "fp32",
+        "global_rife_cuda_device": "",
         "comparison_mode": "slider",
         "pin_reference": False,
         "fullscreen_enabled": True,
@@ -59,6 +65,10 @@ OUTPUT_ORDER: List[str] = [
     "audio_bitrate",
     "temporal_padding",
     "frame_interpolation",
+    "global_rife_multiplier",
+    "global_rife_model",
+    "global_rife_precision",
+    "global_rife_cuda_device",
     "comparison_mode",
     "pin_reference",
     "fullscreen_enabled",
@@ -77,6 +87,27 @@ def _output_dict_from_args(args: List[Any]) -> Dict[str, Any]:
     return dict(zip(OUTPUT_ORDER, args))
 
 
+def _normalize_output_fields(data: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(data or {})
+    cfg["frame_interpolation"] = bool(cfg.get("frame_interpolation", False))
+
+    mult_raw = str(cfg.get("global_rife_multiplier", "x2") or "x2").strip().lower()
+    if mult_raw.startswith("x"):
+        mult_raw = mult_raw[1:]
+    try:
+        mult_val = int(float(mult_raw))
+    except Exception:
+        mult_val = 2
+    mult_val = 2 if mult_val <= 2 else (4 if mult_val <= 4 else 8)
+    cfg["global_rife_multiplier"] = f"x{mult_val}"
+
+    cfg["global_rife_model"] = str(cfg.get("global_rife_model", "") or "").strip() or get_rife_default_model()
+    precision_raw = str(cfg.get("global_rife_precision", "fp32") or "fp32").strip().lower()
+    cfg["global_rife_precision"] = "fp16" if precision_raw == "fp16" else "fp32"
+    cfg["global_rife_cuda_device"] = str(cfg.get("global_rife_cuda_device", "") or "")
+    return cfg
+
+
 def _apply_output_preset(
     preset: Dict[str, Any],
     defaults: Dict[str, Any],
@@ -86,7 +117,7 @@ def _apply_output_preset(
     base = defaults.copy()
     if current:
         base.update(current)
-    merged = preset_manager.merge_config(base, preset)
+    merged = _normalize_output_fields(preset_manager.merge_config(base, preset))
     return [merged[k] for k in OUTPUT_ORDER]
 
 
@@ -117,7 +148,7 @@ def build_output_callbacks(
 
         try:
             payload = _output_dict_from_args(list(args))
-            model_name = payload["model"]
+            model_name = defaults.get("model", "global")
             preset_manager.save_preset_safe("output", model_name, preset_name.strip(), payload)
             dropdown = refresh_presets(model_name, select_name=preset_name.strip())
 
@@ -245,11 +276,17 @@ def build_output_callbacks(
         """Apply all output settings to pipeline at once"""
         state = args[-1]
         values = list(args[:-1])
-        settings_dict = _output_dict_from_args(values)
-        
+        settings_dict = _normalize_output_fields(_output_dict_from_args(values))
+
         seed_controls = state.get("seed_controls", {})
         seed_controls["output_format_val"] = settings_dict.get("output_format", "auto")
         seed_controls["fps_override_val"] = settings_dict.get("fps_override", 0)
+        seed_controls["frame_interpolation_val"] = bool(settings_dict.get("frame_interpolation", False))
+        seed_controls["global_rife_enabled_val"] = bool(settings_dict.get("frame_interpolation", False))
+        seed_controls["global_rife_multiplier_val"] = settings_dict.get("global_rife_multiplier", "x2")
+        seed_controls["global_rife_model_val"] = settings_dict.get("global_rife_model", get_rife_default_model())
+        seed_controls["global_rife_precision_val"] = settings_dict.get("global_rife_precision", "fp32")
+        seed_controls["global_rife_cuda_device_val"] = settings_dict.get("global_rife_cuda_device", "")
         seed_controls["comparison_mode_val"] = settings_dict.get("comparison_mode", "slider")
         seed_controls["pin_reference_val"] = settings_dict.get("pin_reference", False)
         seed_controls["fullscreen_val"] = settings_dict.get("fullscreen_enabled", True)
@@ -266,10 +303,21 @@ def build_output_callbacks(
         # Wire comparison video generation settings
         seed_controls["generate_comparison_video_val"] = settings_dict.get("generate_comparison_video", True)
         seed_controls["comparison_video_layout_val"] = settings_dict.get("comparison_video_layout", "auto")
+        # Persist full Output tab state so tab switches keep values stable.
+        seed_controls["output_settings"] = dict(settings_dict)
+        seed_controls["preset_dirty"] = True
         state["seed_controls"] = seed_controls
 
         comp_video_status = "enabled" if seed_controls["generate_comparison_video_val"] else "disabled"
-        status = f"Applied output settings\n- Format: {seed_controls['output_format_val']}\n- Comparison: {seed_controls['comparison_mode_val']}\n- Comparison Video: {comp_video_status}\n- Metadata: {seed_controls['save_metadata_val']}"
+        global_rife_status = "enabled" if seed_controls["global_rife_enabled_val"] else "disabled"
+        status = (
+            f"Applied output settings\n"
+            f"- Format: {seed_controls['output_format_val']}\n"
+            f"- Global RIFE: {global_rife_status} ({seed_controls['global_rife_multiplier_val']}, {seed_controls['global_rife_precision_val']})\n"
+            f"- Comparison: {seed_controls['comparison_mode_val']}\n"
+            f"- Comparison Video: {comp_video_status}\n"
+            f"- Metadata: {seed_controls['save_metadata_val']}"
+        )
         return gr.update(value=status), state
 
     def pin_reference_frame(image_path, state):

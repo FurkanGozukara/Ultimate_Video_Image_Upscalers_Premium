@@ -24,6 +24,7 @@ from shared.video_comparison_slider import get_video_comparison_js_on_load
 
 def flashvsr_tab(
     preset_manager,
+    runner,
     run_logger,
     global_settings: Dict[str, Any],
     shared_state: gr.State,
@@ -37,7 +38,7 @@ def flashvsr_tab(
 
     # Build service callbacks
     service = build_flashvsr_callbacks(
-        preset_manager, run_logger, global_settings, shared_state,
+        preset_manager, runner, run_logger, global_settings, shared_state,
         base_dir, temp_dir, output_dir
     )
 
@@ -143,19 +144,19 @@ def flashvsr_tab(
                 scale = gr.Dropdown(
                     label="Upscale Factor",
                     choices=["2", "4"],
-                    value=str(values[2]),
+                    value="2" if str(values[2]).strip() == "2" else "4",
                     info="2x or 4x upscaling"
                 )
                 version = gr.Dropdown(
                     label="Model Version",
                     choices=["10", "11"],
-                    value=values[3],
+                    value=str(values[3]) if str(values[3]) in {"10", "11"} else "10",
                     info="v10 = faster, v11 = higher quality"
                 )
                 mode = gr.Dropdown(
                     label="Pipeline Mode",
                     choices=["tiny", "tiny-long", "full"],
-                    value=values[4],
+                    value=str(values[4]) if str(values[4]) in {"tiny", "tiny-long", "full"} else "tiny",
                     info="tiny = fastest (4-6GB VRAM), tiny-long = balanced (5-7GB), full = best quality (8-12GB)"
                 )
 
@@ -227,7 +228,7 @@ def flashvsr_tab(
                 dtype = gr.Dropdown(
                     label="Precision",
                     choices=["fp16", "bf16"],
-                    value=values[12],
+                    value=str(values[12]) if str(values[12]) in {"fp16", "bf16"} else "bf16",
                     info="bf16 = faster, more stable. fp16 = broader compatibility"
                 )
                 
@@ -249,7 +250,7 @@ def flashvsr_tab(
                 attention = gr.Dropdown(
                     label="Attention Mode",
                     choices=["sage", "block"],
-                    value=values[16],
+                    value=str(values[16]) if str(values[16]) in {"sage", "block"} else "sage",
                     info="sage = default, block = alternative implementation"
                 )
             
@@ -362,6 +363,22 @@ def flashvsr_tab(
                 visible=False
             )
             
+            chunk_status = gr.Markdown("", visible=False)
+            chunk_gallery = gr.Gallery(
+                label="🧩 Chunk Preview",
+                visible=False,
+                columns=4,
+                rows=2,
+                height=220,
+                object_fit="contain",
+            )
+            chunk_preview_video = gr.Video(
+                label="🎬 Selected Chunk",
+                interactive=False,
+                visible=False,
+                buttons=["download"],
+            )
+
             # Action buttons
             with gr.Row():
                 upscale_btn = gr.Button(
@@ -615,12 +632,56 @@ def flashvsr_tab(
             outputs=[sizing_info, shared_state],
             trigger_mode="always_last",
         )
+
+    def refresh_chunk_preview_ui(state):
+        preview = (state or {}).get("seed_controls", {}).get("flashvsr_chunk_preview", {})
+        if not isinstance(preview, dict):
+            return gr.update(value="", visible=False), gr.update(value=[], visible=False), gr.update(value=None, visible=False)
+
+        gallery = preview.get("gallery") or []
+        videos = preview.get("videos") or []
+        message = str(preview.get("message") or "")
+
+        first_video = None
+        for v in videos:
+            if v and Path(v).exists():
+                first_video = v
+                break
+
+        return (
+            gr.update(value=message, visible=bool(message or gallery)),
+            gr.update(value=gallery, visible=bool(gallery)),
+            gr.update(value=first_video, visible=bool(first_video)),
+        )
+
+    def on_chunk_gallery_select(evt: gr.SelectData, state):
+        try:
+            idx = int(evt.index)
+            videos = (state or {}).get("seed_controls", {}).get("flashvsr_chunk_preview", {}).get("videos", [])
+            if 0 <= idx < len(videos):
+                cand = videos[idx]
+                if cand and Path(cand).exists():
+                    return gr.update(value=cand, visible=True)
+        except Exception:
+            pass
+        return gr.update(value=None, visible=False)
+
+    chunk_gallery.select(
+        fn=on_chunk_gallery_select,
+        inputs=[shared_state],
+        outputs=[chunk_preview_video],
+    )
     
     # Main processing
-    upscale_btn.click(
+    run_evt = upscale_btn.click(
         fn=lambda *args, progress=gr.Progress(): service["run_action"](args[0], *args[1:-1], preview_only=False, state=args[-1], progress=progress),
         inputs=[input_file] + inputs_list + [shared_state],
         outputs=[status_box, log_box, output_video, output_image, image_slider, video_comparison_html, shared_state]
+    )
+    run_evt.then(
+        fn=refresh_chunk_preview_ui,
+        inputs=[shared_state],
+        outputs=[chunk_status, chunk_gallery, chunk_preview_video],
     )
     
     cancel_btn.click(
@@ -631,6 +692,11 @@ def flashvsr_tab(
     
     open_outputs_btn.click(
         fn=service["open_outputs_folder"],
+        outputs=status_box
+    )
+
+    clear_temp_btn.click(
+        fn=lambda: service["clear_temp_folder"](False),
         outputs=status_box
     )
     

@@ -182,11 +182,9 @@ def rife_tab(
                     
                     with gr.Group():
                         gr.Markdown("#### ⏱️ RIFE Interpolation")
-                        
-                        rife_enabled = gr.Checkbox(
-                            label="Enable Frame Interpolation",
-                            value=values[1],
-                            info="Use RIFE AI model to generate smooth intermediate frames. Creates slow-motion or higher FPS videos. Essential for fluid motion."
+                        gr.Markdown(
+                            "RIFE interpolation is always active in this tab based on FPS/settings below. "
+                            "Cross-model post-upscale FPS generation is controlled from Output & Comparison > Global Enable RIFE."
                         )
 
                         def _discover_rife_models():
@@ -212,10 +210,16 @@ def rife_tab(
                             info="Custom path to RIFE model directory. Only needed if models are in non-standard location."
                         )
                         
+                        _rife_model_choices = _discover_rife_models()
+                        _rife_model_value = str(values[5] or "").strip()
+                        if _rife_model_value not in _rife_model_choices:
+                            _rife_model_value = _rife_model_choices[0] if _rife_model_choices else None
+
                         rife_model = gr.Dropdown(
                             label="RIFE Model",
-                            choices=_discover_rife_models(),
-                            value=values[5],
+                            choices=_rife_model_choices,
+                            value=_rife_model_value,
+                            allow_custom_value=True,
                             info="RIFE model version. v4.6 = fastest. v4.15+ = best quality. 'anime' optimized for animation. Newer versions slower but smoother."
                         )
                         
@@ -282,7 +286,10 @@ def rife_tab(
                         rife_precision = gr.Dropdown(
                             label="Precision",
                             choices=["fp16", "fp32"],
-                            value=values[10] if cuda_available else "fp32",  # Force fp32 if no CUDA
+                            value=(
+                                ("fp16" if str(values[10]).strip().lower() in {"fp16", "true", "1", "yes", "on"} else "fp32")
+                                if cuda_available else "fp32"
+                            ),
                             info=f"fp16 = half precision, 2x faster, less VRAM. fp32 = full precision. {'(fp16 requires GPU)' if not cuda_available else 'Use fp16 for speed.'}",
                             interactive=cuda_available  # Disable if no CUDA (CPU uses fp32 only)
                         )
@@ -530,7 +537,10 @@ def rife_tab(
     # Adding controls? Update rife_defaults(), RIFE_ORDER, and this list in sync.
     # Current count: 32 components
     # ============================================================================
-    
+
+    # Kept for ORDER compatibility with persisted presets; no longer exposed as a UI toggle.
+    rife_enabled = gr.State(True)
+
     inputs_list = [
         input_path,           # 0: input_path
         rife_enabled,         # 1: rife_enabled  

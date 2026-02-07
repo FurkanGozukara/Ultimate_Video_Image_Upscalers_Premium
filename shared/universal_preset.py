@@ -25,6 +25,7 @@ from shared.services.flashvsr_service import FLASHVSR_ORDER, flashvsr_defaults
 from shared.services.face_service import FACE_ORDER, face_defaults
 from shared.services.resolution_service import RESOLUTION_ORDER, resolution_defaults
 from shared.services.output_service import OUTPUT_ORDER, output_defaults
+from shared.models.rife_meta import get_rife_default_model
 
 
 # Tab configuration: maps tab name to (ORDER, defaults_function)
@@ -65,6 +66,101 @@ TAB_CONFIGS = {
         "needs_model_arg": True,  # output_defaults needs models list
     },
 }
+
+
+def _normalize_flashvsr_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(data or {})
+    try:
+        from shared.services.flashvsr_service import _enforce_flashvsr_guardrails
+
+        cfg = _enforce_flashvsr_guardrails(cfg, flashvsr_defaults())
+    except Exception:
+        pass
+
+    # Dropdown-safe values to avoid Gradio "value not in choices" errors.
+    scale_raw = str(cfg.get("scale", "4")).strip()
+    cfg["scale"] = "2" if scale_raw == "2" else "4"
+    cfg["version"] = str(cfg.get("version", "10") or "10")
+    cfg["mode"] = str(cfg.get("mode", "tiny") or "tiny")
+    return cfg
+
+
+def _normalize_rife_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(data or {})
+    cfg["rife_enabled"] = True
+
+    # Ensure model dropdown always gets a non-empty value.
+    model_name = str(cfg.get("model", "") or "").strip()
+    if not model_name:
+        try:
+            model_name = get_rife_default_model()
+        except Exception:
+            model_name = "rife-v4.6"
+    cfg["model"] = model_name
+
+    # Normalize precision so dropdown always gets a valid choice.
+    precision_raw = str(cfg.get("fp16_mode", "fp32")).strip().lower()
+    if precision_raw in ("true", "1", "yes", "on"):
+        precision_raw = "fp16"
+    elif precision_raw in ("false", "0", "no", "off"):
+        precision_raw = "fp32"
+    cfg["fp16_mode"] = "fp16" if precision_raw == "fp16" else "fp32"
+
+    # Normalize FPS multiplier to valid dropdown options.
+    fps_raw = str(cfg.get("fps_multiplier", "x2")).strip().lower()
+    if fps_raw.startswith("x"):
+        fps_raw = fps_raw[1:]
+    try:
+        fps_int = int(float(fps_raw))
+    except Exception:
+        fps_int = 2
+    fps_int = 1 if fps_int <= 1 else (2 if fps_int <= 2 else (4 if fps_int <= 4 else 8))
+    cfg["fps_multiplier"] = f"x{fps_int}"
+    return cfg
+
+
+def _normalize_output_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(data or {})
+    cfg["frame_interpolation"] = bool(cfg.get("frame_interpolation", False))
+    mult_raw = str(cfg.get("global_rife_multiplier", "x2") or "x2").strip().lower()
+    if mult_raw.startswith("x"):
+        mult_raw = mult_raw[1:]
+    try:
+        mult_val = int(float(mult_raw))
+    except Exception:
+        mult_val = 2
+    mult_val = 2 if mult_val <= 2 else (4 if mult_val <= 4 else 8)
+    cfg["global_rife_multiplier"] = f"x{mult_val}"
+    model_name = str(cfg.get("global_rife_model", "") or "").strip()
+    if not model_name:
+        try:
+            model_name = get_rife_default_model()
+        except Exception:
+            model_name = "rife-v4.6"
+    cfg["global_rife_model"] = model_name
+    precision = str(cfg.get("global_rife_precision", "fp32") or "fp32").lower()
+    cfg["global_rife_precision"] = "fp16" if precision == "fp16" else "fp32"
+    cfg["global_rife_cuda_device"] = str(cfg.get("global_rife_cuda_device", "") or "")
+    return cfg
+
+
+def _normalize_tab_settings(tab_name: str, data: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(data or {})
+    if tab_name == "seedvr2":
+        try:
+            from shared.services.seedvr2_service import _enforce_seedvr2_guardrails
+
+            cfg = _enforce_seedvr2_guardrails(cfg, defaults or seedvr2_defaults(), state=None, silent_migration=True)
+        except Exception:
+            pass
+        return cfg
+    if tab_name == "flashvsr":
+        return _normalize_flashvsr_settings(cfg)
+    if tab_name == "rife":
+        return _normalize_rife_settings(cfg)
+    if tab_name == "output":
+        return _normalize_output_settings(cfg)
+    return cfg
 
 
 def get_all_defaults(base_dir: Path = None, models_list: List[str] = None) -> Dict[str, Dict[str, Any]]:
@@ -179,8 +275,8 @@ def dict_to_values(tab_name: str, data: Dict[str, Any], defaults: Dict[str, Any]
     
     order = config["order"]
     defaults = defaults or {}
-    
-    return [data.get(key, defaults.get(key, None)) for key in order]
+    normalized = _normalize_tab_settings(tab_name, data, defaults)
+    return [normalized.get(key, defaults.get(key, None)) for key in order]
 
 
 def create_universal_preset(
@@ -295,6 +391,7 @@ def merge_preset_with_defaults(
         for key, value in tab_preset.items():
             if value is not None:
                 merged_tab[key] = value
+        merged_tab = _normalize_tab_settings(tab_name, merged_tab, tab_defaults)
         
         merged[tab_name] = merged_tab
     
@@ -359,12 +456,19 @@ def update_shared_state_from_preset(
     seed_controls["scene_threshold"] = res_settings.get("scene_threshold", 27.0)
     seed_controls["min_scene_len"] = res_settings.get("min_scene_len", 1.0)
     
-    out_settings = preset.get("output", {})
+    out_settings = _normalize_output_settings(preset.get("output", {}))
+    seed_controls["output_settings"] = out_settings
     seed_controls["png_padding_val"] = out_settings.get("png_padding", 6)
     seed_controls["png_keep_basename_val"] = out_settings.get("png_keep_basename", True)
     seed_controls["skip_first_frames_val"] = out_settings.get("skip_first_frames", 0)
     seed_controls["load_cap_val"] = out_settings.get("load_cap", 0)
     seed_controls["fps_override_val"] = out_settings.get("fps_override", 0)
+    seed_controls["frame_interpolation_val"] = bool(out_settings.get("frame_interpolation", False))
+    seed_controls["global_rife_enabled_val"] = bool(out_settings.get("frame_interpolation", False))
+    seed_controls["global_rife_multiplier_val"] = out_settings.get("global_rife_multiplier", "x2")
+    seed_controls["global_rife_model_val"] = out_settings.get("global_rife_model", get_rife_default_model())
+    seed_controls["global_rife_precision_val"] = out_settings.get("global_rife_precision", "fp32")
+    seed_controls["global_rife_cuda_device_val"] = out_settings.get("global_rife_cuda_device", "")
     seed_controls["output_format_val"] = out_settings.get("output_format", "auto")
     seed_controls["comparison_mode_val"] = out_settings.get("comparison_mode", "slider")
     seed_controls["pin_reference_val"] = out_settings.get("pin_reference", False)

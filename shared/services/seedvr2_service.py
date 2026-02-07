@@ -43,8 +43,10 @@ from shared.logging_utils import RunLogger
 from shared.comparison_unified import create_unified_comparison, build_comparison_selector
 from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
 from shared.video_comparison import create_comparison_selector
+from shared.global_rife import maybe_apply_global_rife, global_rife_enabled
 from shared.model_manager import get_model_manager, ModelType
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
+from shared.models.rife_meta import get_rife_default_model
 from shared.error_handling import (
     validate_input_path,
     validate_cuda_device as validate_cuda_spec,
@@ -1387,6 +1389,34 @@ def _process_single_file(
                 # Never fail the whole operation due to audio issues
                 local_logs.append(f"Audio replacement skipped: {str(e)}")
 
+        # Global RIFE post-process (adds *_xFPS file while preserving original output).
+        if output_video and Path(output_video).exists():
+            try:
+                if global_rife_enabled(seed_controls):
+                    out_settings = seed_controls.get("output_settings", {}) if isinstance(seed_controls, dict) else {}
+                    if not isinstance(out_settings, dict):
+                        out_settings = {}
+                    mult = str(
+                        seed_controls.get("global_rife_multiplier_val", out_settings.get("global_rife_multiplier", "x2")) or "x2"
+                    )
+                    precision = str(
+                        seed_controls.get("global_rife_precision_val", out_settings.get("global_rife_precision", "fp32")) or "fp32"
+                    ).lower()
+                    local_logs.append(f"Global RIFE requested: {mult} ({'fp16' if precision == 'fp16' else 'fp32'})")
+                rife_out, rife_msg = maybe_apply_global_rife(
+                    runner=runner,
+                    output_video_path=output_video,
+                    seed_controls=seed_controls,
+                    on_log=(lambda m: progress_cb(m) if progress_cb and m else None),
+                )
+                if rife_out and Path(rife_out).exists():
+                    local_logs.append(f"Global RIFE output: {rife_out}")
+                    output_video = rife_out
+                elif rife_msg:
+                    local_logs.append(rife_msg)
+            except Exception as e:
+                local_logs.append(f"Global RIFE skipped: {str(e)}")
+
         # Generate comparison video if enabled (new input vs output comparison feature)
         generate_comparison_video = seed_controls.get("generate_comparison_video_val", True)
         if generate_comparison_video and output_video and Path(output_video).exists():
@@ -2187,6 +2217,53 @@ def build_seedvr2_callbacks(
             else:
                 input_rows.append(_stat_row("Total Frames", "Unavailable"))
 
+            # FPS forecast shown in the Sizing card (base + Global RIFE when enabled).
+            output_settings = seed_controls.get("output_settings", {}) if isinstance(seed_controls, dict) else {}
+            if not isinstance(output_settings, dict):
+                output_settings = {}
+
+            def _fmt_fps(v: Optional[float]) -> Optional[str]:
+                try:
+                    if v is None:
+                        return None
+                    fv = float(v)
+                    if fv <= 0:
+                        return None
+                    return f"{fv:.3f}".rstrip("0").rstrip(".")
+                except Exception:
+                    return None
+
+            try:
+                fps_override = float(seed_controls.get("fps_override_val", output_settings.get("fps_override", 0)) or 0)
+            except Exception:
+                fps_override = 0.0
+
+            base_output_fps: Optional[float] = fps_override if fps_override > 0 else (float(fps_val) if fps_val and fps_val > 0 else None)
+            base_fps_text = _fmt_fps(base_output_fps)
+            if base_fps_text:
+                sizing_rows.append(_stat_row("Output FPS (Base)", base_fps_text))
+
+            global_rife_on = global_rife_enabled(seed_controls)
+            if global_rife_on:
+                mult_raw = str(
+                    seed_controls.get("global_rife_multiplier_val", output_settings.get("global_rife_multiplier", "x2")) or "x2"
+                ).strip().lower()
+                if mult_raw.startswith("x"):
+                    mult_raw = mult_raw[1:]
+                try:
+                    mult_val = int(float(mult_raw))
+                except Exception:
+                    mult_val = 2
+                mult_val = 2 if mult_val <= 2 else (4 if mult_val <= 4 else 8)
+
+                if base_output_fps and base_output_fps > 0:
+                    rife_output_fps = base_output_fps * float(mult_val)
+                    rife_fps_text = _fmt_fps(rife_output_fps)
+                    if rife_fps_text:
+                        sizing_rows.append(_stat_row(f"Output FPS (+Global RIFE {mult_val}x)", rife_fps_text))
+                else:
+                    sizing_rows.append(_stat_row(f"Output FPS (+Global RIFE {mult_val}x)", "Unavailable (input FPS unknown)"))
+
             # Chunking info (Resolution tab global settings)
             auto_chunk = bool(seed_controls.get("auto_chunk", True))
             if auto_chunk:
@@ -2363,6 +2440,24 @@ def build_seedvr2_callbacks(
             # Clear any previous VRAM OOM banner at the start of a new run.
             clear_vram_oom_alert(state)
             seed_controls = state.get("seed_controls", {})
+            output_settings = seed_controls.get("output_settings", {}) if isinstance(seed_controls, dict) else {}
+            if not isinstance(output_settings, dict):
+                output_settings = {}
+
+            # Keep legacy cached keys synced with Output tab source-of-truth values.
+            # This prevents tab switches/run starts from reverting Global RIFE state.
+            if output_settings:
+                global_rife_on = bool(output_settings.get("frame_interpolation", False))
+                seed_controls["frame_interpolation_val"] = global_rife_on
+                seed_controls["global_rife_enabled_val"] = global_rife_on
+                seed_controls["global_rife_multiplier_val"] = output_settings.get("global_rife_multiplier", "x2") or "x2"
+                seed_controls["global_rife_model_val"] = (
+                    str(output_settings.get("global_rife_model", "") or "").strip() or get_rife_default_model()
+                )
+                precision = str(output_settings.get("global_rife_precision", "fp32") or "fp32").strip().lower()
+                seed_controls["global_rife_precision_val"] = "fp16" if precision == "fp16" else "fp32"
+                seed_controls["global_rife_cuda_device_val"] = str(output_settings.get("global_rife_cuda_device", "") or "")
+                state["seed_controls"] = seed_controls
 
             video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
             image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
