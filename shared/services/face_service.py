@@ -219,7 +219,14 @@ def build_face_callbacks(
             batch_files = [batch_in]
         return sorted(batch_files)
 
-    def run_action(uploaded_file, *args, state: Dict[str, Any] = None, progress=None):
+    def run_action(
+        uploaded_file,
+        *args,
+        state: Dict[str, Any] = None,
+        progress=None,
+        global_settings_snapshot: Dict[str, Any] | None = None,
+        _global_settings: Dict[str, Any] = global_settings,
+    ):
         """
         Face restoration run entrypoint for the Face tab.
 
@@ -230,6 +237,11 @@ def build_face_callbacks(
 
         Outputs are handled in ui/face_tab.py.
         """
+        global_settings = (
+            dict(global_settings_snapshot)
+            if isinstance(global_settings_snapshot, dict)
+            else dict(_global_settings)
+        )
         state = state or {}
         settings = _face_dict_from_args(list(args))
 
@@ -425,5 +437,4 @@ def build_face_callbacks(
         "cache_strength": lambda *args: cache_strength(*args[:-1], args[-1]) if len(args) > 1 else cache_strength(args[0]),
         "run_action": run_action,
     }
-
 

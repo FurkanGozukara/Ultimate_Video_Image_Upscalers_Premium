@@ -23,6 +23,12 @@ from ui.universal_preset_section import (
 )
 from shared.universal_preset import dict_to_values
 from ui.media_preview import preview_updates
+from shared.processing_queue import get_processing_queue_manager
+from shared.queue_state import (
+    snapshot_queue_state,
+    snapshot_global_settings,
+    merge_payload_state,
+)
 
 
 def seedvr2_tab(
@@ -86,6 +92,7 @@ def seedvr2_tab(
         preset_manager, runner, run_logger, global_settings,
         shared_state, output_dir, temp_dir
     )
+    queue_manager = get_processing_queue_manager()
 
     # GPU hint and macOS detection with early validation + ffmpeg check
     import platform
@@ -1418,15 +1425,131 @@ def seedvr2_tab(
     )
 
     # Wrapper functions for generator support in Gradio 6.2.0
+    def _queued_waiting_output(state, ticket_id: str, position: int):
+        safe_state = state or {}
+        pos = max(1, int(position)) if position else "?"
+        return (
+            gr.update(value=f"Queue waiting: {ticket_id} (position {pos})"),
+            gr.update(value=f"Queued and waiting for active processing slot. Queue position: {pos}."),
+            f"Queued ({pos})",
+            gr.update(),
+            gr.update(),
+            f"Queue position: {pos}",
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
+    def _queued_cancelled_output(state, ticket_id: str):
+        safe_state = state or {}
+        return (
+            gr.update(value=f"Queue item removed: {ticket_id}"),
+            gr.update(value="This queued request was removed before processing started."),
+            "Canceled",
+            gr.update(),
+            gr.update(),
+            "Removed from queue",
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
+    def _queue_disabled_busy_output(state):
+        safe_state = state or {}
+        return (
+            gr.update(value="Processing already in progress (queue disabled)."),
+            gr.update(value="Enable 'Enable Queue' in Global Settings to stack additional requests."),
+            "Busy",
+            gr.update(),
+            gr.update(),
+            "Queue disabled: request ignored",
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
     def run_upscale_wrapper(*args, progress=gr.Progress()):
-        """Wrapper to properly handle generator function for Gradio 6.2.0"""
-        # Call the generator function and yield from it
-        yield from service["run_action"](*args[:-1], preview_only=False, state=args[-1], progress=progress)
+        """Queue-aware wrapper for upscale action."""
+        live_state = args[-1] if (args and isinstance(args[-1], dict)) else {}
+        queued_state = snapshot_queue_state(live_state)
+        queued_global_settings = snapshot_global_settings(global_settings)
+        queue_enabled = bool(queued_global_settings.get("queue_enabled", True))
+        ticket = queue_manager.submit("SeedVR2", "Upscale")
+        acquired_slot = queue_manager.is_active(ticket.job_id)
+
+        try:
+            if not queue_enabled:
+                if not acquired_slot:
+                    queue_manager.cancel_waiting([ticket.job_id])
+                    yield _queue_disabled_busy_output(live_state)
+                    return
+                for payload in service["run_action"](
+                    *args[:-1],
+                    preview_only=False,
+                    state=queued_state,
+                    progress=progress,
+                    global_settings_snapshot=queued_global_settings,
+                ):
+                    yield merge_payload_state(payload, live_state)
+                return
+
+            while not ticket.start_event.wait(timeout=0.5):
+                if ticket.cancel_event.is_set():
+                    yield _queued_cancelled_output(live_state, ticket.job_id)
+                    return
+                pos = queue_manager.waiting_position(ticket.job_id)
+                yield _queued_waiting_output(live_state, ticket.job_id, pos)
+
+            if ticket.cancel_event.is_set() and not queue_manager.is_active(ticket.job_id):
+                yield _queued_cancelled_output(live_state, ticket.job_id)
+                return
+
+            acquired_slot = True
+            for payload in service["run_action"](
+                *args[:-1],
+                preview_only=False,
+                state=queued_state,
+                progress=progress,
+                global_settings_snapshot=queued_global_settings,
+            ):
+                yield merge_payload_state(payload, live_state)
+        finally:
+            if acquired_slot:
+                queue_manager.complete(ticket.job_id)
+            else:
+                queue_manager.cancel_waiting([ticket.job_id])
     
     def run_preview_wrapper(*args, progress=gr.Progress()):
         """Wrapper to properly handle generator function for Gradio 6.2.0"""
-        # Call the generator function and yield from it
-        yield from service["run_action"](*args[:-1], preview_only=True, state=args[-1], progress=progress)
+        live_state = args[-1] if (args and isinstance(args[-1], dict)) else {}
+        queued_state = snapshot_queue_state(live_state)
+        queued_global_settings = snapshot_global_settings(global_settings)
+        for payload in service["run_action"](
+            *args[:-1],
+            preview_only=True,
+            state=queued_state,
+            progress=progress,
+            global_settings_snapshot=queued_global_settings,
+        ):
+            yield merge_payload_state(payload, live_state)
     
     # Main action buttons with gr.Progress
     upscale_btn.click(
@@ -1435,7 +1558,10 @@ def seedvr2_tab(
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
             chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, chunk_preview_video, batch_gallery, shared_state
-        ]
+        ],
+        concurrency_limit=32,
+        concurrency_id="app_processing_queue",
+        trigger_mode="multiple",
     )
 
     preview_btn.click(

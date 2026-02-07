@@ -2453,9 +2453,22 @@ def build_seedvr2_callbacks(
         )
         return gr.update(value=html_block, visible=True), state
 
-    def run_action(uploaded_file, *args, preview_only: bool = False, state: Dict[str, Any] = None, progress=None):
+    def run_action(
+        uploaded_file,
+        *args,
+        preview_only: bool = False,
+        state: Dict[str, Any] = None,
+        progress=None,
+        global_settings_snapshot: Dict[str, Any] | None = None,
+        _global_settings: Dict[str, Any] = global_settings,
+    ):
         """Main processing action with streaming support and gr.Progress integration."""
         try:
+            global_settings = (
+                dict(global_settings_snapshot)
+                if isinstance(global_settings_snapshot, dict)
+                else dict(_global_settings)
+            )
             state = state or {"seed_controls": {}, "operation_status": "ready"}
             state["operation_status"] = "running"
             # Clear any previous VRAM OOM banner at the start of a new run.

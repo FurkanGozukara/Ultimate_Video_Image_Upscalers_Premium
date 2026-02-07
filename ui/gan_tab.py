@@ -20,6 +20,12 @@ from shared.universal_preset import dict_to_values
 from shared.path_utils import get_media_dimensions, normalize_path
 from shared.resolution_calculator import estimate_fixed_scale_upscale_plan_from_dims
 from ui.media_preview import preview_updates
+from shared.processing_queue import get_processing_queue_manager
+from shared.queue_state import (
+    snapshot_queue_state,
+    snapshot_global_settings,
+    merge_payload_state,
+)
 
 
 def gan_tab(
@@ -42,6 +48,7 @@ def gan_tab(
         preset_manager, runner, run_logger, global_settings, shared_state,
         base_dir, temp_dir, output_dir
     )
+    queue_manager = get_processing_queue_manager()
 
     # Get defaults
     defaults = service["defaults"]
@@ -818,14 +825,129 @@ def gan_tab(
         outputs=[chunk_preview_video],
     )
 
+    def _queued_waiting_output(state, ticket_id: str, position: int):
+        safe_state = state or {}
+        pos = max(1, int(position)) if position else "?"
+        return (
+            gr.update(value=f"Queue waiting: {ticket_id} (position {pos})"),
+            gr.update(value=f"Queued and waiting for active processing slot. Queue position: {pos}."),
+            f"Queued ({pos})",
+            gr.update(),
+            gr.update(),
+            "Waiting in queue",
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
+    def _queued_cancelled_output(state, ticket_id: str):
+        safe_state = state or {}
+        return (
+            gr.update(value=f"Queue item removed: {ticket_id}"),
+            gr.update(value="This queued request was removed before processing started."),
+            "Canceled",
+            gr.update(),
+            gr.update(),
+            "Removed from queue",
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
+    def _queue_disabled_busy_output(state):
+        safe_state = state or {}
+        return (
+            gr.update(value="Processing already in progress (queue disabled)."),
+            gr.update(value="Enable 'Enable Queue' in Global Settings to stack additional requests."),
+            "Busy",
+            gr.update(),
+            gr.update(),
+            "Queue disabled: request ignored",
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
+    def run_upscale_with_queue(upload, *args, progress=gr.Progress()):
+        live_state = args[-1] if (args and isinstance(args[-1], dict)) else {}
+        queued_state = snapshot_queue_state(live_state)
+        queued_global_settings = snapshot_global_settings(global_settings)
+        queue_enabled = bool(queued_global_settings.get("queue_enabled", True))
+        ticket = queue_manager.submit("GAN", "Upscale")
+        acquired_slot = queue_manager.is_active(ticket.job_id)
+
+        try:
+            if not queue_enabled:
+                if not acquired_slot:
+                    queue_manager.cancel_waiting([ticket.job_id])
+                    yield _queue_disabled_busy_output(live_state)
+                    return
+                for payload in service["run_action"](
+                    upload,
+                    *args[:-1],
+                    preview_only=False,
+                    state=queued_state,
+                    progress=progress,
+                    global_settings_snapshot=queued_global_settings,
+                ):
+                    yield merge_payload_state(payload, live_state)
+                return
+
+            while not ticket.start_event.wait(timeout=0.5):
+                if ticket.cancel_event.is_set():
+                    yield _queued_cancelled_output(live_state, ticket.job_id)
+                    return
+                pos = queue_manager.waiting_position(ticket.job_id)
+                yield _queued_waiting_output(live_state, ticket.job_id, pos)
+
+            if ticket.cancel_event.is_set() and not queue_manager.is_active(ticket.job_id):
+                yield _queued_cancelled_output(live_state, ticket.job_id)
+                return
+
+            acquired_slot = True
+            for payload in service["run_action"](
+                upload,
+                *args[:-1],
+                preview_only=False,
+                state=queued_state,
+                progress=progress,
+                global_settings_snapshot=queued_global_settings,
+            ):
+                yield merge_payload_state(payload, live_state)
+        finally:
+            if acquired_slot:
+                queue_manager.complete(ticket.job_id)
+            else:
+                queue_manager.cancel_waiting([ticket.job_id])
+
+    def run_preview_with_snapshot(upload, *args, progress=gr.Progress()):
+        live_state = args[-1] if (args and isinstance(args[-1], dict)) else {}
+        queued_state = snapshot_queue_state(live_state)
+        queued_global_settings = snapshot_global_settings(global_settings)
+        for payload in service["run_action"](
+            upload,
+            *args[:-1],
+            preview_only=True,
+            state=queued_state,
+            progress=progress,
+            global_settings_snapshot=queued_global_settings,
+        ):
+            yield merge_payload_state(payload, live_state)
+
     # Main processing with gr.Progress - include input_file upload
     run_evt = upscale_btn.click(
-        fn=lambda upload, *args, progress=gr.Progress(): service["run_action"](upload, *args[:-1], preview_only=False, state=args[-1], progress=progress),
+        fn=run_upscale_with_queue,
         inputs=[input_file] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,
             last_processed, image_slider, video_comparison_html, batch_gallery, shared_state
-        ]
+        ],
+        concurrency_limit=32,
+        concurrency_id="app_processing_queue",
+        trigger_mode="multiple",
     )
     run_evt.then(
         fn=refresh_chunk_preview_ui,
@@ -834,7 +956,7 @@ def gan_tab(
     )
 
     preview_evt = preview_btn.click(
-        fn=lambda upload, *args, progress=gr.Progress(): service["run_action"](upload, *args[:-1], preview_only=True, state=args[-1], progress=progress),
+        fn=run_preview_with_snapshot,
         inputs=[input_file] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_image, output_video,

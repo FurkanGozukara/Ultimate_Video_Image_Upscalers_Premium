@@ -737,9 +737,21 @@ def build_rife_callbacks(
         """Get safe default values."""
         return [defaults[k] for k in RIFE_ORDER]
 
-    def run_action(uploaded_file, img_folder, *args, state=None):
+    def run_action(
+        uploaded_file,
+        img_folder,
+        *args,
+        state=None,
+        global_settings_snapshot: Dict[str, Any] | None = None,
+        _global_settings: Dict[str, Any] = global_settings,
+    ):
         """Main RIFE processing action with pre-flight checks."""
         try:
+            global_settings = (
+                dict(global_settings_snapshot)
+                if isinstance(global_settings_snapshot, dict)
+                else dict(_global_settings)
+            )
             state = state or {"seed_controls": {}, "operation_status": "ready"}
             state["operation_status"] = "running"
             # Clear any previous VRAM OOM banner at the start of a new run.

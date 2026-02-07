@@ -334,9 +334,22 @@ def build_flashvsr_callbacks(
         normalized = _enforce_flashvsr_guardrails(defaults.copy(), defaults)
         return [normalized[key] for key in FLASHVSR_ORDER]
 
-    def run_action(upload, *args, preview_only: bool = False, state=None, progress=None):
+    def run_action(
+        upload,
+        *args,
+        preview_only: bool = False,
+        state=None,
+        progress=None,
+        global_settings_snapshot: Dict[str, Any] | None = None,
+        _global_settings: Dict[str, Any] = global_settings,
+    ):
         """Main processing action with gr.Progress integration and pre-flight checks."""
         try:
+            global_settings = (
+                dict(global_settings_snapshot)
+                if isinstance(global_settings_snapshot, dict)
+                else dict(_global_settings)
+            )
             state = state or {"seed_controls": {}}
             # Clear any previous VRAM OOM banner at the start of a new run.
             clear_vram_oom_alert(state)

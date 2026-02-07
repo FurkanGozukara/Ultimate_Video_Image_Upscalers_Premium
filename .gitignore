@@ -26,4 +26,7 @@ open-model-database
 *__pycache__*
 outputs/
 models/
+global_config/
+global.json
 temp/
+__pycache__/

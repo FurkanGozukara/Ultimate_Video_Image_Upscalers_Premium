@@ -16,6 +16,12 @@ from ui.universal_preset_section import (
     wire_universal_preset_events,
 )
 from shared.universal_preset import dict_to_values
+from shared.processing_queue import get_processing_queue_manager
+from shared.queue_state import (
+    snapshot_queue_state,
+    snapshot_global_settings,
+    merge_payload_state,
+)
 
 
 def _get_gan_model_names(base_dir) -> list:
@@ -60,6 +66,7 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
 
     # Build service callbacks
     service = build_face_callbacks(preset_manager, global_settings, combined_models, shared_state)
+    queue_manager = get_processing_queue_manager()
 
     # Get defaults
     defaults = service["defaults"]
@@ -506,11 +513,96 @@ def face_tab(preset_manager, global_settings: Dict[str, Any], shared_state: gr.S
         outputs=[global_status, shared_state]
     )
 
+    def _queued_waiting_output(state, ticket_id: str, position: int):
+        safe_state = state or {}
+        pos = max(1, int(position)) if position else "?"
+        return (
+            gr.update(value=f"Queue waiting: {ticket_id} (position {pos})"),
+            gr.update(value=f"Queued and waiting for active processing slot. Queue position: {pos}."),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
+    def _queued_cancelled_output(state, ticket_id: str):
+        safe_state = state or {}
+        return (
+            gr.update(value=f"Queue item removed: {ticket_id}"),
+            gr.update(value="This queued request was removed before processing started."),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
+    def _queue_disabled_busy_output(state):
+        safe_state = state or {}
+        return (
+            gr.update(value="Processing already in progress (queue disabled)."),
+            gr.update(value="Enable 'Enable Queue' in Global Settings to stack additional requests."),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            safe_state,
+        )
+
+    def run_process_with_queue(upload, *args):
+        live_state = args[-1] if (args and isinstance(args[-1], dict)) else {}
+        queued_state = snapshot_queue_state(live_state)
+        queued_global_settings = snapshot_global_settings(global_settings)
+        queue_enabled = bool(queued_global_settings.get("queue_enabled", True))
+        ticket = queue_manager.submit("Face", "Restore")
+        acquired_slot = queue_manager.is_active(ticket.job_id)
+
+        try:
+            if not queue_enabled:
+                if not acquired_slot:
+                    queue_manager.cancel_waiting([ticket.job_id])
+                    yield _queue_disabled_busy_output(live_state)
+                    return
+                payload = service["run_action"](
+                    upload,
+                    *args[:-1],
+                    state=queued_state,
+                    global_settings_snapshot=queued_global_settings,
+                )
+                yield merge_payload_state(payload, live_state)
+                return
+
+            while not ticket.start_event.wait(timeout=0.5):
+                if ticket.cancel_event.is_set():
+                    yield _queued_cancelled_output(live_state, ticket.job_id)
+                    return
+                pos = queue_manager.waiting_position(ticket.job_id)
+                yield _queued_waiting_output(live_state, ticket.job_id, pos)
+
+            if ticket.cancel_event.is_set() and not queue_manager.is_active(ticket.job_id):
+                yield _queued_cancelled_output(live_state, ticket.job_id)
+                return
+
+            acquired_slot = True
+            payload = service["run_action"](
+                upload,
+                *args[:-1],
+                state=queued_state,
+                global_settings_snapshot=queued_global_settings,
+            )
+            yield merge_payload_state(payload, live_state)
+        finally:
+            if acquired_slot:
+                queue_manager.complete(ticket.job_id)
+            else:
+                queue_manager.cancel_waiting([ticket.job_id])
+
     # Standalone processing
     process_btn.click(
-        fn=lambda upload, *args: service["run_action"](upload, *args[:-1], state=args[-1]),
+        fn=run_process_with_queue,
         inputs=[input_file] + inputs_list + [shared_state],
         outputs=[process_status, process_log, restored_image, restored_video, batch_outputs, shared_state],
+        concurrency_limit=32,
+        concurrency_id="app_processing_queue",
+        trigger_mode="multiple",
     )
 
     # UNIVERSAL PRESET EVENT WIRING

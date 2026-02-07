@@ -38,6 +38,7 @@ from ui.rife_tab import rife_tab
 from ui.gan_tab import gan_tab
 from ui.flashvsr_tab import flashvsr_tab
 from ui.health_tab import health_tab
+from ui.queue_tab import queue_tab
 
 BASE_DIR = Path(__file__).parent.resolve()
 PRESET_DIR = BASE_DIR / "presets"
@@ -86,8 +87,8 @@ GLOBAL_DEFAULTS = {
     "telemetry": True,
     "face_global": False,
     "face_strength": 0.5,
+    "queue_enabled": True,
     "mode": "subprocess",
-    "mode_locked": False,  # Persisted lock state for in-app mode
     "pinned_reference_path": None,  # Global pinned reference for iterative comparison
     # FIXED: Store model cache paths - editable in UI, persisted across restarts
     "models_dir": launcher_models_dir or str(BASE_DIR / "models"),
@@ -119,13 +120,11 @@ runner = Runner(
 )
 # Restore execution mode from saved settings (default to subprocess)
 saved_mode = global_settings.get("mode", "subprocess")
-mode_locked = global_settings.get("mode_locked", False)
 try:
     runner.set_mode(saved_mode)
 except Exception:
     runner.set_mode("subprocess")
     global_settings["mode"] = "subprocess"
-    global_settings["mode_locked"] = False
 run_logger = RunLogger(enabled=global_settings.get("telemetry", True))
 
 
@@ -147,10 +146,6 @@ def main():
         required_features, features_msg = check_required_features()
         if not required_features:
             warnings.append(f"⚠️ GRADIO FEATURES: {features_msg}")
-        
-        # Add mode lock warning if applicable
-        if mode_locked and saved_mode == "in_app":
-            warnings.append("🔒 IN-APP MODE LOCKED: You are in in-app mode. To switch back to subprocess mode, restart the application.")
         
         for key, info in initial_report.items():
             # We handle ffmpeg messaging separately so we only show an error when it's missing.
@@ -580,6 +575,7 @@ def main():
                 "generate_comparison_video_val": startup_output_settings.get("generate_comparison_video", True),
                 "comparison_video_layout_val": startup_output_settings.get("comparison_video_layout", "auto"),
                 "face_strength_val": global_settings.get("face_strength", 0.5),
+                "queue_enabled_val": bool(global_settings.get("queue_enabled", True)),
                 
                 # Resolution tab cached values
                 "auto_chunk": startup_auto_chunk,
@@ -642,6 +638,11 @@ def main():
                         value=global_settings.get("face_global", False),
                         info="Enable face restoration for all upscaling operations (SeedVR2, GAN, RIFE, FlashVSR+)"
                     )
+                    queue_enabled_toggle = gr.Checkbox(
+                        label="Enable Queue",
+                        value=bool(global_settings.get("queue_enabled", True)),
+                        info="When enabled, extra generate/upscale clicks are queued. When disabled, new clicks are ignored while processing is active."
+                    )
                 with gr.Row():
                     face_strength_slider = gr.Slider(
                         label="Global Face Restoration Strength",
@@ -666,7 +667,7 @@ def main():
                     with gr.Column():
                         gr.Markdown("""
                         ⚠️ **IMPORTANT**: Changing these paths will NOT move existing models. You must:
-                        1. Save new paths here
+                        1. Update paths here (saved immediately)
                         2. Restart the application
                         3. Models will re-download to new location (or manually copy from old location)
                         """)
@@ -709,22 +710,41 @@ def main():
                 # Processing mode selection controls (placed before Execution Mode explanation)
                 mode_radio = gr.Radio(
                     choices=["subprocess", "in_app"],
-                    value=saved_mode,  # Restore from saved settings
+                    value=saved_mode,
                     label="Processing Mode",
-                    info="⚠️ Changing to in-app requires confirmation and persists until app restart",
+                    info="Applies immediately.",
                     interactive=True
                 )
-                mode_confirm = gr.Checkbox(
-                    label="⚠️ I understand that in-app mode requires app restart to revert",
-                    value=False,
-                    visible=True,
-                    info="Enable this checkbox to confirm mode switch to in-app (cannot be undone without restart)"
-                )
-                apply_mode_btn = gr.Button("🔄 Apply Mode Change", variant="secondary", size="lg")
-                mode_status = gr.Markdown("")  # Status display for mode changes
-                
-                save_global = gr.Button("💾 Save Global Settings", variant="primary", size="lg")
                 global_status = gr.Markdown("")
+                gr.Markdown(
+                    "**Restart-required settings:** `MODELS_DIR`, `HF_HOME`, `TRANSFORMERS_CACHE`.\n"
+                    "They are saved immediately, but full effect across all libraries is guaranteed after app restart."
+                )
+
+                gr.Markdown("### Global Config")
+                global_config_choices = preset_manager.list_presets("global_config", "app")
+                last_global_config = preset_manager.get_last_used_name("global_config", "app")
+                global_config_value = (
+                    last_global_config
+                    if last_global_config in global_config_choices
+                    else (global_config_choices[-1] if global_config_choices else None)
+                )
+                with gr.Row():
+                    global_config_dropdown = gr.Dropdown(
+                        label="Saved Global Configs",
+                        choices=global_config_choices,
+                        value=global_config_value,
+                        allow_custom_value=False,
+                    )
+                    global_config_name = gr.Textbox(
+                        label="Save As",
+                        placeholder="e.g. workstation_a",
+                    )
+                with gr.Row():
+                    global_config_save_btn = gr.Button("Save Config", variant="secondary")
+                    global_config_load_btn = gr.Button("Load Config", variant="secondary")
+                    global_config_delete_btn = gr.Button("Delete Config", variant="stop")
+                global_config_status = gr.Markdown("")
                 
                 # Execution mode controls
                 gr.Markdown("### ⚙️ Execution Mode")
@@ -787,9 +807,9 @@ def main():
                         - VRAM may not fully clear
                         - Usage creeps up, eventual OOM crashes
                         
-                        **5. ⚠️ MODE LOCK**
-                        - Cannot switch back without restart
-                        - Locked-in until app restart
+                        **5. ℹ️ MODE SWITCH**
+                        - Mode changes apply immediately from the selector above
+                        - No restart needed for mode-only changes
                         
                         **Required for Functional Mode:**
                         - Refactor CLIs for persistent loading
@@ -817,26 +837,166 @@ def main():
                 
                 gr.Markdown("💡 **Note**: In-app mode exists ONLY as a code framework for potential future optimization. Consider it **disabled** for all practical purposes.")
 
-                # Wire up global settings events
-                def save_global_settings(od, td, tel, face, face_str, models_dir, hf_home, trans_cache, state):
-                    from shared.services.global_service import save_global_settings
-                    return save_global_settings(od, td, tel, face, face_str, models_dir, hf_home, trans_cache, runner, preset_manager, global_settings, run_logger, state)
+                # Wire up global settings events (auto-apply)
+                def apply_global_settings_live(od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache, state):
+                    from shared.services.global_service import apply_global_settings_live
+                    return apply_global_settings_live(
+                        od, td, tel, face, face_str, queue_enabled, mode_choice,
+                        models_dir, hf_home, trans_cache,
+                        runner, preset_manager, global_settings, run_logger, state,
+                    )
 
-                def apply_mode_selection(mode_choice, confirm, state):
-                    from shared.services.global_service import apply_mode_selection
-                    return apply_mode_selection(mode_choice, confirm, runner, preset_manager, global_settings, state)
+                def apply_global_settings_live_no_mode(od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache, state):
+                    status_upd, _mode_upd, next_state = apply_global_settings_live(
+                        od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache, state
+                    )
+                    return status_upd, next_state
 
-                save_global.click(
-                    fn=save_global_settings,
-                    inputs=[output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, face_strength_slider, 
-                           models_dir_box, hf_home_box, transformers_cache_box, shared_state],
-                    outputs=[global_status, shared_state],
+                global_live_inputs = [
+                    output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, face_strength_slider,
+                    queue_enabled_toggle, mode_radio, models_dir_box, hf_home_box, transformers_cache_box, shared_state,
+                ]
+
+                for comp in [
+                    output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, face_strength_slider,
+                    queue_enabled_toggle, models_dir_box, hf_home_box, transformers_cache_box,
+                ]:
+                    comp.change(
+                        fn=apply_global_settings_live_no_mode,
+                        inputs=global_live_inputs,
+                        outputs=[global_status, shared_state],
+                        queue=False,
+                        show_progress="hidden",
+                        trigger_mode="always_last",
+                    )
+
+                mode_radio.change(
+                    fn=apply_global_settings_live,
+                    inputs=global_live_inputs,
+                    outputs=[global_status, mode_radio, shared_state],
+                    queue=False,
+                    show_progress="hidden",
+                    trigger_mode="always_last",
                 )
 
-                apply_mode_btn.click(
-                    fn=apply_mode_selection,
-                    inputs=[mode_radio, mode_confirm, shared_state],
-                    outputs=[mode_radio, mode_confirm, mode_status, shared_state],
+                def build_global_config_payload(od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache):
+                    return {
+                        "output_dir": od,
+                        "temp_dir": td,
+                        "telemetry": bool(tel),
+                        "face_global": bool(face),
+                        "face_strength": float(face_str),
+                        "queue_enabled": bool(queue_enabled),
+                        "mode": str(mode_choice or "subprocess"),
+                        "models_dir": models_dir,
+                        "hf_home": hf_home,
+                        "transformers_cache": trans_cache,
+                    }
+
+                def save_global_config(cfg_name, od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache, state):
+                    name = str(cfg_name or "").strip()
+                    if not name:
+                        return gr.update(), gr.update(value="Enter a config name first."), gr.update(), gr.update(), state
+
+                    payload = build_global_config_payload(
+                        od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache
+                    )
+                    preset_manager.save_preset_safe("global_config", "app", name, payload)
+                    dropdown_upd = gr.update(
+                        choices=preset_manager.list_presets("global_config", "app"),
+                        value=name,
+                    )
+                    status_upd, mode_upd, next_state = apply_global_settings_live(
+                        od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache, state
+                    )
+                    return (
+                        dropdown_upd,
+                        gr.update(value=f"Saved global config '{name}'."),
+                        status_upd,
+                        mode_upd,
+                        next_state,
+                    )
+
+                def load_global_config(cfg_name, od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache, state):
+                    name = str(cfg_name or "").strip()
+                    if not name:
+                        return (
+                            od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache,
+                            gr.update(value="Select a config first."), gr.update(), state,
+                        )
+
+                    loaded = preset_manager.load_preset_safe("global_config", "app", name)
+                    if not loaded:
+                        return (
+                            od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache,
+                            gr.update(value=f"Config '{name}' not found."), gr.update(), state,
+                        )
+                    preset_manager.set_last_used("global_config", "app", name)
+
+                    merged = build_global_config_payload(
+                        od, td, tel, face, face_str, queue_enabled, mode_choice, models_dir, hf_home, trans_cache
+                    )
+                    merged.update(loaded)
+
+                    od2 = merged.get("output_dir", od)
+                    td2 = merged.get("temp_dir", td)
+                    tel2 = bool(merged.get("telemetry", tel))
+                    face2 = bool(merged.get("face_global", face))
+                    face_str2 = float(merged.get("face_strength", face_str))
+                    queue_enabled2 = bool(merged.get("queue_enabled", queue_enabled))
+                    mode2 = str(merged.get("mode", mode_choice) or "subprocess")
+                    models2 = merged.get("models_dir", models_dir)
+                    hf2 = merged.get("hf_home", hf_home)
+                    trans2 = merged.get("transformers_cache", trans_cache)
+
+                    status_upd, mode_upd, next_state = apply_global_settings_live(
+                        od2, td2, tel2, face2, face_str2, queue_enabled2, mode2, models2, hf2, trans2, state
+                    )
+                    mode_val = mode2
+                    if isinstance(mode_upd, dict) and ("value" in mode_upd):
+                        mode_val = mode_upd.get("value")
+
+                    return (
+                        od2, td2, tel2, face2, face_str2, queue_enabled2, mode_val, models2, hf2, trans2,
+                        gr.update(value=f"Loaded global config '{name}'"), status_upd, next_state,
+                    )
+
+                def delete_global_config(cfg_name):
+                    name = str(cfg_name or "").strip()
+                    if not name:
+                        return gr.update(), gr.update(value="Select a config first.")
+                    ok = preset_manager.delete_preset("global_config", "app", name)
+                    choices = preset_manager.list_presets("global_config", "app")
+                    value = choices[-1] if choices else None
+                    msg = f"Deleted global config '{name}'." if ok else f"Config '{name}' not found."
+                    return gr.update(choices=choices, value=value), gr.update(value=msg)
+
+                global_config_save_btn.click(
+                    fn=save_global_config,
+                    inputs=[global_config_name] + global_live_inputs,
+                    outputs=[global_config_dropdown, global_config_status, global_status, mode_radio, shared_state],
+                    queue=False,
+                    show_progress="hidden",
+                )
+
+                global_config_load_btn.click(
+                    fn=load_global_config,
+                    inputs=[global_config_dropdown] + global_live_inputs,
+                    outputs=[
+                        output_dir_box, temp_dir_box, telemetry_toggle, face_global_toggle, face_strength_slider,
+                        queue_enabled_toggle, mode_radio, models_dir_box, hf_home_box, transformers_cache_box,
+                        global_config_status, global_status, shared_state,
+                    ],
+                    queue=False,
+                    show_progress="hidden",
+                )
+
+                global_config_delete_btn.click(
+                    fn=delete_global_config,
+                    inputs=[global_config_dropdown],
+                    outputs=[global_config_dropdown, global_config_status],
+                    queue=False,
+                    show_progress="hidden",
                 )
 
         # ------------------------------------------------------------------ #
@@ -1011,6 +1171,9 @@ def main():
             show_progress="hidden",
             trigger_mode="always_last",
         )
+
+        with gr.Tab("Queue (0)", render_children=True) as tab_queue:
+            queue_tab(tab_queue)
 
         with gr.Tab("🏥 Health Check"):
             health_tab(

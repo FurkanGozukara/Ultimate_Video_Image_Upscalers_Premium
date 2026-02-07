@@ -490,8 +490,21 @@ def build_gan_callbacks(
 
             return s
 
-    def run_action(upload, *args, preview_only: bool = False, state=None, progress=None):
+    def run_action(
+        upload,
+        *args,
+        preview_only: bool = False,
+        state=None,
+        progress=None,
+        global_settings_snapshot: Dict[str, Any] | None = None,
+        _global_settings: Dict[str, Any] = global_settings,
+    ):
         # Streaming: run in background thread, stream log lines if available
+        global_settings = (
+            dict(global_settings_snapshot)
+            if isinstance(global_settings_snapshot, dict)
+            else dict(_global_settings)
+        )
         progress_q: "queue.Queue[str]" = queue.Queue()
         result_holder: Dict[str, Any] = {}
 
