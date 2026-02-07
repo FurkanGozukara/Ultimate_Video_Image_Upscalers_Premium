@@ -22,6 +22,7 @@ from .path_utils import (
 )
 from .face_restore import restore_image, restore_video
 from .command_logger import get_command_logger
+from .video_encoder import encode_video
 
 
 # GAN Model Metadata System
@@ -51,6 +52,30 @@ REAL_ESRGAN_MODELS = {
     'realesr-animevideov3': {'scale': 4, 'arch': 'SRVGGNetCompact'},
     'realesr-general-x4v3': {'scale': 4, 'arch': 'SRVGGNetCompact'},
 }
+
+
+def _normalize_video_codec_key(codec_raw: Any) -> str:
+    """
+    Normalize UI/runtime codec values to keys accepted by video_codec_options.
+    """
+    codec = str(codec_raw or "h264").strip().lower()
+    mapping = {
+        "libx264": "h264",
+        "x264": "h264",
+        "h264": "h264",
+        "avc": "h264",
+        "libx265": "h265",
+        "x265": "h265",
+        "h265": "h265",
+        "hevc": "h265",
+        "libvpx-vp9": "vp9",
+        "vp9": "vp9",
+        "libaom-av1": "av1",
+        "av1": "av1",
+        "prores": "prores",
+        "prores_ks": "prores",
+    }
+    return mapping.get(codec, "h264")
 
 
 class GanModelRegistry:
@@ -508,17 +533,26 @@ def _run_gan_video(
                 
                 # Encode partial video from available frames
                 try:
-                    encode_cmd = [
-                        "ffmpeg", "-y",
-                        "-framerate", str(target_fps),
-                        "-i", str(frames_up_dir / upscaled_frame_pattern),
-                        "-c:v", settings.get("video_codec", "libx264"),
-                        "-crf", str(settings.get("video_quality", 18)),
-                        "-pix_fmt", "yuv420p",
-                        str(partial_output_final)
-                    ]
-                    
-                    subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    codec_key = _normalize_video_codec_key(settings.get("video_codec", "h264"))
+                    quality = int(settings.get("video_quality", 18) or 18)
+                    preset = str(settings.get("video_preset", "medium") or "medium")
+                    pixel_format = str(settings.get("pixel_format", "yuv420p") or "yuv420p")
+                    two_pass = bool(settings.get("two_pass_encoding", False))
+
+                    ok = encode_video(
+                        input_frames_path=str(frames_up_dir / upscaled_frame_pattern),
+                        output_video_path=str(partial_output_final),
+                        fps=float(target_fps),
+                        codec=codec_key,
+                        crf=quality,
+                        preset=preset,
+                        pixel_format=pixel_format,
+                        audio_codec="none",
+                        two_pass=two_pass,
+                        on_progress=on_progress,
+                    )
+                    if not ok:
+                        raise RuntimeError("Frame-to-video encoding failed")
                     
                     # Cleanup temp directory
                     if not settings.get("keep_temp", False):
@@ -560,18 +594,27 @@ def _run_gan_video(
         # Use same padding as extraction (respect user's PNG padding setting)
         png_padding = int(settings.get("png_padding", 6))
         upscaled_frame_pattern = f"frame_%0{png_padding}d_out.png"
-        
-        encode_cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(target_fps),
-            "-i", str(frames_up_dir / upscaled_frame_pattern),
-            "-c:v", settings.get("video_codec", "libx264"),
-            "-crf", str(settings.get("video_quality", 18)),
-            "-pix_fmt", "yuv420p",
-            str(output_path)
-        ]
-        
-        subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        codec_key = _normalize_video_codec_key(settings.get("video_codec", "h264"))
+        quality = int(settings.get("video_quality", 18) or 18)
+        preset = str(settings.get("video_preset", "medium") or "medium")
+        pixel_format = str(settings.get("pixel_format", "yuv420p") or "yuv420p")
+        two_pass = bool(settings.get("two_pass_encoding", False))
+
+        ok = encode_video(
+            input_frames_path=str(frames_up_dir / upscaled_frame_pattern),
+            output_video_path=str(output_path),
+            fps=float(target_fps),
+            codec=codec_key,
+            crf=quality,
+            preset=preset,
+            pixel_format=pixel_format,
+            audio_codec="none",
+            two_pass=two_pass,
+            on_progress=on_progress,
+        )
+        if not ok:
+            raise RuntimeError("Frame-to-video encoding failed")
 
         # Cleanup temp directory
         if not settings.get("keep_temp", False):

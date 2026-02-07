@@ -14,6 +14,7 @@ def output_defaults(models: List[str]) -> Dict[str, Any]:
     return {
         "model": models[0] if models else "",
         "output_format": "auto",
+        "overwrite_existing_batch": False,
         "png_sequence_enabled": False,
         "png_padding": 6,  # Match SeedVR2 CLI default (6-digit padding)
         "png_keep_basename": True,
@@ -34,6 +35,7 @@ def output_defaults(models: List[str]) -> Dict[str, Any]:
         "global_rife_model": get_rife_default_model(),
         "global_rife_precision": "fp32",
         "global_rife_cuda_device": "",
+        "global_rife_process_chunks": True,
         "comparison_mode": "slider",
         "pin_reference": False,
         "fullscreen_enabled": True,
@@ -80,6 +82,8 @@ OUTPUT_ORDER: List[str] = [
     "metadata_format",
     "telemetry_enabled",
     "log_level",
+    "overwrite_existing_batch",
+    "global_rife_process_chunks",
 ]
 
 
@@ -105,6 +109,7 @@ def _normalize_output_fields(data: Dict[str, Any]) -> Dict[str, Any]:
     precision_raw = str(cfg.get("global_rife_precision", "fp32") or "fp32").strip().lower()
     cfg["global_rife_precision"] = "fp16" if precision_raw == "fp16" else "fp32"
     cfg["global_rife_cuda_device"] = str(cfg.get("global_rife_cuda_device", "") or "")
+    cfg["global_rife_process_chunks"] = bool(cfg.get("global_rife_process_chunks", True))
     return cfg
 
 
@@ -280,6 +285,8 @@ def build_output_callbacks(
 
         seed_controls = state.get("seed_controls", {})
         seed_controls["output_format_val"] = settings_dict.get("output_format", "auto")
+        seed_controls["png_sequence_enabled_val"] = bool(settings_dict.get("png_sequence_enabled", False))
+        seed_controls["overwrite_existing_batch_val"] = bool(settings_dict.get("overwrite_existing_batch", False))
         seed_controls["fps_override_val"] = settings_dict.get("fps_override", 0)
         seed_controls["frame_interpolation_val"] = bool(settings_dict.get("frame_interpolation", False))
         seed_controls["global_rife_enabled_val"] = bool(settings_dict.get("frame_interpolation", False))
@@ -287,6 +294,7 @@ def build_output_callbacks(
         seed_controls["global_rife_model_val"] = settings_dict.get("global_rife_model", get_rife_default_model())
         seed_controls["global_rife_precision_val"] = settings_dict.get("global_rife_precision", "fp32")
         seed_controls["global_rife_cuda_device_val"] = settings_dict.get("global_rife_cuda_device", "")
+        seed_controls["global_rife_process_chunks_val"] = bool(settings_dict.get("global_rife_process_chunks", True))
         seed_controls["comparison_mode_val"] = settings_dict.get("comparison_mode", "slider")
         seed_controls["pin_reference_val"] = settings_dict.get("pin_reference", False)
         seed_controls["fullscreen_val"] = settings_dict.get("fullscreen_enabled", True)
@@ -310,10 +318,13 @@ def build_output_callbacks(
 
         comp_video_status = "enabled" if seed_controls["generate_comparison_video_val"] else "disabled"
         global_rife_status = "enabled" if seed_controls["global_rife_enabled_val"] else "disabled"
+        global_rife_chunk_mode = "per-chunk" if seed_controls["global_rife_process_chunks_val"] else "final-only"
         status = (
             f"Applied output settings\n"
             f"- Format: {seed_controls['output_format_val']}\n"
-            f"- Global RIFE: {global_rife_status} ({seed_controls['global_rife_multiplier_val']}, {seed_controls['global_rife_precision_val']})\n"
+            f"- PNG Sequence: {seed_controls['png_sequence_enabled_val']}\n"
+            f"- Overwrite Existing Batch Outputs: {seed_controls['overwrite_existing_batch_val']}\n"
+            f"- Global RIFE: {global_rife_status} ({seed_controls['global_rife_multiplier_val']}, {seed_controls['global_rife_precision_val']}, {global_rife_chunk_mode})\n"
             f"- Comparison: {seed_controls['comparison_mode_val']}\n"
             f"- Comparison Video: {comp_video_status}\n"
             f"- Metadata: {seed_controls['save_metadata_val']}"

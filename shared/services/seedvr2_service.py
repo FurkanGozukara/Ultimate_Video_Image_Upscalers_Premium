@@ -243,6 +243,8 @@ def seedvr2_defaults(model_name: Optional[str] = None, base_dir: Optional[Path] 
         # ADDED v2.5.22: FFmpeg 10-bit encoding support for reduced banding in gradients
         "video_backend": "opencv",  # "opencv" (default, 8-bit) or "ffmpeg" (10-bit capable)
         "use_10bit": False,  # Enable 10-bit color depth (requires video_backend="ffmpeg", x265 codec)
+        # Persist per-run face restoration toggle from SeedVR2 tab.
+        "face_restore_after_upscale": False,
         "_compile_compatible": compile_compatible,  # Store for validation
     }
 
@@ -468,6 +470,8 @@ SEEDVR2_ORDER: List[str] = [
     # vNext sizing (app-level; does not directly map 1:1 to CLI flags)
     "upscale_factor",
     "pre_downscale_then_upscale",
+    # Per-run post-upscale face restoration toggle (SeedVR2 tab checkbox).
+    "face_restore_after_upscale",
 ]
 
 
@@ -1082,6 +1086,9 @@ def _process_single_file(
             and not preview_only
             and detect_input_type(settings["input_path"]) == "video"
         )
+        chunk_count = 0
+        scene_threshold = float(seed_controls.get("scene_threshold", 27.0))
+        min_scene_len = float(seed_controls.get("min_scene_len", 1.0))
 
         if should_chunk:
             # Process with external PySceneDetect chunking
@@ -1408,6 +1415,16 @@ def _process_single_file(
                     output_video_path=output_video,
                     seed_controls=seed_controls,
                     on_log=(lambda m: progress_cb(m) if progress_cb and m else None),
+                    chunking_context={
+                        "enabled": bool(chunk_count and chunk_count > 0),
+                        "auto_chunk": bool(auto_chunk),
+                        "chunk_size_sec": float(chunk_size_sec or 0),
+                        "chunk_overlap_sec": 0.0 if auto_chunk else float(seed_controls.get("chunk_overlap_sec", 0) or 0),
+                        "scene_threshold": float(scene_threshold or 27.0),
+                        "min_scene_len": float(min_scene_len or 1.0),
+                        "frame_accurate_split": bool(settings.get("frame_accurate_split", True)),
+                        "per_chunk_cleanup": bool(seed_controls.get("per_chunk_cleanup", False)),
+                    },
                 )
                 if rife_out and Path(rife_out).exists():
                     local_logs.append(f"Global RIFE output: {rife_out}")
@@ -1677,6 +1694,9 @@ def build_seedvr2_callbacks(
         )
         audio_codec = str(seed_state.get("audio_codec_val") or "copy")
         audio_bitrate = seed_state.get("audio_bitrate_val") or None
+        output_settings = seed_state.get("output_settings", {}) if isinstance(seed_state, dict) else {}
+        if not isinstance(output_settings, dict):
+            output_settings = {}
 
         # Preferred: salvage from run directories in outputs.
         try:
@@ -1695,6 +1715,7 @@ def build_seedvr2_callbacks(
                     audio_source=str(audio_source) if audio_source else None,
                     audio_codec=audio_codec,
                     audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                    encode_settings=output_settings,
                 )
                 if partial_path and Path(partial_path).exists():
                     compiled_output = str(partial_path)
@@ -2432,7 +2453,7 @@ def build_seedvr2_callbacks(
         )
         return gr.update(value=html_block, visible=True), state
 
-    def run_action(uploaded_file, face_restore_run, *args, preview_only: bool = False, state: Dict[str, Any] = None, progress=None):
+    def run_action(uploaded_file, *args, preview_only: bool = False, state: Dict[str, Any] = None, progress=None):
         """Main processing action with streaming support and gr.Progress integration."""
         try:
             state = state or {"seed_controls": {}, "operation_status": "ready"}
@@ -2457,6 +2478,7 @@ def build_seedvr2_callbacks(
                 precision = str(output_settings.get("global_rife_precision", "fp32") or "fp32").strip().lower()
                 seed_controls["global_rife_precision_val"] = "fp16" if precision == "fp16" else "fp32"
                 seed_controls["global_rife_cuda_device_val"] = str(output_settings.get("global_rife_cuda_device", "") or "")
+                seed_controls["global_rife_process_chunks_val"] = bool(output_settings.get("global_rife_process_chunks", True))
                 state["seed_controls"] = seed_controls
 
             video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
@@ -2645,7 +2667,7 @@ def build_seedvr2_callbacks(
                 )
 
             # Setup processing parameters
-            face_apply = bool(face_restore_run) or bool(global_settings.get("face_global", False))
+            face_apply = bool(settings.get("face_restore_after_upscale", False)) or bool(global_settings.get("face_global", False))
             face_strength = float(global_settings.get("face_strength", 0.5))
 
             # Apply shared sizing values from Resolution & Scene Split tab (global cache)
@@ -2675,10 +2697,19 @@ def build_seedvr2_callbacks(
             # NOTE: SeedVR2 CLI `--resolution` is now computed per-input from Upscale-x rules.
             # This happens inside _process_single_file() so it also applies to batch items.
 
-            # Apply output format from Comparison tab if set
-            if seed_controls.get("output_format_val"):
-                if settings.get("output_format") in (None, "auto"):
-                    settings["output_format"] = seed_controls["output_format_val"]
+            # Apply Output tab format preferences when SeedVR2 tab format is not explicitly set.
+            cached_fmt = str(seed_controls.get("output_format_val") or "").strip().lower()
+            png_seq_enabled = bool(
+                seed_controls.get(
+                    "png_sequence_enabled_val",
+                    output_settings.get("png_sequence_enabled", False) if isinstance(output_settings, dict) else False,
+                )
+            )
+            if settings.get("output_format") in (None, "auto"):
+                if cached_fmt in ("mp4", "png"):
+                    settings["output_format"] = cached_fmt
+                elif png_seq_enabled:
+                    settings["output_format"] = "png"
 
             if settings["output_format"] == "auto":
                 settings["output_format"] = None
@@ -2703,6 +2734,21 @@ def build_seedvr2_callbacks(
                 # Note: telemetry is controlled globally via runner.set_telemetry()
                 # This flag controls per-run metadata emission only
                 settings["telemetry_enabled"] = bool(seed_controls["telemetry_enabled_val"])
+            # Apply advanced encoding settings from Output tab so downstream chunk concat and
+            # post-processing paths do not fall back to hardcoded ffmpeg defaults.
+            if isinstance(output_settings, dict):
+                for key in (
+                    "video_codec",
+                    "video_quality",
+                    "video_preset",
+                    "pixel_format",
+                    "two_pass_encoding",
+                    "metadata_format",
+                    "log_level",
+                    "temporal_padding",
+                ):
+                    if output_settings.get(key) is not None:
+                        settings[key] = output_settings.get(key)
             
             # Apply FPS override from Output tab ONLY if not explicitly set in SeedVR2 tab
             # SeedVR2 tab value takes precedence

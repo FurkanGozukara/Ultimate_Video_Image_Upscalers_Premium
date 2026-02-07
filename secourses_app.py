@@ -515,6 +515,9 @@ def main():
         startup_output_settings["global_rife_model"] = (
             str(startup_output_settings.get("global_rife_model", "") or "").strip() or get_rife_default_model()
         )
+        startup_output_settings["global_rife_process_chunks"] = bool(
+            startup_output_settings.get("global_rife_process_chunks", True)
+        )
         startup_preset["output"] = startup_output_settings
         startup_auto_chunk = bool((startup_res_settings or {}).get("auto_chunk", True))
         startup_res_settings = dict(startup_res_settings) if isinstance(startup_res_settings, dict) else {}
@@ -554,6 +557,7 @@ def main():
                 # Output tab cached values
                 "png_padding_val": startup_output_settings.get("png_padding", 6),
                 "png_keep_basename_val": startup_output_settings.get("png_keep_basename", True),
+                "overwrite_existing_batch_val": bool(startup_output_settings.get("overwrite_existing_batch", False)),
                 "skip_first_frames_val": startup_output_settings.get("skip_first_frames", 0),
                 "load_cap_val": startup_output_settings.get("load_cap", 0),
                 "fps_override_val": startup_output_settings.get("fps_override", 0),
@@ -563,7 +567,9 @@ def main():
                 "global_rife_model_val": startup_output_settings.get("global_rife_model", get_rife_default_model()),
                 "global_rife_precision_val": startup_output_settings.get("global_rife_precision", "fp32"),
                 "global_rife_cuda_device_val": startup_output_settings.get("global_rife_cuda_device", ""),
+                "global_rife_process_chunks_val": bool(startup_output_settings.get("global_rife_process_chunks", True)),
                 "output_format_val": startup_output_settings.get("output_format", "auto"),
+                "png_sequence_enabled_val": bool(startup_output_settings.get("png_sequence_enabled", False)),
                 "comparison_mode_val": startup_output_settings.get("comparison_mode", "slider"),
                 "pin_reference_val": startup_output_settings.get("pin_reference", False),
                 "fullscreen_val": startup_output_settings.get("fullscreen_enabled", True),

@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -21,7 +21,8 @@ from .path_utils import (
     get_media_fps,
     get_media_duration_seconds,
 )
-from .audio_utils import has_audio_stream, replace_audio_from_original
+from .audio_utils import has_audio_stream, ensure_audio_on_video
+from .video_codec_options import build_ffmpeg_video_encode_args
 
 # Try to import PySceneDetect (optional dependency)
 try:
@@ -911,9 +912,44 @@ def _run_ffmpeg(cmd: List[str]) -> subprocess.CompletedProcess:
     )
 
 
+def _normalize_video_encode_settings(encode_settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    cfg = dict(encode_settings or {})
+    codec_raw = str(cfg.get("video_codec", "h264") or "h264").strip().lower()
+    codec_map = {
+        "libx264": "h264",
+        "x264": "h264",
+        "h264": "h264",
+        "avc": "h264",
+        "libx265": "h265",
+        "x265": "h265",
+        "h265": "h265",
+        "hevc": "h265",
+        "libvpx-vp9": "vp9",
+        "vp9": "vp9",
+        "libaom-av1": "av1",
+        "av1": "av1",
+        "prores": "prores",
+        "prores_ks": "prores",
+    }
+    codec = codec_map.get(codec_raw, "h264")
+    try:
+        quality = int(cfg.get("video_quality", 18) or 18)
+    except Exception:
+        quality = 18
+    preset = str(cfg.get("video_preset", "medium") or "medium")
+    pixel_format = str(cfg.get("pixel_format", "yuv420p") or "yuv420p")
+    return {
+        "codec": codec,
+        "quality": quality,
+        "preset": preset,
+        "pixel_format": pixel_format,
+    }
+
+
 def concat_videos(
     chunk_paths: List[Path],
     output_path: Path,
+    encode_settings: Optional[Dict[str, Any]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """
@@ -939,6 +975,15 @@ def concat_videos(
     _write_concat_list(txt, stable_chunks)
 
     expected_duration = _sum_chunk_durations(stable_chunks)
+    enc = _normalize_video_encode_settings(encode_settings)
+    video_encode_args = build_ffmpeg_video_encode_args(
+        codec=enc["codec"],
+        quality=enc["quality"],
+        pixel_format=enc["pixel_format"],
+        preset=enc["preset"],
+        audio_codec="none",
+    )
+    bf_args = ["-bf", "0"] if enc["codec"] in {"h264", "h265", "vp9", "av1"} else []
     if on_progress:
         on_progress(f"Concatenating {len(stable_chunks)} chunk(s) (video-only merge)...\n")
 
@@ -970,16 +1015,8 @@ def concat_videos(
         filter_graph,
         "-map",
         "[v]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "18",
-        "-bf",
-        "0",
-        "-pix_fmt",
-        "yuv420p",
+        *bf_args,
+        *video_encode_args,
         "-movflags",
         "+faststart",
         str(output_path),
@@ -1019,17 +1056,8 @@ def concat_videos(
                 str(src),
                 "-map",
                 "0:v:0",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                "18",
-                "-bf",
-                "0",
-                "-pix_fmt",
-                "yuv420p",
+                *bf_args,
+                *video_encode_args,
                 "-movflags",
                 "+faststart",
                 str(norm),
@@ -1082,17 +1110,8 @@ def concat_videos(
             str(norm_txt),
             "-map",
             "0:v:0",
-            "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
-            "-bf",
-            "0",
-            "-pix_fmt",
-            "yuv420p",
+            *bf_args,
+            *video_encode_args,
             "-avoid_negative_ts",
             "make_zero",
             "-movflags",
@@ -1116,6 +1135,7 @@ def concat_videos_with_blending(
     output_path: Path,
     overlap_frames: int = 0,
     fps: Optional[float] = None,
+    encode_settings: Optional[Dict[str, Any]] = None,
     on_progress: Optional[Callable[[str], None]] = None
 ) -> bool:
     """
@@ -1136,7 +1156,7 @@ def concat_videos_with_blending(
     
     # If no overlap, use simple concat
     if overlap_frames <= 0:
-        return concat_videos(chunk_paths, output_path)
+        return concat_videos(chunk_paths, output_path, encode_settings=encode_settings, on_progress=on_progress)
     
     try:
         if on_progress:
@@ -1220,6 +1240,15 @@ def concat_videos_with_blending(
             temp_output = temp_path / "blended_temp.mp4"
             
             # Use ffmpeg to encode (better quality than cv2.VideoWriter)
+            enc = _normalize_video_encode_settings(encode_settings)
+            video_encode_args = build_ffmpeg_video_encode_args(
+                codec=enc["codec"],
+                quality=enc["quality"],
+                pixel_format=enc["pixel_format"],
+                preset=enc["preset"],
+                audio_codec="none",
+            )
+            bf_args = ["-bf", "0"] if enc["codec"] in {"h264", "h265", "vp9", "av1"} else []
             ffmpeg_cmd = [
                 "ffmpeg", "-y",
                 "-f", "rawvideo",
@@ -1228,11 +1257,8 @@ def concat_videos_with_blending(
                 "-pix_fmt", "bgr24",
                 "-r", str(fps or 30.0),
                 "-i", "-",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-crf", "18",
-                "-bf", "0",
-                "-pix_fmt", "yuv420p",
+                *bf_args,
+                *video_encode_args,
                 str(temp_output)
             ]
             
@@ -1267,7 +1293,7 @@ def concat_videos_with_blending(
         if on_progress:
             on_progress(f"❌ Blending failed: {e}\n")
         # Fallback to simple concat
-        return concat_videos(chunk_paths, output_path)
+        return concat_videos(chunk_paths, output_path, encode_settings=encode_settings, on_progress=on_progress)
 
 
 def detect_resume_state(work_dir: Path, output_format: str) -> Tuple[Optional[Path], List[Path]]:
@@ -1342,6 +1368,7 @@ def salvage_partial_from_run_dir(
     audio_source: Optional[str] = None,
     audio_codec: str = "copy",
     audio_bitrate: Optional[str] = None,
+    encode_settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Path], str]:
     """
     Best-effort salvage of partial chunk outputs from a run directory.
@@ -1357,16 +1384,21 @@ def salvage_partial_from_run_dir(
     _partial_video, completed_chunks = detect_resume_state(run_dir, "mp4")
     if completed_chunks:
         target = collision_safe_path(run_dir / f"{partial_basename}.mp4")
-        ok = concat_videos(completed_chunks, target)
+        ok = concat_videos(completed_chunks, target, encode_settings=encode_settings)
         if ok and target.exists():
             try:
                 if audio_source and Path(audio_source).exists():
-                    audio_ok, audio_err = replace_audio_from_original(
+                    _changed, maybe_final, audio_err = ensure_audio_on_video(
                         video_path=target,
-                        original_input_path=Path(audio_source),
+                        audio_source_path=Path(audio_source),
+                        audio_codec=str(audio_codec or "copy"),
+                        audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                        force_replace=True,
                         on_progress=None,
                     )
-                    if not audio_ok and audio_err:
+                    if maybe_final and Path(maybe_final).exists():
+                        target = Path(maybe_final)
+                    if audio_err:
                         # Keep the salvaged video even when audio replacement fails.
                         pass
             except Exception:
@@ -1584,6 +1616,25 @@ def chunk_and_process(
     output_chunks: List[Path] = []
     chunk_logs: List[dict] = []
 
+    def _get_merge_fps_hint(paths: Optional[List[Path]] = None) -> Optional[float]:
+        candidates = list(paths or [])
+        if not candidates and output_chunks:
+            candidates = list(output_chunks)
+        for p in candidates:
+            try:
+                fps_val = float(get_media_fps(str(p)) or 0.0)
+                if fps_val > 0:
+                    return fps_val
+            except Exception:
+                continue
+        try:
+            base_fps = float(get_media_fps(input_path) or 0.0)
+            if base_fps > 0:
+                return base_fps
+        except Exception:
+            pass
+        return None
+
     def _notify_progress(progress_val: float, desc: str, **kwargs) -> None:
         """
         Call the optional `progress_tracker` in a backward-compatible way.
@@ -1703,22 +1754,29 @@ def chunk_and_process(
         if not merge_chunks:
             return None
         partial_target = partial_video_target or collision_safe_path(work_root / "partial_concat.mp4")
-        overlap_frames_for_blend = int(chunk_overlap * (get_media_fps(input_path) or 30.0)) if chunk_overlap > 0 else 0
+        merge_fps_hint = _get_merge_fps_hint(merge_chunks) or 30.0
+        overlap_frames_for_blend = int(chunk_overlap * merge_fps_hint) if chunk_overlap > 0 else 0
         ok = concat_videos_with_blending(
             merge_chunks,
             partial_target,
             overlap_frames=overlap_frames_for_blend,
-            fps=get_media_fps(input_path),
+            fps=merge_fps_hint,
+            encode_settings=settings,
             on_progress=on_progress,
         )
         if ok:
             try:
-                audio_ok, audio_err = replace_audio_from_original(
+                _changed, maybe_final, audio_err = ensure_audio_on_video(
                     video_path=Path(partial_target),
-                    original_input_path=Path(audio_source_for_mux),
+                    audio_source_path=Path(audio_source_for_mux),
+                    audio_codec=str(settings.get("audio_codec") or "copy"),
+                    audio_bitrate=str(settings.get("audio_bitrate")) if settings.get("audio_bitrate") else None,
+                    force_replace=True,
                     on_progress=on_progress,
                 )
-                if not audio_ok and audio_err:
+                if maybe_final and Path(maybe_final).exists():
+                    partial_target = Path(maybe_final)
+                if audio_err:
                     on_progress(f"Audio replacement note: {audio_err}\n")
             except Exception as e:
                 on_progress(f"Audio replacement skipped: {str(e)}\n")
@@ -1940,12 +1998,17 @@ def chunk_and_process(
                 # Final merged audio still comes from the original full input.
                 try:
                     if output_format != "png" and Path(chunk).is_file():
-                        audio_ok, audio_err = replace_audio_from_original(
+                        _changed, maybe_final, audio_err = ensure_audio_on_video(
                             video_path=outp,
-                            original_input_path=Path(chunk),
+                            audio_source_path=Path(chunk),
+                            audio_codec=str(settings.get("audio_codec") or "copy"),
+                            audio_bitrate=str(settings.get("audio_bitrate")) if settings.get("audio_bitrate") else None,
+                            force_replace=True,
                             on_progress=None,
                         )
-                        if (not audio_ok) and audio_err:
+                        if maybe_final and Path(maybe_final).exists():
+                            outp = Path(maybe_final)
+                        if audio_err:
                             on_progress(f"WARN: Chunk {idx} audio note: {audio_err}\n")
                 except Exception:
                     pass
@@ -2052,13 +2115,15 @@ def chunk_and_process(
             f"WARN: Merge chunk discovery found {len(merge_chunks)}/{len(chunk_paths)} chunks; attempting best-effort merge.\n"
         )
 
-    # Use blending concat if overlap specified
-    overlap_frames_for_blend = int(chunk_overlap * (get_media_fps(input_path) or 30.0)) if chunk_overlap > 0 else 0
+    # Use blending concat if overlap specified.
+    merge_fps_hint = _get_merge_fps_hint(merge_chunks) or 30.0
+    overlap_frames_for_blend = int(chunk_overlap * merge_fps_hint) if chunk_overlap > 0 else 0
     ok = concat_videos_with_blending(
         merge_chunks,
         final_path,
         overlap_frames=overlap_frames_for_blend,
-        fps=get_media_fps(input_path),
+        fps=merge_fps_hint,
+        encode_settings=settings,
         on_progress=on_progress
     )
     
@@ -2066,17 +2131,21 @@ def chunk_and_process(
         return 1, "Concat failed", str(final_path), len(chunk_paths)
     on_progress(f"Chunks concatenated with blending to {final_path}\n")
 
-    # Robust audio replacement: copy audio from original input to final output.
-    # This ensures 100% accurate audio from the original source.
-    # The function is designed to be safe: if original has no audio, it succeeds silently.
+    # Audio normalization for merged output using user-configured codec/bitrate.
+    # This is robust: if source has no audio, output remains valid.
     try:
         on_progress("Replacing audio from original input...\n")
-        audio_ok, audio_err = replace_audio_from_original(
+        _changed, maybe_final, audio_err = ensure_audio_on_video(
             video_path=Path(final_path),
-            original_input_path=Path(audio_source_for_mux),
+            audio_source_path=Path(audio_source_for_mux),
+            audio_codec=str(settings.get("audio_codec") or "copy"),
+            audio_bitrate=str(settings.get("audio_bitrate")) if settings.get("audio_bitrate") else None,
+            force_replace=True,
             on_progress=on_progress,
         )
-        if not audio_ok and audio_err:
+        if maybe_final and Path(maybe_final).exists():
+            final_path = Path(maybe_final)
+        if audio_err:
             on_progress(f"Audio replacement note: {audio_err}\n")
     except Exception as e:
         # Never fail the whole operation due to audio issues

@@ -24,6 +24,9 @@ from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.error_handling import logger as error_logger
 from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
 from shared.output_run_manager import prepare_single_video_run
+from shared.video_codec_options import build_ffmpeg_video_encode_args
+from shared.comparison_video_service import maybe_generate_input_vs_output_comparison
+from shared.global_rife import global_rife_enabled
 
 
 # Defaults and ordering --------------------------------------------------------
@@ -165,8 +168,40 @@ def _parse_time_to_seconds(time_str: str) -> float:
     return 0.0
 
 
-def _trim_video(input_path: str, output_path: str, start_time: float, end_time: float,
-                video_codec: str = "libx264", quality: int = 23, no_audio: bool = False) -> Tuple[bool, str]:
+def _normalize_video_codec_key(codec_raw: str) -> str:
+    codec = str(codec_raw or "h264").strip().lower()
+    codec_map = {
+        "libx264": "h264",
+        "x264": "h264",
+        "h264": "h264",
+        "avc": "h264",
+        "libx265": "h265",
+        "x265": "h265",
+        "h265": "h265",
+        "hevc": "h265",
+        "libvpx-vp9": "vp9",
+        "vp9": "vp9",
+        "libaom-av1": "av1",
+        "av1": "av1",
+        "prores": "prores",
+        "prores_ks": "prores",
+    }
+    return codec_map.get(codec, "h264")
+
+
+def _trim_video(
+    input_path: str,
+    output_path: str,
+    start_time: float,
+    end_time: float,
+    video_codec: str = "libx264",
+    quality: int = 23,
+    no_audio: bool = False,
+    video_preset: str = "fast",
+    pixel_format: str = "yuv420p",
+    audio_codec: str = "aac",
+    audio_bitrate: Optional[str] = None,
+) -> Tuple[bool, str]:
     """Trim video using FFmpeg."""
     try:
         cmd = ["ffmpeg", "-y"]
@@ -180,19 +215,18 @@ def _trim_video(input_path: str, output_path: str, start_time: float, end_time: 
         if end_time > 0:
             cmd.extend(["-to", str(end_time)])
 
-        # Video codec and quality
-        if video_codec == "libx264":
-            cmd.extend(["-c:v", "libx264", "-crf", str(quality), "-preset", "fast"])
-        elif video_codec == "libx265":
-            cmd.extend(["-c:v", "libx265", "-crf", str(quality), "-preset", "fast"])
-        elif video_codec == "libvpx-vp9":
-            cmd.extend(["-c:v", "libvpx-vp9", "-crf", str(quality)])
-
-        # Audio handling
-        if no_audio:
-            cmd.extend(["-an"])
-        else:
-            cmd.extend(["-c:a", "aac"])
+        codec_key = _normalize_video_codec_key(video_codec)
+        selected_audio_codec = "none" if no_audio else str(audio_codec or "aac")
+        cmd.extend(
+            build_ffmpeg_video_encode_args(
+                codec=codec_key,
+                quality=int(quality),
+                pixel_format=str(pixel_format or "yuv420p"),
+                preset=str(video_preset or "fast"),
+                audio_codec=selected_audio_codec,
+                audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+            )
+        )
 
         cmd.append(output_path)
 
@@ -203,8 +237,18 @@ def _trim_video(input_path: str, output_path: str, start_time: float, end_time: 
         return False, f"Trimming failed: {str(e)}"
 
 
-def _change_video_speed(input_path: str, output_path: str, speed_factor: float,
-                       video_codec: str = "libx264", quality: int = 23, no_audio: bool = False) -> Tuple[bool, str]:
+def _change_video_speed(
+    input_path: str,
+    output_path: str,
+    speed_factor: float,
+    video_codec: str = "libx264",
+    quality: int = 23,
+    no_audio: bool = False,
+    video_preset: str = "fast",
+    pixel_format: str = "yuv420p",
+    audio_codec: str = "aac",
+    audio_bitrate: Optional[str] = None,
+) -> Tuple[bool, str]:
     """Change video speed using FFmpeg."""
     try:
         if speed_factor <= 0:
@@ -227,19 +271,18 @@ def _change_video_speed(input_path: str, output_path: str, speed_factor: float,
         if audio_filter:
             cmd.extend(["-filter:a", audio_filter])
 
-        # Video codec and quality
-        if video_codec == "libx264":
-            cmd.extend(["-c:v", "libx264", "-crf", str(quality), "-preset", "fast"])
-        elif video_codec == "libx265":
-            cmd.extend(["-c:v", "libx265", "-crf", str(quality), "-preset", "fast"])
-        elif video_codec == "libvpx-vp9":
-            cmd.extend(["-c:v", "libvpx-vp9", "-crf", str(quality)])
-
-        # Audio handling
-        if no_audio:
-            cmd.extend(["-an"])
-        elif audio_filter:
-            cmd.extend(["-c:a", "aac"])
+        codec_key = _normalize_video_codec_key(video_codec)
+        selected_audio_codec = "none" if no_audio else str(audio_codec or "aac")
+        cmd.extend(
+            build_ffmpeg_video_encode_args(
+                codec=codec_key,
+                quality=int(quality),
+                pixel_format=str(pixel_format or "yuv420p"),
+                preset=str(video_preset or "fast"),
+                audio_codec=selected_audio_codec,
+                audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+            )
+        )
 
         cmd.append(output_path)
 
@@ -250,8 +293,17 @@ def _change_video_speed(input_path: str, output_path: str, speed_factor: float,
         return False, f"Speed change failed: {str(e)}"
 
 
-def _concatenate_videos(video_paths: List[str], output_path: str,
-                       video_codec: str = "libx264", quality: int = 23) -> Tuple[bool, str]:
+def _concatenate_videos(
+    video_paths: List[str],
+    output_path: str,
+    video_codec: str = "libx264",
+    quality: int = 23,
+    no_audio: bool = False,
+    video_preset: str = "fast",
+    pixel_format: str = "yuv420p",
+    audio_codec: str = "copy",
+    audio_bitrate: Optional[str] = None,
+) -> Tuple[bool, str]:
     """Concatenate multiple videos using FFmpeg."""
     try:
         if len(video_paths) < 2:
@@ -265,16 +317,18 @@ def _concatenate_videos(video_paths: List[str], output_path: str,
 
         cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file]
 
-        # Video codec and quality
-        if video_codec == "libx264":
-            cmd.extend(["-c:v", "libx264", "-crf", str(quality), "-preset", "fast"])
-        elif video_codec == "libx265":
-            cmd.extend(["-c:v", "libx265", "-crf", str(quality), "-preset", "fast"])
-        elif video_codec == "libvpx-vp9":
-            cmd.extend(["-c:v", "libvpx-vp9", "-crf", str(quality)])
-
-        # Copy audio streams (they should be compatible)
-        cmd.extend(["-c:a", "copy"])
+        codec_key = _normalize_video_codec_key(video_codec)
+        selected_audio_codec = "none" if no_audio else str(audio_codec or "copy")
+        cmd.extend(
+            build_ffmpeg_video_encode_args(
+                codec=codec_key,
+                quality=int(quality),
+                pixel_format=str(pixel_format or "yuv420p"),
+                preset=str(video_preset or "fast"),
+                audio_codec=selected_audio_codec,
+                audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+            )
+        )
 
         cmd.append(output_path)
 
@@ -315,8 +369,12 @@ def _apply_video_editing(input_path: str, output_path: str, settings: Dict[str, 
         end_time = _parse_time_to_seconds(settings.get("end_time", ""))
         speed_factor = float(settings.get("speed_factor", 1.0))
         video_codec = settings.get("video_codec", "libx264")
-        quality = int(settings.get("output_quality", 23))
-        no_audio = bool(settings.get("no_audio", False))
+        quality = int(settings.get("video_quality", settings.get("output_quality", 23)))
+        video_preset = str(settings.get("video_preset", "fast") or "fast")
+        pixel_format = str(settings.get("pixel_format", "yuv420p") or "yuv420p")
+        audio_codec = str(settings.get("audio_codec", "copy") or "copy")
+        audio_bitrate = settings.get("audio_bitrate") or None
+        no_audio = bool(settings.get("no_audio", False)) or audio_codec.strip().lower() in ("none", "no", "off", "disable", "disabled")
 
         temp_output = temp_dir / f"temp_edit_{Path(output_path).name}"
 
@@ -325,7 +383,7 @@ def _apply_video_editing(input_path: str, output_path: str, settings: Dict[str, 
                 progress_cb("Trimming video...")
             success, log = _trim_video(
                 input_path, str(temp_output), start_time, end_time,
-                video_codec, quality, no_audio
+                video_codec, quality, no_audio, video_preset, pixel_format, audio_codec, audio_bitrate
             )
             if not success:
                 return False, f"Trimming failed: {log}", ""
@@ -335,7 +393,7 @@ def _apply_video_editing(input_path: str, output_path: str, settings: Dict[str, 
                 progress_cb(f"Changing video speed by factor {speed_factor}...")
             success, log = _change_video_speed(
                 input_path, str(temp_output), speed_factor,
-                video_codec, quality, no_audio
+                video_codec, quality, no_audio, video_preset, pixel_format, audio_codec, audio_bitrate
             )
             if not success:
                 return False, f"Speed change failed: {log}", ""
@@ -356,7 +414,17 @@ def _apply_video_editing(input_path: str, output_path: str, settings: Dict[str, 
 
             if progress_cb:
                 progress_cb(f"Concatenating {len(all_paths)} videos...")
-            success, log = _concatenate_videos(all_paths, str(temp_output), video_codec, quality)
+            success, log = _concatenate_videos(
+                all_paths,
+                str(temp_output),
+                video_codec,
+                quality,
+                no_audio,
+                video_preset,
+                pixel_format,
+                audio_codec,
+                audio_bitrate,
+            )
             if not success:
                 return False, f"Concatenation failed: {log}", ""
 
@@ -397,6 +465,102 @@ def _validate_cuda_devices(cuda_spec: str) -> Optional[str]:
 def _ffmpeg_available() -> bool:
     """Check if ffmpeg is available in PATH."""
     return shutil.which("ffmpeg") is not None
+
+
+def _normalize_global_multiplier(raw: Any) -> int:
+    """Normalize global multiplier input into {1,2,4,8}."""
+    text = str(raw or "x2").strip().lower()
+    if text.startswith("x"):
+        text = text[1:]
+    try:
+        val = int(float(text))
+    except Exception:
+        val = 2
+    if val <= 1:
+        return 1
+    if val <= 2:
+        return 2
+    if val <= 4:
+        return 4
+    return 8
+
+
+def _rife_processing_requested(cfg: Dict[str, Any]) -> bool:
+    """Return True when any RIFE-processing-affecting flag is enabled."""
+    try:
+        fps_mult_val = int(cfg.get("fps_multiplier", 1) or 1)
+    except Exception:
+        fps_mult_val = 1
+
+    return (
+        fps_mult_val > 1
+        or float(cfg.get("fps_override", 0.0) or 0.0) > 0.0
+        or float(cfg.get("scale", 1.0) or 1.0) != 1.0
+        or bool(cfg.get("png_output", False))
+        or bool(cfg.get("montage", False))
+        or bool(cfg.get("skip_static_frames", False))
+        or int(cfg.get("exp", 1) or 1) != 1
+    )
+
+
+def _apply_global_rife_override(
+    settings: Dict[str, Any],
+    seed_controls: Dict[str, Any],
+    output_settings: Dict[str, Any],
+) -> bool:
+    """
+    Force RIFE processing from global settings when local RIFE would be skipped.
+
+    Returns:
+        True if global override was applied.
+    """
+    if not global_rife_enabled(seed_controls):
+        return False
+    if _rife_processing_requested(settings):
+        return False
+
+    mult_val = _normalize_global_multiplier(
+        output_settings.get(
+            "global_rife_multiplier",
+            seed_controls.get("global_rife_multiplier_val", "x2"),
+        )
+    )
+    # Global RIFE is intended as an enabled interpolation pass; keep at least x2.
+    if mult_val < 2:
+        mult_val = 2
+    settings["fps_multiplier"] = int(mult_val)
+
+    model_name = str(
+        output_settings.get(
+            "global_rife_model",
+            seed_controls.get("global_rife_model_val", ""),
+        ) or ""
+    ).strip() or get_rife_default_model()
+    settings["model"] = model_name
+
+    precision = str(
+        output_settings.get(
+            "global_rife_precision",
+            seed_controls.get("global_rife_precision_val", "fp32"),
+        ) or "fp32"
+    ).strip().lower()
+    settings["fp16_mode"] = precision == "fp16"
+
+    cuda_device = str(
+        output_settings.get(
+            "global_rife_cuda_device",
+            seed_controls.get("global_rife_cuda_device_val", ""),
+        ) or ""
+    ).strip()
+    if "," in cuda_device:
+        cuda_device = cuda_device.split(",", 1)[0].strip()
+    if cuda_device.lower() == "all":
+        cuda_device = "0"
+    if cuda_device:
+        settings["cuda_device"] = cuda_device
+
+    settings["_forced_global_rife"] = True
+    return True
 
 
 # Preset helpers ---------------------------------------------------------------
@@ -581,6 +745,9 @@ def build_rife_callbacks(
             # Clear any previous VRAM OOM banner at the start of a new run.
             clear_vram_oom_alert(state)
             seed_controls = state.get("seed_controls", {})
+            output_settings = seed_controls.get("output_settings", {}) if isinstance(seed_controls, dict) else {}
+            if not isinstance(output_settings, dict):
+                output_settings = {}
             
             settings_dict = _rife_dict_from_args(list(args))
             settings = {**defaults, **settings_dict}
@@ -681,11 +848,19 @@ def build_rife_callbacks(
                     effective_scale = max(0.5, min(4.0, effective_scale))
                     settings["scale"] = effective_scale
 
-            # Apply Output tab "Output Format" cache ONLY when it maps to a valid RIFE container.
-            # (Output tab can be "png", which is not a RIFE container; RIFE uses `png_output` instead.)
+            # Apply Output tab format preferences when RIFE tab format is not explicitly set.
             cached_fmt = str(seed_controls.get("output_format_val") or "").strip().lower()
-            if settings.get("output_format") in (None, "auto") and cached_fmt in ("mp4",):
-                settings["output_format"] = cached_fmt
+            png_seq_enabled = bool(
+                seed_controls.get(
+                    "png_sequence_enabled_val",
+                    output_settings.get("png_sequence_enabled", False),
+                )
+            )
+            if settings.get("output_format") in (None, "auto"):
+                if cached_fmt in ("mp4", "png"):
+                    settings["output_format"] = cached_fmt
+                elif png_seq_enabled:
+                    settings["output_format"] = "png"
 
             # Audio preferences (used by chunking + final muxing). "Remove Audio" overrides everything.
             audio_codec = str(seed_controls.get("audio_codec_val") or "copy")
@@ -694,6 +869,24 @@ def build_rife_callbacks(
                 audio_codec = "none"
             settings["audio_codec"] = audio_codec
             settings["audio_bitrate"] = audio_bitrate
+            if output_settings:
+                for key in (
+                    "video_codec",
+                    "video_quality",
+                    "video_preset",
+                    "pixel_format",
+                    "two_pass_encoding",
+                    "metadata_format",
+                    "log_level",
+                    "temporal_padding",
+                ):
+                    if output_settings.get(key) is not None:
+                        settings[key] = output_settings.get(key)
+
+            # Global RIFE override:
+            # If user enabled Global RIFE and local RIFE settings would skip processing,
+            # force an interpolation pass using global model/multiplier/precision/device.
+            global_rife_forced = _apply_global_rife_override(settings, seed_controls, output_settings)
             
             # Pull PySceneDetect chunking settings from Resolution tab (universal chunking)
             auto_chunk = bool(seed_controls.get("auto_chunk", True))
@@ -991,25 +1184,25 @@ def build_rife_callbacks(
                                             )
                                 except Exception:
                                     pass
+                                comp_vid_path, _comp_vid_err = maybe_generate_input_vs_output_comparison(
+                                    str(job.input_path),
+                                    job.output_path,
+                                    seed_controls,
+                                    label_output="RIFE",
+                                    on_progress=None,
+                                )
+                                if comp_vid_path:
+                                    try:
+                                        job.metadata["comparison_video_path"] = str(comp_vid_path)
+                                    except Exception:
+                                        pass
                                 return ok
 
                             job.error_message = clog
                             return False
 
-                        # If the user disabled RIFE and has no other processing flags, just copy to outputs.
-                        try:
-                            fps_mult_val = int(single_settings.get("fps_multiplier", 1) or 1)
-                        except Exception:
-                            fps_mult_val = 1
-                        should_run_rife_job = (
-                            fps_mult_val > 1
-                            or float(single_settings.get("fps_override", 0.0) or 0.0) > 0.0
-                            or float(single_settings.get("scale", 1.0) or 1.0) != 1.0
-                            or bool(single_settings.get("png_output", False))
-                            or bool(single_settings.get("montage", False))
-                            or bool(single_settings.get("skip_static_frames", False))
-                            or int(single_settings.get("exp", 1) or 1) != 1
-                        )
+                        # If no processing flags are enabled, copy-only mode.
+                        should_run_rife_job = _rife_processing_requested(single_settings) or global_rife_forced
                         if not should_run_rife_job:
                             try:
                                 dest = Path(normalize_path(str(predicted_final)))
@@ -1073,6 +1266,18 @@ def build_rife_callbacks(
                                         )
                             except Exception:
                                 pass
+                            comp_vid_path, _comp_vid_err = maybe_generate_input_vs_output_comparison(
+                                str(job.input_path),
+                                job.output_path,
+                                seed_controls,
+                                label_output="RIFE",
+                                on_progress=None,
+                            )
+                            if comp_vid_path:
+                                try:
+                                    job.metadata["comparison_video_path"] = str(comp_vid_path)
+                                except Exception:
+                                    pass
                         else:
                             job.error_message = result.log
                             ok = False
@@ -1125,15 +1330,7 @@ def build_rife_callbacks(
 
             # Determine processing workflow
             edit_mode = settings.get("edit_mode", "none")
-            should_run_rife = (
-                int(settings.get("fps_multiplier", 1) or 1) > 1
-                or float(settings.get("fps_override", 0.0) or 0.0) > 0.0
-                or float(settings.get("scale", 1.0) or 1.0) != 1.0
-                or bool(settings.get("png_output", False))
-                or bool(settings.get("montage", False))
-                or bool(settings.get("skip_static_frames", False))
-                or int(settings.get("exp", 1) or 1) != 1
-            )
+            should_run_rife = _rife_processing_requested(settings) or global_rife_forced
 
             current_input = settings["input_path"]
             final_output_path = None
@@ -1308,10 +1505,25 @@ def build_rife_callbacks(
             except Exception:
                 pass
 
+            comp_vid_path, comp_vid_err = maybe_generate_input_vs_output_comparison(
+                settings.get("_original_input_path_before_preprocess") or settings.get("input_path"),
+                final_output_path,
+                seed_controls,
+                label_output="RIFE",
+                on_progress=None,
+            )
+            comp_vid_note = ""
+            if comp_vid_path:
+                comp_vid_note = f"\nComparison Video: {comp_vid_path}"
+            elif comp_vid_err:
+                progress_callback(f"Comparison video failed: {comp_vid_err}")
+
             # Create metadata string
             processing_steps = []
             if edit_mode != "none":
                 processing_steps.append(f"Edit: {edit_mode}")
+            if global_rife_forced:
+                processing_steps.append("Global RIFE override")
             if should_run_rife:
                 processing_steps.append(f"RIFE: {settings.get('fps_multiplier')}x")
             if face_apply:
@@ -1319,7 +1531,7 @@ def build_rife_callbacks(
 
             steps_str = ", ".join(processing_steps) if processing_steps else "None"
 
-            meta_md = f"Input: {settings['input_path']}\nOutput: {final_output_path}\nProcessing: {steps_str}"
+            meta_md = f"Input: {settings['input_path']}\nOutput: {final_output_path}\nProcessing: {steps_str}{comp_vid_note}"
 
             # Log the run and update state with output path
             if final_output_path:
@@ -1413,6 +1625,9 @@ def build_rife_callbacks(
         audio_source = seed_controls.get("last_input_path") or None
         audio_codec = str(seed_controls.get("audio_codec_val") or "copy")
         audio_bitrate = seed_controls.get("audio_bitrate_val") or None
+        output_settings = seed_controls.get("output_settings", {}) if isinstance(seed_controls, dict) else {}
+        if not isinstance(output_settings, dict):
+            output_settings = {}
 
         try:
             from shared.chunking import salvage_partial_from_run_dir
@@ -1429,6 +1644,7 @@ def build_rife_callbacks(
                     audio_source=str(audio_source) if audio_source else None,
                     audio_codec=audio_codec,
                     audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                    encode_settings=output_settings,
                 )
                 if partial_path and Path(partial_path).exists():
                     compiled_output = str(partial_path)
@@ -1448,6 +1664,7 @@ def build_rife_callbacks(
                     partial_path, _method = salvage_partial_from_run_dir(
                         temp_chunks_dir,
                         partial_basename="cancelled_rife_partial",
+                        encode_settings=output_settings,
                     )
                     if partial_path and Path(partial_path).exists():
                         compiled_output = str(partial_path)

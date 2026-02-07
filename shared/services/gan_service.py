@@ -29,6 +29,7 @@ from shared.video_comparison_slider import create_video_comparison_html
 from shared.gpu_utils import expand_cuda_device_spec, validate_cuda_device_spec
 from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, show_vram_oom_modal
 from shared.global_rife import maybe_apply_global_rife
+from shared.comparison_video_service import maybe_generate_input_vs_output_comparison
 from shared.chunk_preview import build_chunk_preview_payload
 
 
@@ -753,6 +754,9 @@ def build_gan_callbacks(
         try:
             state = state or {"seed_controls": {}}
             seed_controls = state.get("seed_controls", {})
+            output_settings = seed_controls.get("output_settings", {}) if isinstance(seed_controls, dict) else {}
+            if not isinstance(output_settings, dict):
+                output_settings = {}
             seed_controls["gan_chunk_preview"] = {
                 "message": "No chunk preview available yet.",
                 "gallery": [],
@@ -862,6 +866,21 @@ def build_gan_callbacks(
                 settings["audio_codec"] = seed_controls.get("audio_codec_val") or "copy"
             if seed_controls.get("audio_bitrate_val") is not None:
                 settings["audio_bitrate"] = seed_controls.get("audio_bitrate_val") or ""
+            # Advanced output encoding settings are defined globally in Output tab.
+            # Propagate them into GAN runtime so ffmpeg reconstruction paths don't use hardcoded defaults.
+            if output_settings:
+                for key in (
+                    "video_codec",
+                    "video_quality",
+                    "video_preset",
+                    "pixel_format",
+                    "two_pass_encoding",
+                    "metadata_format",
+                    "log_level",
+                    "temporal_padding",
+                ):
+                    if output_settings.get(key) is not None:
+                        settings[key] = output_settings.get(key)
             cmp_mode = seed_controls.get("comparison_mode_val", "native")
             pin_pref = bool(seed_controls.get("pin_reference_val", False))
             fs_pref = bool(seed_controls.get("fullscreen_val", False))
@@ -1088,17 +1107,43 @@ def build_gan_callbacks(
                                 outp = restored
 
                         # Global RIFE post-process (adds *_xFPS output and keeps original).
-                        if outp and Path(outp).exists() and Path(outp).suffix.lower() in (".mp4", ".avi", ".mov", ".mkv", ".webm"):
+                        if (
+                            outp
+                            and Path(outp).exists()
+                            and Path(outp).suffix.lower() in (".mp4", ".avi", ".mov", ".mkv", ".webm")
+                        ):
                             rife_out, rife_msg = maybe_apply_global_rife(
                                 runner=runner,
                                 output_video_path=outp,
                                 seed_controls=seed_controls,
                                 on_log=(lambda m: progress_cb(m) if progress_cb and m else None),
+                                chunking_context={
+                                    "enabled": bool(chunk_count and chunk_count > 0),
+                                    "auto_chunk": bool(auto_chunk),
+                                    "chunk_size_sec": float(chunk_size_sec or 0),
+                                    "chunk_overlap_sec": 0.0 if auto_chunk else float(chunk_overlap_sec or 0),
+                                    "scene_threshold": float(scene_threshold or 27.0),
+                                    "min_scene_len": float(min_scene_len or 1.0),
+                                    "frame_accurate_split": bool(frame_accurate_split),
+                                    "per_chunk_cleanup": bool(per_chunk_cleanup),
+                                },
                             )
                             if rife_out and Path(rife_out).exists():
                                 outp = rife_out
                             elif rife_msg and progress_cb:
                                 progress_cb(rife_msg)
+                            comp_vid_path, comp_vid_err = maybe_generate_input_vs_output_comparison(
+                                prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path"),
+                                outp,
+                                seed_controls,
+                                label_output="GAN",
+                                on_progress=progress_cb if progress_cb else None,
+                            )
+                            if comp_vid_path:
+                                if progress_cb:
+                                    progress_cb(f"Comparison video created: {comp_vid_path}")
+                            elif comp_vid_err and progress_cb:
+                                progress_cb(f"Comparison video failed: {comp_vid_err}")
 
                         # Update shared state output pointers.
                         if outp and Path(outp).exists():
@@ -1271,6 +1316,17 @@ def build_gan_callbacks(
                         full_log = "\n".join([full_log, f"Global RIFE output: {rife_out}"])
                     elif rife_msg:
                         full_log = "\n".join([full_log, rife_msg])
+                    comp_vid_path, comp_vid_err = maybe_generate_input_vs_output_comparison(
+                        prepped_settings.get("_original_input_path_before_preprocess") or prepped_settings.get("input_path"),
+                        final_out_path,
+                        seed_controls,
+                        label_output="GAN",
+                        on_progress=progress_cb if progress_cb else None,
+                    )
+                    if comp_vid_path:
+                        full_log = "\n".join([full_log, f"Comparison video created: {comp_vid_path}"])
+                    elif comp_vid_err:
+                        full_log = "\n".join([full_log, f"Comparison video failed: {comp_vid_err}"])
 
                 # Save preprocessed input (if we created one) alongside outputs
                 pre_in = prepped_settings.get("_preprocessed_input_path")
@@ -1527,6 +1583,9 @@ def build_gan_callbacks(
         audio_source = seed_controls.get("last_input_path") or None
         audio_codec = str(seed_controls.get("audio_codec_val") or "copy")
         audio_bitrate = seed_controls.get("audio_bitrate_val") or None
+        output_settings = seed_controls.get("output_settings", {}) if isinstance(seed_controls, dict) else {}
+        if not isinstance(output_settings, dict):
+            output_settings = {}
 
         try:
             from shared.chunking import salvage_partial_from_run_dir
@@ -1543,6 +1602,7 @@ def build_gan_callbacks(
                     audio_source=str(audio_source) if audio_source else None,
                     audio_codec=audio_codec,
                     audio_bitrate=str(audio_bitrate) if audio_bitrate else None,
+                    encode_settings=output_settings,
                 )
                 if partial_path and Path(partial_path).exists():
                     compiled_output = str(partial_path)
@@ -1563,6 +1623,7 @@ def build_gan_callbacks(
                     partial_path, _method = salvage_partial_from_run_dir(
                         temp_chunks_dir,
                         partial_basename="cancelled_gan_partial",
+                        encode_settings=output_settings,
                     )
                     if partial_path and Path(partial_path).exists():
                         compiled_output = str(partial_path)

@@ -109,6 +109,42 @@ def _get_rife_models() -> List[RifeModel]:
             estimated_vram_gb=4.5,
             notes="Latest experimental version. May have cutting-edge features."
         ),
+
+        RifeModel(
+            name="rife-v4.20",
+            version="4.20",
+            variant="standard",
+            estimated_vram_gb=4.5,
+            notes="Improved post-processing quality for diffusion-generated videos."
+        ),
+        RifeModel(
+            name="rife-v4.21",
+            version="4.21",
+            variant="standard",
+            estimated_vram_gb=4.5,
+            notes="Quality-focused update for temporal consistency."
+        ),
+        RifeModel(
+            name="rife-v4.22",
+            version="4.22",
+            variant="standard",
+            estimated_vram_gb=4.5,
+            notes="Further refinement of motion handling and stability."
+        ),
+        RifeModel(
+            name="rife-v4.25",
+            version="4.25",
+            variant="standard",
+            estimated_vram_gb=4.8,
+            notes="Modern high-quality model with stronger detail retention."
+        ),
+        RifeModel(
+            name="rife-v4.26",
+            version="4.26",
+            variant="standard",
+            estimated_vram_gb=5.0,
+            notes="Recommended latest quality model when available."
+        ),
         
         # Anime-specific variant
         RifeModel(
@@ -123,47 +159,85 @@ def _get_rife_models() -> List[RifeModel]:
     return models
 
 
+def _resolve_model_bundle_dir(model_dir: Path) -> Optional[Path]:
+    """
+    Resolve a model bundle directory that contains `flownet.pkl`.
+
+    Supports either:
+    - direct layout: <model_dir>/flownet.pkl
+    - one-level nested zip layout: <model_dir>/<inner>/flownet.pkl
+    """
+    if not model_dir.exists() or not model_dir.is_dir():
+        return None
+
+    if (model_dir / "flownet.pkl").exists():
+        return model_dir
+
+    children = [p for p in model_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    if len(children) == 1 and (children[0] / "flownet.pkl").exists():
+        return children[0]
+    return None
+
+
+def _discover_rife_models_from_layout(base_dir: Path) -> List[str]:
+    """
+    Discover installed RIFE models from supported local layouts:
+    - RIFE/models/<model_name>/...
+    - RIFE/train_log/<model_name>/...
+    """
+    rife_root = Path(base_dir) / "RIFE"
+    models_dir = rife_root / "models"
+    train_log_dir = rife_root / "train_log"
+    discovered_models: set[str] = set()
+    discovered_train_log: set[str] = set()
+
+    # Preferred new layout: RIFE/models/<name>/...
+    if models_dir.exists() and models_dir.is_dir():
+        for item in models_dir.iterdir():
+            if not item.is_dir() or item.name.startswith("_") or item.name.startswith("."):
+                continue
+            bundle_dir = _resolve_model_bundle_dir(item)
+            if bundle_dir and (bundle_dir / "flownet.pkl").exists():
+                discovered_models.add(item.name)
+
+    # If models/ has valid bundles, use it as source-of-truth for dropdowns.
+    if discovered_models:
+        return sorted(discovered_models)
+
+    # Fallback layout: RIFE/train_log/<name>/...
+    if train_log_dir.exists() and train_log_dir.is_dir():
+        for item in train_log_dir.iterdir():
+            if not item.is_dir() or item.name.startswith("_") or item.name.startswith("."):
+                continue
+            bundle_dir = _resolve_model_bundle_dir(item)
+            if bundle_dir and (bundle_dir / "flownet.pkl").exists():
+                discovered_train_log.add(item.name)
+
+    # Intentionally do NOT expose legacy train_log root (no folder) as a selectable model.
+    return sorted(discovered_train_log)
+
+
 def get_rife_model_names(base_dir: Path = None) -> List[str]:
     """
-    Get available RIFE model names.
+    Get locally installed RIFE model names.
     
-    Scans RIFE/train_log directory for available models or returns metadata-based list.
+    Scans supported local layouts and returns only discovered models.
     
     Args:
         base_dir: Base directory of the application (to find RIFE/train_log)
     
     Returns:
-        List of model names (e.g., "rife-v4.6", "rife-v4.17", "rife-anime")
+        List of installed model names.
     """
-    # Get models from metadata registry
-    metadata_models = [m.name for m in _get_rife_models()]
-    
-    # Try to discover from train_log directory
+    # User requested behavior: list only installed local models.
     if base_dir:
-        rife_dir = Path(base_dir) / "RIFE" / "train_log"
-        if rife_dir.exists():
-            discovered = []
-            for item in rife_dir.iterdir():
-                if item.is_dir() and not item.name.startswith("_") and not item.name.startswith("."):
-                    # Verify it has model files
-                    has_model = any(
-                        f.suffix.lower() in (".pkl", ".pth")
-                        for f in item.rglob("*")
-                        if f.is_file()
-                    )
-                    if has_model:
-                        discovered.append(item.name)
-            
-            if discovered:
-                # Merge discovered with metadata models
-                return sorted(list(set(metadata_models + discovered)))
-    
-    return sorted(metadata_models)
+        return _discover_rife_models_from_layout(Path(base_dir))
+    return []
 
 
 def get_rife_default_model() -> str:
     """Get default RIFE model identifier."""
-    return "rife-v4.17"
+    return "4.26"
 
 
 def get_rife_metadata(model_name: str) -> Optional[RifeModel]:
@@ -177,10 +251,35 @@ def get_rife_metadata(model_name: str) -> Optional[RifeModel]:
         RifeModel metadata or default metadata for unknown models
     """
     models_map = {m.name: m for m in _get_rife_models()}
-    
+    models_map_l = {m.name.lower(): m for m in _get_rife_models()}
+    text = str(model_name or "").strip()
+    text_l = text.lower()
+
     # Return exact match if found
-    if model_name in models_map:
-        return models_map[model_name]
+    if text in models_map:
+        return models_map[text]
+    if text_l in models_map_l:
+        return models_map_l[text_l]
+
+    # Alias support for folder-style names like "4.26", "v4.26", "anime".
+    candidates: List[str] = []
+    if text_l:
+        candidates.append(text_l)
+        if text_l.startswith("rife-v"):
+            tail = text_l[len("rife-v"):].strip()
+            if tail:
+                candidates.extend([tail, f"v{tail}"])
+        elif text_l.startswith("v") and len(text_l) > 1 and text_l[1].isdigit():
+            tail = text_l[1:]
+            candidates.extend([tail, f"rife-v{tail}"])
+        elif text_l[0].isdigit():
+            candidates.extend([f"v{text_l}", f"rife-v{text_l}"])
+        elif text_l in {"anime", "rife-anime"}:
+            candidates.extend(["anime", "rife-anime"])
+
+    for cand in candidates:
+        if cand in models_map_l:
+            return models_map_l[cand]
     
     # Fallback for unknown models - conservative defaults
     return RifeModel(

@@ -846,9 +846,13 @@ def seedvr2_tab(
             comparison_note = gr.HTML("", visible=False)
 
             # Face restoration toggle
+            try:
+                face_restore_default = bool(values[SEEDVR2_ORDER.index("face_restore_after_upscale")])
+            except Exception:
+                face_restore_default = bool(global_settings.get("face_global", False))
             face_restore_chk = gr.Checkbox(
                 label=" Apply Face Restoration after upscale",
-                value=global_settings.get("face_global", False)
+                value=face_restore_default
             )
 
             if not ffmpeg_available:
@@ -981,7 +985,7 @@ def seedvr2_tab(
     #  BACKWARD COMPATIBILITY:
     # Old presets automatically get new defaults via merge_config() - no migration needed!
     #
-    # Current count: len(SEEDVR2_ORDER) = 53, len(inputs_list) must also = 53
+    # Current count: len(SEEDVR2_ORDER) = 54, len(inputs_list) must also = 54
     # (includes: save_metadata, fps_override, video_backend, use_10bit)
     # ============================================================================
     
@@ -1004,7 +1008,9 @@ def seedvr2_tab(
         # ADDED v2.5.22: FFmpeg 10-bit encoding support
         video_backend, use_10bit,
         # vNext sizing
-        upscale_factor, pre_downscale_then_upscale
+        upscale_factor, pre_downscale_then_upscale,
+        # Per-run SeedVR2 toggle
+        face_restore_chk,
     ]
     
     # Validate synchronization at tab initialization (development-time check)
@@ -1425,7 +1431,7 @@ def seedvr2_tab(
     # Main action buttons with gr.Progress
     upscale_btn.click(
         fn=run_upscale_wrapper,
-        inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
+        inputs=[input_file] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
             chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, chunk_preview_video, batch_gallery, shared_state
@@ -1434,7 +1440,7 @@ def seedvr2_tab(
 
     preview_btn.click(
         fn=run_preview_wrapper,
-        inputs=[input_file, face_restore_chk] + inputs_list + [shared_state],
+        inputs=[input_file] + inputs_list + [shared_state],
         outputs=[
             status_box, log_box, progress_indicator, output_video, output_image,
             chunk_info, resume_status, chunk_progress, comparison_note, image_slider, video_comparison_html, chunk_gallery, chunk_preview_video, batch_gallery, shared_state

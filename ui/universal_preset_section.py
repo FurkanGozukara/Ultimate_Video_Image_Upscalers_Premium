@@ -483,6 +483,8 @@ def sync_tab_to_shared_state(
     if tab_name == "output":
         seed_controls["png_padding_val"] = int(tab_dict.get("png_padding", 6) or 6)
         seed_controls["png_keep_basename_val"] = bool(tab_dict.get("png_keep_basename", True))
+        seed_controls["png_sequence_enabled_val"] = bool(tab_dict.get("png_sequence_enabled", False))
+        seed_controls["overwrite_existing_batch_val"] = bool(tab_dict.get("overwrite_existing_batch", False))
         seed_controls["skip_first_frames_val"] = int(tab_dict.get("skip_first_frames", 0) or 0)
         seed_controls["load_cap_val"] = int(tab_dict.get("load_cap", 0) or 0)
         seed_controls["fps_override_val"] = float(tab_dict.get("fps_override", 0) or 0)
@@ -495,6 +497,7 @@ def sync_tab_to_shared_state(
         precision = str(tab_dict.get("global_rife_precision", "fp32") or "fp32").lower()
         seed_controls["global_rife_precision_val"] = "fp16" if precision == "fp16" else "fp32"
         seed_controls["global_rife_cuda_device_val"] = tab_dict.get("global_rife_cuda_device", "") or ""
+        seed_controls["global_rife_process_chunks_val"] = bool(tab_dict.get("global_rife_process_chunks", True))
         seed_controls["output_format_val"] = tab_dict.get("output_format", "auto") or "auto"
         seed_controls["comparison_mode_val"] = tab_dict.get("comparison_mode", "slider") or "slider"
         seed_controls["pin_reference_val"] = bool(tab_dict.get("pin_reference", False))

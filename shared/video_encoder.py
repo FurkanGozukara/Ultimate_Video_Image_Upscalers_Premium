@@ -111,8 +111,18 @@ def encode_video(
                     # Clean up and try single-pass
                     Path(passlog_path).unlink(missing_ok=True)
                     return encode_video(
-                        input_frames_path, output_video_path, fps,
-                        codec, crf, preset, False, metadata, on_progress
+                        input_frames_path=input_frames_path,
+                        output_video_path=output_video_path,
+                        fps=fps,
+                        codec=codec,
+                        crf=crf,
+                        preset=preset,
+                        pixel_format=pixel_format,
+                        audio_codec=audio_codec,
+                        audio_bitrate=audio_bitrate,
+                        two_pass=False,
+                        metadata=metadata,
+                        on_progress=on_progress,
                     )
                 
                 if on_progress:

@@ -121,6 +121,7 @@ def _normalize_rife_settings(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_output_settings(data: Dict[str, Any]) -> Dict[str, Any]:
     cfg = dict(data or {})
+    cfg["overwrite_existing_batch"] = bool(cfg.get("overwrite_existing_batch", False))
     cfg["frame_interpolation"] = bool(cfg.get("frame_interpolation", False))
     mult_raw = str(cfg.get("global_rife_multiplier", "x2") or "x2").strip().lower()
     if mult_raw.startswith("x"):
@@ -141,6 +142,7 @@ def _normalize_output_settings(data: Dict[str, Any]) -> Dict[str, Any]:
     precision = str(cfg.get("global_rife_precision", "fp32") or "fp32").lower()
     cfg["global_rife_precision"] = "fp16" if precision == "fp16" else "fp32"
     cfg["global_rife_cuda_device"] = str(cfg.get("global_rife_cuda_device", "") or "")
+    cfg["global_rife_process_chunks"] = bool(cfg.get("global_rife_process_chunks", True))
     return cfg
 
 
@@ -460,6 +462,8 @@ def update_shared_state_from_preset(
     seed_controls["output_settings"] = out_settings
     seed_controls["png_padding_val"] = out_settings.get("png_padding", 6)
     seed_controls["png_keep_basename_val"] = out_settings.get("png_keep_basename", True)
+    seed_controls["png_sequence_enabled_val"] = bool(out_settings.get("png_sequence_enabled", False))
+    seed_controls["overwrite_existing_batch_val"] = bool(out_settings.get("overwrite_existing_batch", False))
     seed_controls["skip_first_frames_val"] = out_settings.get("skip_first_frames", 0)
     seed_controls["load_cap_val"] = out_settings.get("load_cap", 0)
     seed_controls["fps_override_val"] = out_settings.get("fps_override", 0)
@@ -469,6 +473,7 @@ def update_shared_state_from_preset(
     seed_controls["global_rife_model_val"] = out_settings.get("global_rife_model", get_rife_default_model())
     seed_controls["global_rife_precision_val"] = out_settings.get("global_rife_precision", "fp32")
     seed_controls["global_rife_cuda_device_val"] = out_settings.get("global_rife_cuda_device", "")
+    seed_controls["global_rife_process_chunks_val"] = bool(out_settings.get("global_rife_process_chunks", True))
     seed_controls["output_format_val"] = out_settings.get("output_format", "auto")
     seed_controls["comparison_mode_val"] = out_settings.get("comparison_mode", "slider")
     seed_controls["pin_reference_val"] = out_settings.get("pin_reference", False)

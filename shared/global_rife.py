@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from shared.models.rife_meta import get_rife_default_model
-from shared.path_utils import collision_safe_path
+from shared.path_utils import collision_safe_dir, collision_safe_path
 
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".flv", ".wmv"}
@@ -65,6 +65,39 @@ def global_rife_enabled(seed_controls: Dict[str, Any]) -> bool:
     if "frame_interpolation_val" in seed_controls:
         return _to_bool(seed_controls.get("frame_interpolation_val"))
     return False
+
+
+def global_rife_process_chunks_enabled(seed_controls: Dict[str, Any]) -> bool:
+    """
+    Whether Global RIFE should be applied per chunk before chunk merge.
+
+    Default is True to avoid cross-scene interpolation artifacts on already
+    chunked pipelines.
+    """
+    if not isinstance(seed_controls, dict):
+        return True
+
+    output_settings = seed_controls.get("output_settings", {})
+    if isinstance(output_settings, dict) and "global_rife_process_chunks" in output_settings:
+        return _to_bool(output_settings.get("global_rife_process_chunks", True))
+
+    if "global_rife_process_chunks_val" in seed_controls:
+        return _to_bool(seed_controls.get("global_rife_process_chunks_val"))
+
+    return True
+
+
+def _as_bool(raw: Any, default: bool) -> bool:
+    if raw is None:
+        return bool(default)
+    return _to_bool(raw)
+
+
+def _as_float(raw: Any, default: float) -> float:
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
 
 
 def _build_output_path(input_video: Path, multiplier: int) -> Path:
@@ -143,8 +176,11 @@ def build_global_rife_settings(
         "start_time": "",
         "end_time": "",
         "speed_factor": 1.0,
-        "video_codec": "libx264",
-        "output_quality": 23,
+        "video_codec": output_settings.get("video_codec", "h264"),
+        "output_quality": output_settings.get("video_quality", 18),
+        "video_preset": output_settings.get("video_preset", "medium"),
+        "pixel_format": output_settings.get("pixel_format", "yuv420p"),
+        "two_pass_encoding": bool(output_settings.get("two_pass_encoding", False)),
         "concat_videos": "",
         "save_metadata": bool(seed_controls.get("save_metadata_val", True)),
         "audio_codec": str(seed_controls.get("audio_codec_val", "copy") or "copy"),
@@ -153,26 +189,12 @@ def build_global_rife_settings(
     return settings
 
 
-def maybe_apply_global_rife(
+def _run_global_rife_single(
     runner,
-    output_video_path: Optional[str],
+    outp: Path,
     seed_controls: Dict[str, Any],
     on_log: Optional[Callable[[str], None]] = None,
 ) -> Tuple[Optional[str], str]:
-    """
-    Apply global RIFE post-process to an already-produced video.
-
-    Returns:
-        (rife_output_path_or_none, message)
-    """
-    if not output_video_path:
-        return None, "Global RIFE skipped: no output video path."
-    outp = Path(output_video_path)
-    if not outp.exists() or outp.suffix.lower() not in VIDEO_EXTS:
-        return None, "Global RIFE skipped: output is not a supported video file."
-    if not global_rife_enabled(seed_controls):
-        return None, "Global RIFE disabled (enable in Output & Comparison > Global Enable RIFE)."
-
     settings = build_global_rife_settings(str(outp), seed_controls)
     mult = settings.get("fps_multiplier", "x2")
     precision = "fp16" if settings.get("fp16_mode") else "fp32"
@@ -205,3 +227,137 @@ def maybe_apply_global_rife(
     if on_log:
         on_log(f"{msg}\n")
     return None, msg
+
+
+def _run_global_rife_chunked(
+    runner,
+    outp: Path,
+    seed_controls: Dict[str, Any],
+    chunking_context: Dict[str, Any],
+    on_log: Optional[Callable[[str], None]] = None,
+) -> Tuple[Optional[str], str]:
+    try:
+        from shared.chunking import chunk_and_process
+    except Exception as e:
+        return None, f"Global RIFE chunked mode unavailable: {e}"
+
+    settings = build_global_rife_settings(str(outp), seed_controls)
+
+    auto_chunk = _as_bool(
+        chunking_context.get("auto_chunk", seed_controls.get("auto_chunk", True)),
+        True,
+    )
+    chunk_size_sec = _as_float(
+        chunking_context.get("chunk_size_sec", seed_controls.get("chunk_size_sec", 0)),
+        0.0,
+    )
+    chunk_overlap_sec = _as_float(
+        chunking_context.get("chunk_overlap_sec", seed_controls.get("chunk_overlap_sec", 0.0)),
+        0.0,
+    )
+    if auto_chunk:
+        chunk_overlap_sec = 0.0
+
+    scene_threshold = _as_float(
+        chunking_context.get("scene_threshold", seed_controls.get("scene_threshold", 27.0)),
+        27.0,
+    )
+    min_scene_len = _as_float(
+        chunking_context.get("min_scene_len", seed_controls.get("min_scene_len", 1.0)),
+        1.0,
+    )
+    frame_accurate_split = _as_bool(
+        chunking_context.get("frame_accurate_split", seed_controls.get("frame_accurate_split", True)),
+        True,
+    )
+    per_chunk_cleanup = _as_bool(
+        chunking_context.get("per_chunk_cleanup", seed_controls.get("per_chunk_cleanup", False)),
+        False,
+    )
+    settings["frame_accurate_split"] = frame_accurate_split
+
+    work_dir = collision_safe_dir(outp.parent / f"{outp.stem}_global_rife_chunks")
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    if on_log:
+        mode_label = "Auto scenes" if auto_chunk else f"Static {chunk_size_sec:g}s"
+        on_log(f"Global RIFE: chunk-safe mode ({mode_label})\n")
+
+    rc, log_blob, final_out, chunk_count = chunk_and_process(
+        runner=runner,
+        settings=settings,
+        scene_threshold=scene_threshold,
+        min_scene_len=min_scene_len,
+        work_dir=work_dir,
+        on_progress=(lambda msg: on_log(f"[Global RIFE chunked] {msg}") if on_log and msg else None),
+        chunk_seconds=0.0 if auto_chunk else chunk_size_sec,
+        chunk_overlap=chunk_overlap_sec,
+        per_chunk_cleanup=per_chunk_cleanup,
+        allow_partial=False,
+        global_output_dir=str(outp.parent),
+        resume_from_partial=False,
+        progress_tracker=None,
+        process_func=None,
+        model_type="rife",
+    )
+
+    if rc == 0 and final_out and Path(final_out).exists():
+        msg = f"Global RIFE complete (chunked, {int(chunk_count or 0)} chunks): {final_out}"
+        if on_log:
+            on_log(f"{msg}\n")
+        return str(final_out), msg
+
+    detail = ""
+    try:
+        lines = [str(x).strip() for x in str(log_blob or "").splitlines() if str(x).strip()]
+        if lines:
+            detail = lines[-1]
+    except Exception:
+        detail = ""
+
+    if detail:
+        return None, f"Global RIFE chunked failed (code {rc}): {detail}"
+    return None, f"Global RIFE chunked failed (code {rc})."
+
+
+def maybe_apply_global_rife(
+    runner,
+    output_video_path: Optional[str],
+    seed_controls: Dict[str, Any],
+    on_log: Optional[Callable[[str], None]] = None,
+    chunking_context: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[str], str]:
+    """
+    Apply global RIFE post-process to an already-produced video.
+
+    Returns:
+        (rife_output_path_or_none, message)
+    """
+    if not output_video_path:
+        return None, "Global RIFE skipped: no output video path."
+    outp = Path(output_video_path)
+    if not outp.exists() or outp.suffix.lower() not in VIDEO_EXTS:
+        return None, "Global RIFE skipped: output is not a supported video file."
+    if not global_rife_enabled(seed_controls):
+        return None, "Global RIFE disabled (enable in Output & Comparison > Global Enable RIFE)."
+
+    wants_chunked = bool((chunking_context or {}).get("enabled", False))
+    if wants_chunked and global_rife_process_chunks_enabled(seed_controls):
+        chunked_out, chunked_msg = _run_global_rife_chunked(
+            runner=runner,
+            outp=outp,
+            seed_controls=seed_controls,
+            chunking_context=chunking_context or {},
+            on_log=on_log,
+        )
+        if chunked_out and Path(chunked_out).exists():
+            return chunked_out, chunked_msg
+        if on_log:
+            on_log(f"{chunked_msg} Falling back to single-pass Global RIFE.\n")
+
+    return _run_global_rife_single(
+        runner=runner,
+        outp=outp,
+        seed_controls=seed_controls,
+        on_log=on_log,
+    )

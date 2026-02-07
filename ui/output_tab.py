@@ -16,6 +16,7 @@ from shared.models import (
     get_rife_model_names,
     scan_gan_models
 )
+from shared.models.rife_meta import get_rife_default_model
 from shared.video_codec_options import (
     get_codec_choices,
     get_pixel_format_choices,
@@ -87,12 +88,20 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
     gr.Markdown("### 🎭 Output & Comparison Settings")
     gr.Markdown("*Configure output formats, FPS handling, and comparison display options shared across all upscaler models*")
 
-    overwrite_existing_batch_default = bool(seed_controls.get("overwrite_existing_batch_val", False))
+    try:
+        overwrite_idx = OUTPUT_ORDER.index("overwrite_existing_batch")
+        overwrite_existing_batch_default = bool(values[overwrite_idx])
+    except Exception:
+        overwrite_existing_batch_default = bool(seed_controls.get("overwrite_existing_batch_val", False))
     global_rife_multiplier_value = str(values[16] or "x2").strip().lower()
     if not global_rife_multiplier_value.startswith("x"):
         global_rife_multiplier_value = f"x{global_rife_multiplier_value}"
     if global_rife_multiplier_value not in {"x2", "x4", "x8"}:
         global_rife_multiplier_value = "x2"
+    try:
+        global_rife_process_chunks_value = bool(values[OUTPUT_ORDER.index("global_rife_process_chunks")])
+    except Exception:
+        global_rife_process_chunks_value = bool(seed_controls.get("global_rife_process_chunks_val", True))
 
     # Global RIFE controls (shared across all upscaler tabs).
     with gr.Group():
@@ -109,10 +118,17 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                 value=global_rife_multiplier_value,
                 info="FPS increase applied to finalized video outputs."
             )
+            global_rife_model_value = str(values[17] or "").strip()
+            if rife_models and global_rife_model_value not in rife_models:
+                preferred_default = get_rife_default_model()
+                if preferred_default in rife_models:
+                    global_rife_model_value = preferred_default
+                else:
+                    global_rife_model_value = rife_models[0]
             global_rife_model = gr.Dropdown(
                 label="RIFE Model",
-                choices=rife_models if rife_models else ["rife-v4.6"],
-                value=values[17] if values[17] in (rife_models if rife_models else ["rife-v4.6"]) else (rife_models[0] if rife_models else "rife-v4.6"),
+                choices=rife_models,
+                value=global_rife_model_value,
                 allow_custom_value=True,
                 info="Model used for global post-upscale frame interpolation."
             )
@@ -129,6 +145,11 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
                 placeholder="Leave empty for default GPU (single GPU recommended)",
                 info="Optional single CUDA device ID for global RIFE post-process."
             )
+        global_rife_process_chunks = gr.Checkbox(
+            label="Chunk-Safe Global RIFE (process chunks before merge)",
+            value=global_rife_process_chunks_value,
+            info="Recommended. When chunking is active, applies Global RIFE to each chunk before final merge to avoid morphing around chunk/scene boundaries."
+        )
 
     with gr.Tabs():
         # Output Format Settings
@@ -500,7 +521,8 @@ def output_tab(preset_manager, shared_state: gr.State, base_dir: Path, global_se
         global_rife_precision, global_rife_cuda_device, comparison_mode, pin_reference,
         fullscreen_enabled, comparison_zoom, show_difference,
         generate_comparison_video, comparison_video_layout,  # NEW: Comparison video options
-        save_metadata, metadata_format, telemetry_enabled, log_level
+        save_metadata, metadata_format, telemetry_enabled, log_level, overwrite_existing_batch,
+        global_rife_process_chunks
     ]
 
     # UNIVERSAL PRESET EVENT WIRING

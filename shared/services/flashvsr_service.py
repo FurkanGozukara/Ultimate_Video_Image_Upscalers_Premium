@@ -34,6 +34,7 @@ from shared.oom_alert import clear_vram_oom_alert, maybe_set_vram_oom_alert, sho
 from shared.output_run_manager import prepare_single_video_run, batch_item_dir, downscaled_video_path
 from shared.ffmpeg_utils import scale_video
 from shared.global_rife import maybe_apply_global_rife
+from shared.comparison_video_service import maybe_generate_input_vs_output_comparison
 from shared.chunk_preview import build_chunk_preview_payload
 
 # Cancel event for FlashVSR+ processing
@@ -340,6 +341,9 @@ def build_flashvsr_callbacks(
             # Clear any previous VRAM OOM banner at the start of a new run.
             clear_vram_oom_alert(state)
             seed_controls = state.get("seed_controls", {})
+            output_settings = seed_controls.get("output_settings", {}) if isinstance(seed_controls, dict) else {}
+            if not isinstance(output_settings, dict):
+                output_settings = {}
             seed_controls["flashvsr_chunk_preview"] = {
                 "message": "No chunk preview available yet.",
                 "gallery": [],
@@ -379,6 +383,19 @@ def build_flashvsr_callbacks(
                 settings["audio_codec"] = seed_controls.get("audio_codec_val") or "copy"
             if seed_controls.get("audio_bitrate_val") is not None:
                 settings["audio_bitrate"] = seed_controls.get("audio_bitrate_val") or ""
+            if output_settings:
+                for key in (
+                    "video_codec",
+                    "video_quality",
+                    "video_preset",
+                    "pixel_format",
+                    "two_pass_encoding",
+                    "metadata_format",
+                    "log_level",
+                    "temporal_padding",
+                ):
+                    if output_settings.get(key) is not None:
+                        settings[key] = output_settings.get(key)
             
             # Clear cancel event
             _flashvsr_cancel_event.clear()
@@ -791,12 +808,33 @@ def build_flashvsr_callbacks(
                                 output_video_path=outp,
                                 seed_controls=seed_controls,
                                 on_log=(lambda m: logs.append(m.strip()) if m else None),
+                                chunking_context={
+                                    "enabled": bool(chunk_count_item and chunk_count_item > 0),
+                                    "auto_chunk": bool(auto_chunk),
+                                    "chunk_size_sec": float(chunk_size_sec or 0),
+                                    "chunk_overlap_sec": 0.0 if auto_chunk else float(chunk_overlap_sec or 0),
+                                    "scene_threshold": float(scene_threshold or 27.0),
+                                    "min_scene_len": float(min_scene_len or 1.0),
+                                    "frame_accurate_split": bool(frame_accurate_split),
+                                    "per_chunk_cleanup": bool(per_chunk_cleanup),
+                                },
                             )
                             if rife_out and Path(rife_out).exists():
                                 logs.append(f"✅ Global RIFE output: {Path(rife_out).name}")
                                 outp = rife_out
                             elif rife_msg:
                                 logs.append(f"⚠️ {rife_msg}")
+                            comp_vid_path, comp_vid_err = maybe_generate_input_vs_output_comparison(
+                                item_settings.get("_original_input_path_before_preprocess") or item_path,
+                                outp,
+                                seed_controls,
+                                label_output="FlashVSR+",
+                                on_progress=None,
+                            )
+                            if comp_vid_path:
+                                logs.append(f"✅ Comparison video created: {Path(comp_vid_path).name}")
+                            elif comp_vid_err:
+                                logs.append(f"⚠️ Comparison video failed: {comp_vid_err}")
 
                         if chunk_count_item:
                             last_chunk_run_dir = Path(item_settings.get("_run_dir") or item_out_dir)
@@ -1080,7 +1118,7 @@ def build_flashvsr_callbacks(
                             
                             if completed_chunks and len(completed_chunks) > 0:
                                 partial_target = collision_safe_path(temp_chunks_dir / "cancelled_flashvsr_partial.mp4")
-                                if concat_videos(completed_chunks, partial_target):
+                                if concat_videos(completed_chunks, partial_target, encode_settings=settings):
                                     final_output = Path(output_dir) / f"cancelled_flashvsr_partial_upscaled.mp4"
                                     final_output = collision_safe_path(final_output)
                                     shutil.copy2(partial_target, final_output)
@@ -1235,17 +1273,42 @@ def build_flashvsr_callbacks(
                 _cache_chunk_preview(None)
 
             # Global RIFE post-process (keep original + create *_xFPS).
-            if output_path and Path(output_path).exists() and Path(output_path).suffix.lower() in video_exts:
+            if (
+                output_path
+                and Path(output_path).exists()
+                and Path(output_path).suffix.lower() in video_exts
+            ):
                 rife_out, rife_msg = maybe_apply_global_rife(
                     runner=runner,
                     output_video_path=output_path,
                     seed_controls=seed_controls,
                     on_log=(lambda m: log_buffer.append(m.strip()) if m else None),
+                    chunking_context={
+                        "enabled": bool(chunk_count and chunk_count > 0),
+                        "auto_chunk": bool(auto_chunk),
+                        "chunk_size_sec": float(chunk_size_sec or 0),
+                        "chunk_overlap_sec": 0.0 if auto_chunk else float(chunk_overlap_sec or 0),
+                        "scene_threshold": float(scene_threshold or 27.0),
+                        "min_scene_len": float(min_scene_len or 1.0),
+                        "frame_accurate_split": bool(frame_accurate_split),
+                        "per_chunk_cleanup": bool(per_chunk_cleanup),
+                    },
                 )
                 if rife_out and Path(rife_out).exists():
                     output_path = rife_out
                 elif rife_msg:
                     log_buffer.append(rife_msg)
+                comp_vid_path, comp_vid_err = maybe_generate_input_vs_output_comparison(
+                    settings.get("_original_input_path_before_preprocess") or input_path,
+                    output_path,
+                    seed_controls,
+                    label_output="FlashVSR+",
+                    on_progress=(lambda m: log_buffer.append(m.strip()) if m else None),
+                )
+                if comp_vid_path:
+                    log_buffer.append(f"Comparison video created: {Path(comp_vid_path).name}")
+                elif comp_vid_err:
+                    log_buffer.append(f"Comparison video failed: {comp_vid_err}")
 
             # Create comparison
             html_comp, img_slider = create_unified_comparison(

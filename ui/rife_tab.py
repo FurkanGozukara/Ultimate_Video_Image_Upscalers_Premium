@@ -10,6 +10,8 @@ from typing import Dict, Any
 from shared.services.rife_service import (
     build_rife_callbacks, RIFE_ORDER
 )
+from shared.models import get_rife_model_names
+from shared.models.rife_meta import get_rife_default_model
 from ui.universal_preset_section import (
     universal_preset_section,
     wire_universal_preset_events,
@@ -189,19 +191,8 @@ def rife_tab(
 
                         def _discover_rife_models():
                             """Dynamically discover available RIFE models."""
-                            # Default fallback models
-                            default_models = ["rife-v4.6", "rife-v4.13", "rife-v4.14", "rife-v4.15", "rife-v4.16", "rife-v4.17", "rife-anime"]
-                            
-                            # Try to scan train_log for actual models
-                            rife_dir = base_dir / "RIFE" / "train_log"
-                            discovered_models = []
-                            if rife_dir.exists():
-                                for item in rife_dir.iterdir():
-                                    if item.is_dir() and not item.name.startswith("_"):
-                                        discovered_models.append(item.name)
-                            
-                            # Return discovered models if found, else default list
-                            return discovered_models if discovered_models else default_models
+                            # Only list locally installed models from supported layouts.
+                            return get_rife_model_names(base_dir)
                         
                         model_dir = gr.Textbox(
                             label="Model Directory Override",
@@ -213,7 +204,11 @@ def rife_tab(
                         _rife_model_choices = _discover_rife_models()
                         _rife_model_value = str(values[5] or "").strip()
                         if _rife_model_value not in _rife_model_choices:
-                            _rife_model_value = _rife_model_choices[0] if _rife_model_choices else None
+                            preferred_default = get_rife_default_model()
+                            if preferred_default in _rife_model_choices:
+                                _rife_model_value = preferred_default
+                            else:
+                                _rife_model_value = _rife_model_choices[0] if _rife_model_choices else None
 
                         rife_model = gr.Dropdown(
                             label="RIFE Model",

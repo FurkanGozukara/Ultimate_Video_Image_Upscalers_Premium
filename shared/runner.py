@@ -1463,7 +1463,13 @@ class Runner:
             png_keep_basename=settings.get("png_keep_basename", False),
         )
 
-        cmd = self._build_rife_cmd(cli_path, effective_input, predicted_output, settings)
+        cmd = self._build_rife_cmd(
+            cli_path,
+            effective_input,
+            predicted_output,
+            settings,
+            on_progress=on_progress,
+        )
         
         # Wrap with vcvars for C++ toolchain support (Windows only, best-effort)
         # FIXED: Pass on_progress for transparent warning surfacing
@@ -1603,12 +1609,106 @@ class Runner:
 
         return RunResult(returncode_val, output_path, "\n".join(log_lines))
 
+    def _rife_model_aliases(self, model_name: str) -> List[str]:
+        """Build tolerant aliases for model folder lookup (e.g., rife-v4.26 -> 4.26, v4.26)."""
+        raw = str(model_name or "").strip()
+        if not raw:
+            return []
+
+        aliases: List[str] = []
+
+        def _add(val: str):
+            text = str(val or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+
+        _add(raw)
+        lower = raw.lower()
+        _add(lower)
+        norm = lower.replace("_", "-")
+        _add(norm)
+
+        if norm.startswith("rife-"):
+            tail = norm[len("rife-"):].strip()
+            _add(tail)
+            if tail.startswith("v") and len(tail) > 1:
+                _add(tail[1:])
+
+        if norm.startswith("v") and len(norm) > 1 and norm[1].isdigit():
+            no_v = norm[1:]
+            _add(no_v)
+            _add(f"rife-v{no_v}")
+
+        try:
+            float(norm)
+            _add(f"v{norm}")
+            _add(f"rife-v{norm}")
+        except Exception:
+            pass
+
+        if norm in {"anime", "rife-anime"}:
+            _add("anime")
+            _add("rife-anime")
+
+        return aliases
+
+    def _resolve_rife_bundle_dir(self, candidate_dir: Path) -> Optional[Path]:
+        """
+        Resolve a model bundle dir containing flownet.pkl.
+
+        Supports:
+        - direct: <candidate>/flownet.pkl
+        - one-level nested zip: <candidate>/<inner>/flownet.pkl
+        """
+        if not candidate_dir.exists() or not candidate_dir.is_dir():
+            return None
+        if (candidate_dir / "flownet.pkl").exists():
+            return candidate_dir
+
+        children = [p for p in candidate_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+        if len(children) == 1 and (children[0] / "flownet.pkl").exists():
+            return children[0]
+        return None
+
+    def _stage_rife_bundle_to_train_log(
+        self,
+        bundle_dir: Path,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """
+        Copy selected RIFE bundle files into RIFE/train_log root so inference_video.py
+        can import `train_log.*` modules matching that model package.
+        """
+        train_log_dir = self.base_dir / "RIFE" / "train_log"
+        train_log_dir.mkdir(parents=True, exist_ok=True)
+
+        copied = 0
+        for src in bundle_dir.iterdir():
+            if not src.is_file() or src.name.startswith("."):
+                continue
+            if src.suffix.lower() not in {".py", ".pkl", ".pth"}:
+                continue
+            try:
+                shutil.copy2(src, train_log_dir / src.name)
+                copied += 1
+            except Exception:
+                continue
+
+        # Minimum requirement for RIFE load_model()
+        if not (train_log_dir / "flownet.pkl").exists():
+            return False
+
+        if on_progress:
+            on_progress(f"Using RIFE model bundle from: {bundle_dir}\n")
+        return copied > 0
+
     def _build_rife_cmd(
         self,
         cli_path: Path,
         input_path: str,
         output_path: Path,
         settings: Dict[str, Any],
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> List[str]:
         cmd: List[str] = [self._get_python_executable(), str(cli_path)]
 
@@ -1620,30 +1720,64 @@ class Runner:
         cmd.extend(["--output", str(output_path)])
 
         # Model and device settings
-        model_dir = settings.get("model_dir")
-        if not model_dir:
-            # Allow selecting a model name without requiring a manual directory override.
-            # RIFE expects --model as a directory under RIFE/, typically train_log/<model_name>.
-            model_name = str(settings.get("model", "") or "").strip()
-            if model_name:
-                # Prefer per-model folder when present.
-                named_dir = self.base_dir / "RIFE" / "train_log" / model_name
-                named_flownet = named_dir / "flownet.pkl"
-                # Fallback for legacy RIFE layout where flownet.pkl is directly in train_log/.
-                legacy_flownet = self.base_dir / "RIFE" / "train_log" / "flownet.pkl"
+        model_dir_raw = str(settings.get("model_dir") or "").strip()
+        model_dir = model_dir_raw
+        if model_dir_raw:
+            # If override points to a full model bundle, stage it to train_log so
+            # inference_video.py imports matching train_log.* python files.
+            try:
+                override_dir = Path(normalize_path(model_dir_raw))
+            except Exception:
+                override_dir = Path(model_dir_raw)
+            bundle_dir = self._resolve_rife_bundle_dir(override_dir)
+            if bundle_dir and (bundle_dir / "flownet.pkl").exists():
+                staged = self._stage_rife_bundle_to_train_log(bundle_dir, on_progress=on_progress)
+                if staged:
+                    model_dir = "train_log"
 
-                if named_flownet.exists():
-                    model_dir = f"train_log/{model_name}"
-                elif legacy_flownet.exists():
+        if not model_dir:
+            model_name = str(settings.get("model", "") or "").strip()
+            train_log_root = self.base_dir / "RIFE" / "train_log"
+            models_root = self.base_dir / "RIFE" / "models"
+            aliases = self._rife_model_aliases(model_name)
+
+            # Explicit legacy selection token(s)
+            legacy_tokens = {"legacy-train-log", "legacy", "train_log", "train-log"}
+            if any(a.lower() in legacy_tokens for a in aliases):
+                if (train_log_root / "flownet.pkl").exists():
                     model_dir = "train_log"
-                else:
-                    # Keep old behavior as a last resort (lets RIFE emit its own error details).
-                    model_dir = f"train_log/{model_name}"
-            else:
-                # No model name selected: try legacy default location.
-                legacy_flownet = self.base_dir / "RIFE" / "train_log" / "flownet.pkl"
-                if legacy_flownet.exists():
-                    model_dir = "train_log"
+
+            # Preferred layout: RIFE/models/<model>/... (bundle contains .py + flownet.pkl)
+            if not model_dir:
+                for alias in aliases:
+                    bundle_parent = models_root / alias
+                    bundle_dir = self._resolve_rife_bundle_dir(bundle_parent)
+                    if bundle_dir and (bundle_dir / "flownet.pkl").exists():
+                        staged = self._stage_rife_bundle_to_train_log(bundle_dir, on_progress=on_progress)
+                        if staged:
+                            model_dir = "train_log"
+                            break
+
+            # Legacy per-model layout: RIFE/train_log/<model>/flownet.pkl
+            if not model_dir:
+                for alias in aliases:
+                    named_dir = train_log_root / alias
+                    named_bundle = self._resolve_rife_bundle_dir(named_dir)
+                    if not named_bundle or not (named_bundle / "flownet.pkl").exists():
+                        continue
+                    if named_bundle == named_dir:
+                        model_dir = f"train_log/{alias}"
+                    else:
+                        model_dir = str(named_bundle)
+                    break
+
+            # Legacy root layout: RIFE/train_log/flownet.pkl
+            if not model_dir and (train_log_root / "flownet.pkl").exists():
+                model_dir = "train_log"
+
+            # Last-resort compatibility fallback
+            if not model_dir and model_name:
+                model_dir = f"train_log/{model_name}"
         if model_dir:
             cmd.extend(["--model", str(model_dir)])
         if settings.get("fp16_mode"):

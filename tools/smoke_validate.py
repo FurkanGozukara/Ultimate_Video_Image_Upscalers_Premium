@@ -8,17 +8,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from shared.batch_processor import BatchJob, BatchProcessor
-from shared.universal_preset import update_shared_state_from_preset
+from shared.universal_preset import (
+    TAB_CONFIGS,
+    dict_to_values,
+    get_all_defaults,
+    update_shared_state_from_preset,
+    values_to_dict,
+)
 
 
 def _check_universal_preset_caches() -> None:
     state = {"seed_controls": {}}
     preset = {
         "resolution": {"upscale_factor": 3.0, "max_target_resolution": 1024},
-        "output": {"telemetry_enabled": False},
+        "output": {"telemetry_enabled": False, "overwrite_existing_batch": True},
     }
     update_shared_state_from_preset(state, preset, preset_name="smoke")
     assert state["seed_controls"]["telemetry_enabled_val"] is False
+    assert state["seed_controls"]["overwrite_existing_batch_val"] is True
     assert float(state["seed_controls"]["upscale_factor_val"]) == 3.0
     assert int(state["seed_controls"]["max_resolution_val"]) == 1024
     assert bool(state["seed_controls"].get("auto_detect_scenes", True)) is True
@@ -32,9 +39,12 @@ def _check_universal_preset_caches() -> None:
     out_defaults = output_defaults(["default"])
     out_vals = [out_defaults[k] for k in OUTPUT_ORDER]
     out_vals[OUTPUT_ORDER.index("telemetry_enabled")] = False
+    out_vals[OUTPUT_ORDER.index("overwrite_existing_batch")] = True
     state2 = {"seed_controls": {}}
     sync_tab_to_shared_state("output", out_vals, state2)
     assert state2["seed_controls"]["telemetry_enabled_val"] is False
+    assert state2["seed_controls"]["overwrite_existing_batch_val"] is True
+    assert state2["seed_controls"]["png_sequence_enabled_val"] is False
 
     res_defaults = resolution_defaults(["default"])
     assert bool(res_defaults.get("auto_chunk", True)) is True
@@ -77,6 +87,23 @@ def _check_universal_preset_caches() -> None:
     assert float(state2["seed_controls"]["chunk_overlap_sec"]) == 1.5
 
 
+def _check_universal_schema_roundtrip() -> None:
+    defaults = get_all_defaults(ROOT)
+    for tab_name, cfg in TAB_CONFIGS.items():
+        order = cfg.get("order", [])
+        tab_defaults = defaults.get(tab_name, {})
+        assert isinstance(order, list) and len(order) > 0, f"{tab_name}: empty ORDER"
+        assert isinstance(tab_defaults, dict), f"{tab_name}: defaults missing dict"
+        for key in order:
+            assert key in tab_defaults, f"{tab_name}: missing default key '{key}'"
+
+        vals = dict_to_values(tab_name, tab_defaults, tab_defaults)
+        assert len(vals) == len(order), f"{tab_name}: values/order length mismatch"
+        back = values_to_dict(tab_name, vals)
+        for key in order:
+            assert key in back, f"{tab_name}: roundtrip missing key '{key}'"
+
+
 def _check_batch_processor_api() -> None:
     jobs = [BatchJob(input_path="a"), BatchJob(input_path="b")]
     bp = BatchProcessor(telemetry_enabled=False)
@@ -93,6 +120,7 @@ def _check_batch_processor_api() -> None:
 
 def main() -> None:
     _check_universal_preset_caches()
+    _check_universal_schema_roundtrip()
     _check_batch_processor_api()
     print("SMOKE: validation passed")
 
